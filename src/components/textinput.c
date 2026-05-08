@@ -19,22 +19,63 @@ static int is_word_char(const TuiTextInput *input, char c)
     return c != ' ' && c != '\t'; /* fallback when word_chars not set */
 }
 
-/* Adjust horizontal scroll offset so cursor stays visible */
+/* Display width of the prompt rendered on a given logical line:
+ * line 0 uses the main prompt; later lines use the continuation prompt or
+ * fall back to spaces of width prompt_len (matches render_continuation_prompt). */
+static int line_prompt_width(const TuiTextInput *input, int line_index)
+{
+    if (!input->show_prompt || !input->prompt || input->prompt_len <= 0)
+        return 0;
+    if (line_index == 0)
+        return input->prompt_len;
+    if (input->continuation_prompt && input->continuation_prompt_len > 0)
+        return input->continuation_prompt_len;
+    return input->prompt_len;
+}
+
+/* Byte range of the logical line containing the cursor */
+static void cursor_line_bounds(const TuiTextInput *input, size_t *out_start,
+                               size_t *out_end)
+{
+    size_t start = 0;
+    for (size_t i = input->cursor_byte; i > 0; i--) {
+        if (input->text[i - 1] == '\n') {
+            start = i;
+            break;
+        }
+    }
+    size_t end = input->text_len;
+    for (size_t i = input->cursor_byte; i < input->text_len; i++) {
+        if (input->text[i] == '\n') {
+            end = i;
+            break;
+        }
+    }
+    *out_start = start;
+    *out_end = end;
+}
+
+/* Adjust horizontal scroll offset so cursor stays visible on its line.
+ * offset/offset_right are codepoint indices within the cursor's logical line. */
 static void handle_overflow(TuiTextInput *input)
 {
-    int prompt_width =
-        (input->show_prompt && input->prompt) ? input->prompt_len : 0;
+    size_t line_start, line_end;
+    cursor_line_bounds(input, &line_start, &line_end);
+    size_t line_bytes = line_end - line_start;
+
+    int prompt_width = line_prompt_width(input, (int)input->cursor_row);
     int content_width = input->terminal_width - prompt_width;
+
+    int total = tui_utf8_codepoint_count(input->text + line_start, line_bytes);
 
     if (content_width <= 0 || input->terminal_width == 0) {
         input->offset = 0;
-        int total = tui_utf8_codepoint_count(input->text, input->text_len);
         input->offset_right = total;
         return;
     }
 
-    int total = tui_utf8_codepoint_count(input->text, input->text_len);
-    int cursor_cp = tui_utf8_cp_index(input->text, input->cursor_byte);
+    int cursor_cp = tui_utf8_cp_index(input->text + line_start,
+                                      input->cursor_byte - line_start);
 
     if (total <= content_width) {
         /* Everything fits */
@@ -80,9 +121,8 @@ static void recalculate_cursor_position(TuiTextInput *input)
     }
     input->cursor_col = col;
 
-    /* Adjust horizontal scroll for single-line overflow */
-    if (!input->multiline)
-        handle_overflow(input);
+    /* Adjust horizontal scroll so cursor stays visible (single- and multi-line) */
+    handle_overflow(input);
 }
 
 /* Ensure text buffer has enough capacity */
@@ -1123,6 +1163,45 @@ static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
         dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
 }
 
+/* Compute byte range to render for a logical line.
+ * Cursor's line: applies horizontal scroll window (offset/offset_right).
+ * Other lines: clipped to fit within terminal_width minus the line's prompt. */
+static void get_line_render_range(const TuiTextInput *input, size_t line_start,
+                                  size_t line_end, int line_index,
+                                  size_t *out_start, size_t *out_end)
+{
+    size_t line_bytes = line_end - line_start;
+
+    if (line_index == (int)input->cursor_row && input->terminal_width > 0 &&
+        input->offset_right > input->offset) {
+        size_t s = tui_utf8_byte_offset(input->text + line_start, line_bytes,
+                                        input->offset);
+        size_t e = tui_utf8_byte_offset(input->text + line_start, line_bytes,
+                                        input->offset_right);
+        *out_start = line_start + s;
+        *out_end = line_start + e;
+        return;
+    }
+
+    if (input->terminal_width > 0) {
+        int prompt_width = line_prompt_width(input, line_index);
+        int content_width = input->terminal_width - prompt_width;
+        if (content_width <= 0) {
+            *out_start = line_start;
+            *out_end = line_start;
+        } else {
+            size_t e = tui_utf8_byte_offset(input->text + line_start, line_bytes,
+                                            content_width);
+            *out_start = line_start;
+            *out_end = line_start + e;
+        }
+        return;
+    }
+
+    *out_start = line_start;
+    *out_end = line_end;
+}
+
 /* Render prompt and visible text slice to output buffer */
 static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
 {
@@ -1276,9 +1355,12 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                     render_continuation_prompt(input, out);
                 }
 
-                /* Line content (selection-aware) */
-                if (i > line_start)
-                    render_text_range(input, out, line_start, i);
+                /* Line content (selection-aware), with scroll window / clip */
+                size_t r_start, r_end;
+                get_line_render_range(input, line_start, i, current_line,
+                                      &r_start, &r_end);
+                if (r_end > r_start)
+                    render_text_range(input, out, r_start, r_end);
 
                 current_line++;
                 line_start = i + 1;
@@ -1297,8 +1379,9 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
         /* Position cursor */
         if (input->focused) {
             int prompt_width =
-                (input->show_prompt && input->prompt) ? input->prompt_len : 0;
-            int cursor_col = (int)input->cursor_col + prompt_width + 1; /* 1-indexed */
+                line_prompt_width(input, (int)input->cursor_row);
+            int cursor_col = (int)input->cursor_col - input->offset +
+                             prompt_width + 1; /* 1-indexed */
             int cursor_row = content_start_row + (int)input->cursor_row;
             snprintf(pos_buf, sizeof(pos_buf), CSI "%d;%dH", cursor_row,
                      cursor_col);
@@ -1315,13 +1398,17 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                 dynamic_buffer_append_str(out, SGR_RESET);
         }
 
-        /* Output text content per line (selection-aware) */
+        /* Output text content per line (selection-aware), with scroll window / clip */
         if (input->text_len > 0) {
+            int current_line = 0;
             size_t line_start = 0;
             for (size_t i = 0; i <= input->text_len; i++) {
                 if (i == input->text_len || input->text[i] == '\n') {
-                    if (i > line_start)
-                        render_text_range(input, out, line_start, i);
+                    size_t r_start, r_end;
+                    get_line_render_range(input, line_start, i, current_line,
+                                          &r_start, &r_end);
+                    if (r_end > r_start)
+                        render_text_range(input, out, r_start, r_end);
                     if (i < input->text_len) {
                         /* Found a real newline — emit row break + continuation */
                         dynamic_buffer_append_str(out, "\r\n");
@@ -1330,6 +1417,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                             render_continuation_prompt(input, out);
                         }
                     }
+                    current_line++;
                     line_start = i + 1;
                 }
             }
@@ -1607,8 +1695,10 @@ void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color)
 /* Set terminal width for divider rendering */
 void tui_textinput_set_terminal_width(TuiTextInput *input, int width)
 {
-    if (input)
+    if (input) {
         input->terminal_width = width;
+        recalculate_cursor_position(input);
+    }
 }
 
 /* Set terminal row for absolute positioning */

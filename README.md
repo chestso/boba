@@ -547,6 +547,61 @@ pkg-config to get the correct flags:
 gcc -o myapp myapp.c $(pkg-config --cflags --libs bloom-boba)
 ```
 
+## Testing
+
+bloom-boba ships two test suites.
+
+### Unit tests — `make check`
+
+Fast, hermetic state-based tests under `tests/`. Each test binary links `libbloom-boba.a`, constructs a component directly, drives it with messages, and asserts on internal state.
+
+```bash
+cd build && make check
+```
+
+### Terminal end-to-end tests — `make check-tmux`
+
+Purpose-built mini-apps that run inside a real `tmux` session. A bash driver sends keystrokes with `tmux send-keys`, captures the visible grid via `tmux capture-pane -p`, and inspects the cursor with `tmux display-message -p '#{cursor_x}'`. This catches rendering regressions that unit tests miss — e.g., a malformed CSI sequence, off-by-one cursor positioning, or content overflowing the visible area.
+
+```bash
+cd build && make check-tmux
+```
+
+`tmux` must be on `PATH` at configure time. If absent, the target prints a SKIP line and exits 0.
+
+#### Layout
+
+```
+tests/
+├── apps/                       # mini-apps (one per scenario)
+│   └── tmux_textinput_multi.c
+└── tmux/
+    ├── lib.sh                  # bash helpers
+    └── scroll_multiline.sh
+```
+
+A mini-app is a few dozen lines of C that wraps a component, handles `TUI_MSG_WINDOW_SIZE` to call the relevant `set_terminal_width`, and calls `tui_runtime_run()`. No quit key is needed — the driver tears down with `tmux kill-session`.
+
+`lib.sh` exposes `tmux_start`, `tmux_send`, `tmux_capture`, `tmux_cursor`, `tmux_kill`, `tmux_wait_for`, `dump_pane`, `assert_pane_contains`, `assert_pane_lacks`, and `assert_cursor_x_lt`.
+
+#### Adding a new tmux test
+
+1. Write `tests/apps/foo.c`.
+2. Register the binary under `if HAVE_TMUX` in `tests/Makefile.am`:
+
+   ```makefile
+   check_PROGRAMS += apps/foo
+   apps_foo_SOURCES = apps/foo.c
+   ```
+
+3. Write `tests/tmux/foo.sh`. Source `lib.sh`, launch the mini-app with `tmux_start`, drive it, assert.
+4. Append the script to `TMUX_TESTS` in `tests/Makefile.am`.
+
+Two patterns worth reusing from `scroll_multiline.sh`:
+
+- **Sentinel sync**: append a unique character to a `send-keys` batch, then `tmux_wait_for` it. Confirms every keystroke was processed before assertions run.
+- **Cleanup trap**: `trap 'tmux_kill "$SESSION"' EXIT` always fires, even on assertion failure. `tmux_start` enables `remain-on-exit` so a crashed mini-app leaves a debuggable pane — pair with `dump_pane` in failure paths.
+
 ## Contributing
 
 See [AUTHORS](AUTHORS) for the list of contributors.

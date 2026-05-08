@@ -639,6 +639,90 @@ static void test_view_renders_selection_with_reverse(void)
     tui_textinput_free(input);
 }
 
+/* ---------- horizontal scroll / overflow ---------- */
+
+static void test_overflow_single_line(void)
+{
+    TuiTextInputConfig cfg = { 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_show_prompt(input, 0);
+    tui_textinput_set_terminal_width(input, 20);
+
+    for (int i = 0; i < 30; i++)
+        send_char(input, 'a' + (i % 26));
+
+    /* Window must have shifted right and stay within content_width */
+    assert(input->offset > 0);
+    assert(input->offset_right - input->offset <= 20);
+    assert(input->offset_right >= 30); /* cursor visible at right edge */
+
+    tui_textinput_free(input);
+}
+
+static void test_overflow_multiline_cursor_line(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_show_prompt(input, 0);
+    tui_textinput_set_terminal_width(input, 20);
+
+    /* Short first line, then a long second line */
+    send_string(input, "short");
+    send_key(input, TUI_KEY_ENTER);
+    for (int i = 0; i < 40; i++)
+        send_char(input, 'a' + (i % 26));
+
+    /* Offsets reflect cursor's logical line (the long second line),
+     * not a global codepoint index across the whole buffer. */
+    assert(input->cursor_row == 1);
+    assert(input->offset > 0);
+    assert(input->offset_right - input->offset <= 20);
+    /* If offsets were global, offset_right would be > 40 (5 + newline + 40);
+     * scoped to the second line it should be <= 40. */
+    assert(input->offset_right <= 40);
+
+    tui_textinput_free(input);
+}
+
+static void test_overflow_resize_recomputes(void)
+{
+    TuiTextInputConfig cfg = { 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_show_prompt(input, 0);
+    tui_textinput_set_terminal_width(input, 80);
+
+    for (int i = 0; i < 50; i++)
+        send_char(input, 'a' + (i % 26));
+
+    /* All 50 chars fit within 80 cols → no scroll yet */
+    assert(input->offset == 0);
+
+    /* Resize narrower without further input — offsets must update */
+    tui_textinput_set_terminal_width(input, 20);
+    assert(input->offset > 0);
+    assert(input->offset_right - input->offset <= 20);
+
+    tui_textinput_free(input);
+}
+
+static void test_overflow_cursor_left_scrolls_back(void)
+{
+    TuiTextInputConfig cfg = { 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_show_prompt(input, 0);
+    tui_textinput_set_terminal_width(input, 20);
+
+    for (int i = 0; i < 40; i++)
+        send_char(input, 'a' + (i % 26));
+    assert(input->offset > 0);
+
+    /* Move cursor to start of line — offset must reset to 0 */
+    run_update(input, tui_msg_key(TUI_KEY_NONE, 'a', TUI_MOD_CTRL));
+    assert(input->offset == 0);
+
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -681,6 +765,11 @@ int main(void)
     RUN_TEST(test_edit_clears_mark);
     RUN_TEST(test_escape_clears_mark);
     RUN_TEST(test_view_renders_selection_with_reverse);
+
+    RUN_TEST(test_overflow_single_line);
+    RUN_TEST(test_overflow_multiline_cursor_line);
+    RUN_TEST(test_overflow_resize_recomputes);
+    RUN_TEST(test_overflow_cursor_left_scrolls_back);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

@@ -27,6 +27,10 @@ AC_PROG_CC
 AC_PROG_RANLIB
 AM_PROG_AR
 
+dnl Optional: tmux for end-to-end terminal tests (`make check-tmux`)
+AC_CHECK_PROG([TMUX], [tmux], [yes], [no])
+AM_CONDITIONAL([HAVE_TMUX], [test "x$TMUX" = "xyes"])
+
 dnl Debug option
 AC_ARG_ENABLE([debug],
   [AS_HELP_STRING([--enable-debug],
