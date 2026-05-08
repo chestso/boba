@@ -227,4 +227,28 @@ void ansi_format_bg_color_rgb(char *buf, size_t size, int r, int g, int b);
  */
 void ansi_set_window_title(char *buf, size_t size, const char *title);
 
+/* Format OSC 52 clipboard set sequence:
+ *   ESC ] 52 ; c ; <base64 of text> ESC \
+ *
+ * Parameters:
+ *   buf:    Output buffer
+ *   size:   Size of output buffer (must be >= ANSI_OSC52_BUFSIZE(text_len))
+ *   text:   Bytes to copy (binary-safe; not assumed null-terminated)
+ *   text_len: Number of bytes in text
+ *
+ * Returns: number of bytes written to buf (excluding any null terminator,
+ *          which is appended for safety if there is room), or 0 on failure
+ *          (NULL buf, buffer too small).
+ *
+ * Note: terminals that do not implement OSC 52 silently discard the bytes.
+ * Some terminals (notably VTE-based: GNOME Terminal, XFCE, Terminator) do
+ * not support OSC 52; xterm has it disabled by default. */
+size_t ansi_format_osc52(char *buf, size_t size, const char *text,
+                         size_t text_len);
+
+/* Required output buffer size for ansi_format_osc52, given text_len bytes.
+ * Includes ESC ] 52 ; c ; (7), base64 (4*((n+2)/3)), ESC \ (2), and a
+ * trailing null. */
+#define ANSI_OSC52_BUFSIZE(text_len) (7 + 4 * (((text_len) + 2) / 3) + 2 + 1)
+
 #endif /* BLOOM_BOBA_ANSI_SEQUENCES_H */

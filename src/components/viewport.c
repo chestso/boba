@@ -9,8 +9,10 @@
  */
 
 #include <bloom-boba/ansi_sequences.h>
+#include <bloom-boba/cmd.h>
 #include <bloom-boba/components/viewport.h>
 #include <bloom-boba/unicode.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,12 +23,20 @@
 #define SGR_STATE_BUF_SIZE    256
 
 /* Emit up to max_cols display columns from text[*pos..len) into out.
+ *
+ * If sel_end > sel_start, applies SGR_REVERSE to display columns in the
+ * range [sel_start, sel_end) (local 0-indexed). The selection range is in
+ * the same display-column space as the returned column count.
+ *
  * Returns number of display columns emitted. */
 static int emit_cols(const char *text, size_t len, size_t *pos, int max_cols,
-                     DynamicBuffer *out)
+                     DynamicBuffer *out, int sel_start, int sel_end)
 {
     int col = 0;
     int in_escape = 0;
+    int reversed = 0;
+    int has_sel = sel_end > sel_start;
+
     for (; *pos < len; (*pos)++) {
         unsigned char ch = (unsigned char)text[*pos];
         if (in_escape) {
@@ -45,6 +55,18 @@ static int emit_cols(const char *text, size_t len, size_t *pos, int max_cols,
             int w = tui_codepoint_width(cp);
             if (w > 0 && col + w > max_cols)
                 break;
+
+            if (has_sel) {
+                int in_sel = (col >= sel_start && col < sel_end);
+                if (in_sel && !reversed) {
+                    dynamic_buffer_append_str(out, SGR_REVERSE);
+                    reversed = 1;
+                } else if (!in_sel && reversed) {
+                    dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
+                    reversed = 0;
+                }
+            }
+
             col += w;
             dynamic_buffer_append(out, &text[*pos], clen);
             *pos += clen - 1; /* -1 because loop increments */
@@ -52,6 +74,10 @@ static int emit_cols(const char *text, size_t len, size_t *pos, int max_cols,
             dynamic_buffer_append(out, &text[*pos], 1);
         }
     }
+
+    if (reversed)
+        dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
+
     return col;
 }
 
@@ -199,10 +225,13 @@ static size_t find_content_line_for_visual(const TuiViewport *vp,
 }
 
 /* Render the sub_line-th visual row of a content line to the output buffer.
- * Handles ANSI state replay for wrapped continuation rows. */
+ * Handles ANSI state replay for wrapped continuation rows.
+ *
+ * If sel_end > sel_start, the [sel_start, sel_end) range (in local display
+ * columns within this row) is rendered with SGR_REVERSE. */
 static void render_line_segment(const TuiViewportLine *line, int viewport_width,
                                 int sub_line, int wrap_mode,
-                                DynamicBuffer *out)
+                                DynamicBuffer *out, int sel_start, int sel_end)
 {
     const char *text = line->text;
     size_t len = line->len;
@@ -210,7 +239,7 @@ static void render_line_segment(const TuiViewportLine *line, int viewport_width,
     if (!wrap_mode || sub_line == 0) {
         /* Clip mode or first visual row: emit up to viewport_width display cols */
         size_t pos = 0;
-        emit_cols(text, len, &pos, viewport_width, out);
+        emit_cols(text, len, &pos, viewport_width, out, sel_start, sel_end);
         /* Reset at end to prevent color bleeding */
         dynamic_buffer_append_str(out, SGR_RESET);
     } else {
@@ -274,7 +303,7 @@ static void render_line_segment(const TuiViewportLine *line, int viewport_width,
         }
 
         /* Phase 2: emit next viewport_width display columns */
-        emit_cols(text, len, &i, viewport_width, out);
+        emit_cols(text, len, &i, viewport_width, out, sel_start, sel_end);
         /* Reset at end to prevent color bleeding */
         dynamic_buffer_append_str(out, SGR_RESET);
     }
@@ -526,6 +555,352 @@ size_t tui_viewport_line_count(const TuiViewport *vp)
     return vp ? vp->line_count : 0;
 }
 
+/* Set focus state */
+void tui_viewport_set_focused(TuiViewport *vp, int focused)
+{
+    if (vp)
+        vp->focused = focused ? 1 : 0;
+}
+
+/* --- Copy-mode helpers --- */
+
+/* Display width (in columns) of the visual line at index v. Wrapped lines
+ * report viewport_width for non-final rows and the remainder for the final
+ * row; non-wrapping (clip-mode) lines report the full content width capped
+ * to viewport_width. */
+static int visual_line_width(const TuiViewport *vp, size_t v)
+{
+    if (vp->line_count == 0)
+        return 0;
+    int sub_line = 0;
+    size_t cidx = find_content_line_for_visual(vp, v, &sub_line);
+    if (cidx >= vp->line_count)
+        return 0;
+    const TuiViewportLine *line = &vp->lines[cidx];
+    if (!vp->wrap_mode || line->visual_lines <= 1) {
+        int w = (int)line->display_width;
+        if (w > vp->width)
+            w = vp->width;
+        return w;
+    }
+    if (sub_line < line->visual_lines - 1)
+        return vp->width;
+    int rem = (int)line->display_width - sub_line * vp->width;
+    if (rem < 0)
+        rem = 0;
+    return rem;
+}
+
+/* Clamp cursor to valid scrollback + visual-line-width bounds. */
+static void clamp_cursor(TuiViewport *vp)
+{
+    if (vp->total_visual_lines == 0) {
+        vp->cursor_visual_line = 0;
+        vp->cursor_col = 0;
+        return;
+    }
+    if (vp->cursor_visual_line >= vp->total_visual_lines)
+        vp->cursor_visual_line = vp->total_visual_lines - 1;
+
+    int w = visual_line_width(vp, vp->cursor_visual_line);
+    if ((int)vp->cursor_col > w)
+        vp->cursor_col = (size_t)w;
+}
+
+/* Adjust y_offset so the cursor sits inside the visible viewport. */
+static void scroll_to_cursor(TuiViewport *vp)
+{
+    if (!vp->copy_mode || vp->total_visual_lines == 0)
+        return;
+    if (vp->cursor_visual_line < vp->y_offset) {
+        vp->y_offset = vp->cursor_visual_line;
+    } else if (vp->cursor_visual_line >= vp->y_offset + (size_t)vp->height) {
+        vp->y_offset = vp->cursor_visual_line - (size_t)vp->height + 1;
+    }
+    clamp_y_offset(vp);
+}
+
+/* Move cursor by N visual lines (signed). */
+static void cursor_move_lines(TuiViewport *vp, int delta)
+{
+    if (vp->total_visual_lines == 0)
+        return;
+    if (delta < 0) {
+        size_t n = (size_t)(-delta);
+        vp->cursor_visual_line =
+            (vp->cursor_visual_line > n) ? vp->cursor_visual_line - n : 0;
+    } else {
+        size_t n = (size_t)delta;
+        size_t maxv = vp->total_visual_lines - 1;
+        vp->cursor_visual_line = (vp->cursor_visual_line + n > maxv)
+                                     ? maxv
+                                     : vp->cursor_visual_line + n;
+    }
+    clamp_cursor(vp);
+    scroll_to_cursor(vp);
+}
+
+/* Move cursor by N columns within the current visual line (signed). */
+static void cursor_move_cols(TuiViewport *vp, int delta)
+{
+    int w = visual_line_width(vp, vp->cursor_visual_line);
+    if (delta < 0) {
+        size_t n = (size_t)(-delta);
+        vp->cursor_col = (vp->cursor_col > n) ? vp->cursor_col - n : 0;
+    } else {
+        size_t target = vp->cursor_col + (size_t)delta;
+        if ((int)target > w)
+            target = (size_t)w;
+        vp->cursor_col = target;
+    }
+}
+
+/* Place cursor at the top-left of the currently visible region. */
+void tui_viewport_enter_copy_mode(TuiViewport *vp)
+{
+    if (!vp)
+        return;
+    vp->copy_mode = 1;
+    vp->has_mark = 0;
+    vp->cursor_visual_line = vp->y_offset;
+    vp->cursor_col = 0;
+    clamp_cursor(vp);
+}
+
+void tui_viewport_exit_copy_mode(TuiViewport *vp)
+{
+    if (!vp)
+        return;
+    vp->copy_mode = 0;
+    vp->has_mark = 0;
+    vp->mouse_dragging = 0;
+}
+
+int tui_viewport_contains(const TuiViewport *vp, int row, int col)
+{
+    if (!vp)
+        return 0;
+    int local_row = row - vp->render_row;
+    int local_col = col - vp->render_col;
+    return local_row >= 0 && local_row < vp->height && local_col >= 0 &&
+           local_col < vp->width;
+}
+
+/* --- Selection extraction --- */
+
+/* Return the byte offset in `text` where display column `target` begins.
+ * ANSI CSI sequences are skipped (count as zero width). If target is past
+ * the end of the displayable text, returns `len`. */
+static size_t byte_offset_for_display_col(const char *text, size_t len,
+                                          int target)
+{
+    if (target <= 0)
+        return 0;
+    size_t i = 0;
+    int col = 0;
+    int in_escape = 0;
+    while (i < len) {
+        unsigned char ch = (unsigned char)text[i];
+        if (in_escape) {
+            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))
+                in_escape = 0;
+            i++;
+        } else if (ch == '\033' && i + 1 < len && text[i + 1] == '[') {
+            in_escape = 1;
+            i++; /* ESC */
+        } else if (ch >= 0x20) {
+            int clen = tui_utf8_char_len(&text[i]);
+            if (i + clen > len)
+                clen = (int)(len - i);
+            uint32_t cp = tui_utf8_decode(&text[i], clen);
+            int w = tui_codepoint_width(cp);
+            if (col + w > target)
+                break;
+            col += w;
+            i += clen;
+        } else {
+            i++;
+        }
+    }
+    return i;
+}
+
+/* Append text[start..end), with ANSI CSI sequences stripped, to `out`. */
+static void append_stripped(DynamicBuffer *out, const char *text, size_t start,
+                            size_t end)
+{
+    int in_escape = 0;
+    for (size_t i = start; i < end; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (in_escape) {
+            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))
+                in_escape = 0;
+        } else if (ch == '\033' && i + 1 < end && text[i + 1] == '[') {
+            in_escape = 1;
+        } else {
+            dynamic_buffer_append(out, &text[i], 1);
+        }
+    }
+}
+
+void tui_viewport_extract_selection(const TuiViewport *vp, char **out_text,
+                                    size_t *out_len)
+{
+    if (out_text)
+        *out_text = NULL;
+    if (out_len)
+        *out_len = 0;
+    if (!vp || !out_text || !out_len)
+        return;
+    if (vp->line_count == 0)
+        return;
+
+    /* Determine selection range in (visual_line, col) coords. */
+    size_t start_v, end_v;
+    int start_col, end_col;
+    int whole_content_line = 0;
+
+    if (vp->has_mark) {
+        int cursor_first = (vp->cursor_visual_line < vp->mark_visual_line) ||
+                           (vp->cursor_visual_line == vp->mark_visual_line &&
+                            vp->cursor_col <= vp->mark_col);
+        if (cursor_first) {
+            start_v = vp->cursor_visual_line;
+            start_col = (int)vp->cursor_col;
+            end_v = vp->mark_visual_line;
+            end_col = (int)vp->mark_col + 1;
+        } else {
+            start_v = vp->mark_visual_line;
+            start_col = (int)vp->mark_col;
+            end_v = vp->cursor_visual_line;
+            end_col = (int)vp->cursor_col + 1;
+        }
+    } else {
+        /* No mark: copy the entire content line containing the cursor. */
+        start_v = end_v = vp->cursor_visual_line;
+        start_col = 0;
+        end_col = INT_MAX;
+        whole_content_line = 1;
+    }
+
+    /* Translate (visual_line, col) -> (content_idx, display_col). */
+    int start_sub = 0, end_sub = 0;
+    size_t start_cidx = find_content_line_for_visual(vp, start_v, &start_sub);
+    size_t end_cidx = find_content_line_for_visual(vp, end_v, &end_sub);
+
+    int start_disp = start_sub * vp->width + start_col;
+    int end_disp;
+    if (end_col == INT_MAX) {
+        end_disp = INT_MAX;
+    } else {
+        end_disp = end_sub * vp->width + end_col;
+    }
+
+    if (whole_content_line) {
+        start_disp = 0;
+        end_disp = INT_MAX;
+    }
+
+    DynamicBuffer *buf = dynamic_buffer_create(64);
+    if (!buf)
+        return;
+
+    for (size_t cidx = start_cidx; cidx <= end_cidx && cidx < vp->line_count;
+         cidx++) {
+        const TuiViewportLine *line = &vp->lines[cidx];
+        int from_disp = (cidx == start_cidx) ? start_disp : 0;
+        int to_disp = (cidx == end_cidx) ? end_disp : INT_MAX;
+
+        size_t from_byte = byte_offset_for_display_col(line->text, line->len,
+                                                       from_disp);
+        size_t to_byte;
+        if (to_disp == INT_MAX || to_disp >= (int)line->display_width) {
+            to_byte = line->len;
+        } else {
+            to_byte =
+                byte_offset_for_display_col(line->text, line->len, to_disp);
+        }
+
+        if (cidx > start_cidx)
+            dynamic_buffer_append(buf, "\n", 1);
+        if (to_byte > from_byte)
+            append_stripped(buf, line->text, from_byte, to_byte);
+    }
+
+    size_t blen = dynamic_buffer_len(buf);
+    if (blen > 0) {
+        char *p = (char *)malloc(blen);
+        if (p) {
+            memcpy(p, dynamic_buffer_data(buf), blen);
+            *out_text = p;
+            *out_len = blen;
+        }
+    }
+    dynamic_buffer_destroy(buf);
+}
+
+/* Compute the local (per-row) selection range for the visual line at index
+ * `v` (in scrollback coords). Sets *out_start = *out_end = 0 if no selection
+ * applies to this row. The result is in local display-column space
+ * (0-indexed within the row). */
+static void compute_row_selection(const TuiViewport *vp, size_t v,
+                                  int *out_start, int *out_end)
+{
+    *out_start = 0;
+    *out_end = 0;
+
+    if (!vp->copy_mode || !vp->focused)
+        return;
+
+    size_t start_v, end_v;
+    int start_col, end_col;
+
+    if (vp->has_mark) {
+        /* Order mark and cursor */
+        int cursor_first = (vp->cursor_visual_line < vp->mark_visual_line) ||
+                           (vp->cursor_visual_line == vp->mark_visual_line &&
+                            vp->cursor_col <= vp->mark_col);
+        if (cursor_first) {
+            start_v = vp->cursor_visual_line;
+            start_col = (int)vp->cursor_col;
+            end_v = vp->mark_visual_line;
+            end_col = (int)vp->mark_col + 1;
+        } else {
+            start_v = vp->mark_visual_line;
+            start_col = (int)vp->mark_col;
+            end_v = vp->cursor_visual_line;
+            end_col = (int)vp->cursor_col + 1;
+        }
+    } else {
+        /* No mark: highlight just the cursor cell */
+        start_v = end_v = vp->cursor_visual_line;
+        start_col = (int)vp->cursor_col;
+        end_col = start_col + 1;
+    }
+
+    if (v < start_v || v > end_v)
+        return;
+
+    if (v == start_v && v == end_v) {
+        *out_start = start_col;
+        *out_end = end_col;
+    } else if (v == start_v) {
+        *out_start = start_col;
+        *out_end = vp->width;
+    } else if (v == end_v) {
+        *out_start = 0;
+        *out_end = end_col;
+    } else {
+        *out_start = 0;
+        *out_end = vp->width;
+    }
+
+    if (*out_start < 0)
+        *out_start = 0;
+    if (*out_end > vp->width)
+        *out_end = vp->width;
+}
+
 /* Render viewport to output buffer */
 void tui_viewport_view(const TuiViewport *vp, DynamicBuffer *out)
 {
@@ -545,9 +920,13 @@ void tui_viewport_view(const TuiViewport *vp, DynamicBuffer *out)
         dynamic_buffer_append_str(out, buf);
         dynamic_buffer_append_str(out, CSI "K");
 
+        int sel_start = 0, sel_end = 0;
+        compute_row_selection(vp, vp->y_offset + (size_t)row, &sel_start,
+                              &sel_end);
+
         if (content_idx < vp->line_count) {
             render_line_segment(&vp->lines[content_idx], vp->width, sub_line,
-                                vp->wrap_mode, out);
+                                vp->wrap_mode, out, sel_start, sel_end);
             sub_line++;
             if (sub_line >= vp->lines[content_idx].visual_lines) {
                 content_idx++;
@@ -565,11 +944,212 @@ static TuiInitResult viewport_init(void *config)
     return tui_init_result_none(model);
 }
 
+/* Test if a key message matches a Ctrl+<lower-letter> chord (e.g., C-n). */
+static int is_ctrl_letter(const TuiKeyMsg *k, char letter)
+{
+    return k->key == TUI_KEY_NONE && (k->mods & TUI_MOD_CTRL) &&
+           !(k->mods & TUI_MOD_ALT) && k->rune == (uint32_t)letter;
+}
+
+/* Test if a key message matches an Alt+<char> chord (e.g., M-w, M-<). */
+static int is_alt_char(const TuiKeyMsg *k, char letter)
+{
+    return k->key == TUI_KEY_NONE && (k->mods & TUI_MOD_ALT) &&
+           !(k->mods & TUI_MOD_CTRL) && k->rune == (uint32_t)letter;
+}
+
+/* Handle a key message in copy-mode. Returns a command (M-w copies) or NULL. */
+static TuiCmd *handle_copy_mode_key(TuiViewport *vp, const TuiKeyMsg *k)
+{
+    /* Toggle mark with C-SPC */
+    if (is_ctrl_letter(k, ' ')) {
+        if (vp->has_mark) {
+            vp->has_mark = 0;
+        } else {
+            vp->mark_visual_line = vp->cursor_visual_line;
+            vp->mark_col = vp->cursor_col;
+            vp->has_mark = 1;
+        }
+        return NULL;
+    }
+
+    /* Exit / cancel: C-g or Escape */
+    if (is_ctrl_letter(k, 'g') || k->key == TUI_KEY_ESCAPE) {
+        if (vp->has_mark) {
+            vp->has_mark = 0;
+        } else {
+            tui_viewport_exit_copy_mode(vp);
+        }
+        return NULL;
+    }
+
+    /* Motion */
+    if (k->key == TUI_KEY_DOWN || is_ctrl_letter(k, 'n')) {
+        cursor_move_lines(vp, +1);
+        return NULL;
+    }
+    if (k->key == TUI_KEY_UP || is_ctrl_letter(k, 'p')) {
+        cursor_move_lines(vp, -1);
+        return NULL;
+    }
+    if (k->key == TUI_KEY_RIGHT || is_ctrl_letter(k, 'f')) {
+        cursor_move_cols(vp, +1);
+        return NULL;
+    }
+    if (k->key == TUI_KEY_LEFT || is_ctrl_letter(k, 'b')) {
+        cursor_move_cols(vp, -1);
+        return NULL;
+    }
+    if (k->key == TUI_KEY_HOME || is_ctrl_letter(k, 'a')) {
+        vp->cursor_col = 0;
+        return NULL;
+    }
+    if (k->key == TUI_KEY_END || is_ctrl_letter(k, 'e')) {
+        vp->cursor_col = (size_t)visual_line_width(vp, vp->cursor_visual_line);
+        return NULL;
+    }
+    if (k->key == TUI_KEY_PAGE_DOWN || is_ctrl_letter(k, 'v')) {
+        cursor_move_lines(vp, vp->height > 0 ? vp->height : 1);
+        return NULL;
+    }
+    if (k->key == TUI_KEY_PAGE_UP || is_alt_char(k, 'v')) {
+        cursor_move_lines(vp, vp->height > 0 ? -vp->height : -1);
+        return NULL;
+    }
+    if (is_alt_char(k, '<')) {
+        vp->cursor_visual_line = 0;
+        vp->cursor_col = 0;
+        scroll_to_cursor(vp);
+        return NULL;
+    }
+    if (is_alt_char(k, '>')) {
+        if (vp->total_visual_lines > 0)
+            vp->cursor_visual_line = vp->total_visual_lines - 1;
+        vp->cursor_col = 0;
+        scroll_to_cursor(vp);
+        return NULL;
+    }
+
+    /* Copy: M-w */
+    if (is_alt_char(k, 'w')) {
+        char *text = NULL;
+        size_t len = 0;
+        tui_viewport_extract_selection(vp, &text, &len);
+        if (text && len > 0) {
+            TuiCmd *cmd = tui_cmd_clipboard_copy(text, len);
+            free(text);
+            /* Clear mark after copy to match emacs behavior. */
+            vp->has_mark = 0;
+            return cmd;
+        }
+        free(text);
+        return NULL;
+    }
+
+    return NULL;
+}
+
+/* Handle a mouse message. Updates state in place, returns NULL (no commands
+ * are emitted directly from mouse events; M-w is the explicit copy step). */
+static void handle_mouse(TuiViewport *vp, const TuiMouseMsg *m)
+{
+    int local_row = m->row - vp->render_row;
+    int local_col = m->col - vp->render_col;
+    int inside = local_row >= 0 && local_row < vp->height && local_col >= 0 &&
+                 local_col < vp->width;
+
+    if (m->action == TUI_MOUSE_ACTION_PRESS) {
+        if (m->button == TUI_MOUSE_LEFT) {
+            if (!inside)
+                return;
+            vp->copy_mode = 1;
+            vp->cursor_visual_line = vp->y_offset + (size_t)local_row;
+            vp->cursor_col = (size_t)local_col;
+            vp->mark_visual_line = vp->cursor_visual_line;
+            vp->mark_col = vp->cursor_col;
+            vp->has_mark = 1;
+            vp->mouse_dragging = 1;
+            clamp_cursor(vp);
+        } else if (m->button == TUI_MOUSE_WHEEL_UP) {
+            if (inside)
+                tui_viewport_scroll_up(vp, 3);
+        } else if (m->button == TUI_MOUSE_WHEEL_DOWN) {
+            if (inside)
+                tui_viewport_scroll_down(vp, 3);
+        }
+        return;
+    }
+
+    if (m->action == TUI_MOUSE_ACTION_RELEASE) {
+        vp->mouse_dragging = 0;
+        return;
+    }
+
+    if (m->action == TUI_MOUSE_ACTION_MOTION && vp->mouse_dragging) {
+        if (local_row < 0) {
+            tui_viewport_scroll_up(vp, 1);
+            vp->cursor_visual_line = vp->y_offset;
+        } else if (local_row >= vp->height) {
+            tui_viewport_scroll_down(vp, 1);
+            size_t maxv = vp->total_visual_lines > 0
+                              ? vp->total_visual_lines - 1
+                              : 0;
+            size_t target = vp->y_offset + (size_t)vp->height - 1;
+            if (target > maxv)
+                target = maxv;
+            vp->cursor_visual_line = target;
+        } else {
+            vp->cursor_visual_line = vp->y_offset + (size_t)local_row;
+        }
+        if (local_col < 0)
+            local_col = 0;
+        if (local_col >= vp->width)
+            local_col = vp->width - 1;
+        vp->cursor_col = (size_t)local_col;
+        clamp_cursor(vp);
+    }
+}
+
 static TuiUpdateResult viewport_update(TuiModel *model, TuiMsg msg)
 {
-    (void)model;
-    (void)msg;
-    /* Viewport doesn't handle messages directly - content is added via append */
+    TuiViewport *vp = (TuiViewport *)model;
+    if (!vp)
+        return tui_update_result_none();
+
+    if (msg.type == TUI_MSG_FOCUS) {
+        vp->focused = 1;
+        return tui_update_result_none();
+    }
+    if (msg.type == TUI_MSG_BLUR) {
+        vp->focused = 0;
+        vp->mouse_dragging = 0;
+        return tui_update_result_none();
+    }
+
+    if (!vp->focused)
+        return tui_update_result_none();
+
+    if (msg.type == TUI_MSG_KEY_PRESS) {
+        const TuiKeyMsg *k = &msg.data.key;
+
+        /* Outside copy-mode: only C-SPC enters it; everything else passes
+         * through (parent handles scroll/page keys, focus cycling, etc.). */
+        if (!vp->copy_mode) {
+            if (is_ctrl_letter(k, ' ')) {
+                tui_viewport_enter_copy_mode(vp);
+            }
+            return tui_update_result_none();
+        }
+
+        TuiCmd *cmd = handle_copy_mode_key(vp, k);
+        return cmd ? tui_update_result(cmd) : tui_update_result_none();
+    }
+
+    if (msg.type == TUI_MSG_MOUSE) {
+        handle_mouse(vp, &msg.data.mouse);
+        return tui_update_result_none();
+    }
+
     return tui_update_result_none();
 }
 

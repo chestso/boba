@@ -172,6 +172,28 @@ TuiCmd *tui_cmd_set_window_title(const char *title)
     return cmd;
 }
 
+TuiCmd *tui_cmd_clipboard_copy(const char *text, size_t len)
+{
+    TuiCmd *cmd = (TuiCmd *)malloc(sizeof(TuiCmd));
+    if (!cmd)
+        return NULL;
+    memset(cmd, 0, sizeof(TuiCmd));
+    cmd->type = TUI_CMD_CLIPBOARD_COPY;
+    if (text && len > 0) {
+        cmd->payload.clipboard.text = (char *)malloc(len);
+        if (!cmd->payload.clipboard.text) {
+            free(cmd);
+            return NULL;
+        }
+        memcpy(cmd->payload.clipboard.text, text, len);
+        cmd->payload.clipboard.len = len;
+    } else {
+        cmd->payload.clipboard.text = NULL;
+        cmd->payload.clipboard.len = 0;
+    }
+    return cmd;
+}
+
 /* Free a command and its associated resources */
 void tui_cmd_free(TuiCmd *cmd)
 {
@@ -212,6 +234,12 @@ void tui_cmd_free(TuiCmd *cmd)
     case TUI_CMD_SET_WINDOW_TITLE:
         if (cmd->payload.window_title) {
             free(cmd->payload.window_title);
+        }
+        break;
+
+    case TUI_CMD_CLIPBOARD_COPY:
+        if (cmd->payload.clipboard.text) {
+            free(cmd->payload.clipboard.text);
         }
         break;
 

@@ -10,10 +10,12 @@ libbloom_boba_a_SOURCES = \
     dynamic_buffer.c \
     ansi_sequences.c \
     unicode.c \
+    base64.c \
     components/textinput.c \
     components/textview.c \
     components/viewport.c \
     components/statusbar.c
 
 libbloom_boba_a_CPPFLAGS = \
-    -I$(top_srcdir)/include
+    -I$(top_srcdir)/include \
+    -I$(top_srcdir)/src

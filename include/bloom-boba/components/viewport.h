@@ -48,6 +48,20 @@ typedef struct TuiViewport
     /* Render position (absolute, 1-indexed) */
     int render_row; /* Starting row */
     int render_col; /* Starting column */
+
+    /* Focus state */
+    int focused; /* 1 if component currently has focus */
+
+    /* Copy-mode (selection + clipboard) state. Active only when both focused
+     * and copy_mode are set. Coordinates are in scrollback visual-line space
+     * (the same space as y_offset). */
+    int copy_mode;             /* 1 = navigating with cursor; 0 = passive */
+    int has_mark;              /* 1 = selection active (mark + cursor) */
+    size_t cursor_visual_line; /* Cursor's visual-line index */
+    size_t cursor_col;         /* Cursor's display column on its visual line */
+    size_t mark_visual_line;
+    size_t mark_col;
+    int mouse_dragging; /* Left button held since last press */
 } TuiViewport;
 
 /* Create a new viewport */
@@ -79,6 +93,35 @@ void tui_viewport_set_wrap_mode(TuiViewport *vp, int wrap);
 
 /* Get line count (for testing/debugging) */
 size_t tui_viewport_line_count(const TuiViewport *vp);
+
+/* Set focus state directly. Apps usually drive this via TUI_MSG_FOCUS /
+ * TUI_MSG_BLUR through the component update path; this is a convenience for
+ * apps that manage focus without going through messages. */
+void tui_viewport_set_focused(TuiViewport *vp, int focused);
+
+/* Hit-test: return 1 if the given absolute terminal cell (row, col, both
+ * 1-indexed) falls within the viewport's render area. Useful for parents
+ * that route mouse events to the right child component. */
+int tui_viewport_contains(const TuiViewport *vp, int row, int col);
+
+/* Enter / leave copy-mode programmatically. Entering positions the cursor
+ * at the top-left of the visible area and clears any mark. Leaving clears
+ * the mark. */
+void tui_viewport_enter_copy_mode(TuiViewport *vp);
+void tui_viewport_exit_copy_mode(TuiViewport *vp);
+
+/* Extract the current selection as plain text (ANSI sequences stripped).
+ *
+ * If a mark is set, the selection runs from the mark to the cursor
+ * (inclusive at both ends, ordered correctly regardless of which came
+ * first). If no mark is set, the entire content line containing the cursor
+ * is extracted.
+ *
+ * On return:
+ *   *out_text is a malloc'd buffer (caller frees), or NULL if no content
+ *   *out_len is the byte length (no trailing null is appended). */
+void tui_viewport_extract_selection(const TuiViewport *vp, char **out_text,
+                                    size_t *out_len);
 
 /* Render viewport to output buffer */
 void tui_viewport_view(const TuiViewport *vp, DynamicBuffer *out);

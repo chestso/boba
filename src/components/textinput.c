@@ -106,6 +106,35 @@ static int ensure_capacity(TuiTextInput *input, size_t needed)
     return 0;
 }
 
+/* Clear the selection mark (no-op if no mark is set). Called from edit
+ * paths that invalidate any previously-set mark byte offset. */
+static void clear_mark_if_set(TuiTextInput *input)
+{
+    if (input->has_mark) {
+        input->has_mark = 0;
+        input->mark_byte = 0;
+    }
+}
+
+/* Return the normalized selection range when has_mark is set:
+ * *out_start = min(mark_byte, cursor_byte)
+ * *out_end   = max(mark_byte, cursor_byte)
+ * Returns 1 if a selection exists, 0 otherwise. */
+static int selection_range(const TuiTextInput *input, size_t *out_start,
+                           size_t *out_end)
+{
+    if (!input->has_mark)
+        return 0;
+    if (input->mark_byte <= input->cursor_byte) {
+        *out_start = input->mark_byte;
+        *out_end = input->cursor_byte;
+    } else {
+        *out_start = input->cursor_byte;
+        *out_end = input->mark_byte;
+    }
+    return 1;
+}
+
 /* Insert text at cursor position */
 static int insert_text(TuiTextInput *input, const char *text, size_t len)
 {
@@ -128,6 +157,7 @@ static int insert_text(TuiTextInput *input, const char *text, size_t len)
     input->cursor_byte += len;
     input->text[input->text_len] = '\0';
 
+    clear_mark_if_set(input);
     recalculate_cursor_position(input);
     return 0;
 }
@@ -155,6 +185,7 @@ static void delete_before(TuiTextInput *input)
     input->cursor_byte = prev;
     input->text[input->text_len] = '\0';
 
+    clear_mark_if_set(input);
     recalculate_cursor_position(input);
 }
 
@@ -173,6 +204,8 @@ static void delete_at(TuiTextInput *input)
             input->text_len - del_end);
     input->text_len -= (del_end - input->cursor_byte);
     input->text[input->text_len] = '\0';
+
+    clear_mark_if_set(input);
 }
 
 /* Move cursor left by one character */
@@ -328,17 +361,24 @@ static void cursor_down(TuiTextInput *input)
     recalculate_cursor_position(input);
 }
 
-/* Save text to kill buffer (append=1 appends to existing buffer) */
-static void kill_save(TuiTextInput *input, const char *text, size_t len,
-                      int append)
+/* Save text to kill buffer (append=1 appends to existing buffer) and also
+ * push the resulting kill-ring contents to the system clipboard via a
+ * TUI_CMD_CLIPBOARD_COPY command. Returns the command (caller threads it
+ * back through tui_update_result), or NULL on empty input / OOM.
+ *
+ * Matches graphical emacs's `interprogram-cut-function = gui-select-text`
+ * default — every kill broadcasts to the system clipboard. */
+static TuiCmd *kill_save(TuiTextInput *input, const char *text, size_t len,
+                         int append)
 {
     if (len == 0)
-        return;
+        return NULL;
 
     if (append && input->kill_buf && input->kill_buf_len > 0) {
-        char *new_buf = (char *)realloc(input->kill_buf, input->kill_buf_len + len);
+        char *new_buf =
+            (char *)realloc(input->kill_buf, input->kill_buf_len + len);
         if (!new_buf)
-            return;
+            return NULL;
         memcpy(new_buf + input->kill_buf_len, text, len);
         input->kill_buf = new_buf;
         input->kill_buf_len += len;
@@ -347,11 +387,16 @@ static void kill_save(TuiTextInput *input, const char *text, size_t len,
         input->kill_buf = (char *)malloc(len);
         if (!input->kill_buf) {
             input->kill_buf_len = 0;
-            return;
+            return NULL;
         }
         memcpy(input->kill_buf, text, len);
         input->kill_buf_len = len;
     }
+
+    /* Push the current kill-ring contents (after append) to the system
+     * clipboard. Consecutive kills produce a clipboard cmd carrying the
+     * accumulated text — same as emacs. */
+    return tui_cmd_clipboard_copy(input->kill_buf, input->kill_buf_len);
 }
 
 /* Transpose the two characters before the cursor (Ctrl+T) */
@@ -399,6 +444,7 @@ static void transpose_chars(TuiTextInput *input)
     memcpy(input->text + c1_start, tmp, c1_len + c2_len);
 
     input->cursor_byte = c2_end;
+    clear_mark_if_set(input);
     recalculate_cursor_position(input);
 }
 
@@ -606,6 +652,7 @@ static void replace_word(TuiTextInput *input, int start, int old_len,
     input->text_len = new_text_len;
     input->text[input->text_len] = '\0';
     input->cursor_byte = (size_t)(start + new_len);
+    clear_mark_if_set(input);
     recalculate_cursor_position(input);
 }
 
@@ -712,6 +759,10 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     int was_kill = input->last_was_kill;
     input->last_was_kill = 0;
 
+    /* Pending clipboard command — set by kill operations and M-w, returned
+     * via tui_update_result at the function tail. */
+    TuiCmd *pending_cmd = NULL;
+
     /* Handle special keys */
     switch (key.key) {
     case TUI_KEY_LEFT:
@@ -780,6 +831,11 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         delete_before(input);
         break;
 
+    case TUI_KEY_ESCAPE:
+        /* Esc clears an active selection; otherwise no-op. */
+        clear_mark_if_set(input);
+        break;
+
     case TUI_KEY_DELETE:
         delete_at(input);
         break;
@@ -799,7 +855,15 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
             /* Skip control characters with Ctrl modifier (except Tab) */
             if ((key.mods & TUI_MOD_CTRL) && key.rune != '\t') {
                 /* Handle Ctrl+key shortcuts */
-                if (key.rune == 'a' || key.rune == 'A') {
+                if (key.rune == ' ') {
+                    /* Ctrl+Space: toggle selection mark at cursor. */
+                    if (input->has_mark) {
+                        input->has_mark = 0;
+                    } else {
+                        input->mark_byte = input->cursor_byte;
+                        input->has_mark = 1;
+                    }
+                } else if (key.rune == 'a' || key.rune == 'A') {
                     /* Ctrl+A: Move to start of line */
                     cursor_home(input);
                 } else if (key.rune == 'b' || key.rune == 'B') {
@@ -818,6 +882,9 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                 } else if (key.rune == 'f' || key.rune == 'F') {
                     /* Ctrl+F: Move forward one character */
                     cursor_right(input);
+                } else if (key.rune == 'g' || key.rune == 'G') {
+                    /* Ctrl+G: clear selection mark if set */
+                    clear_mark_if_set(input);
                 } else if (key.rune == 'h' || key.rune == 'H') {
                     /* Ctrl+H: Delete previous character (backspace) */
                     delete_before(input);
@@ -835,12 +902,14 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                         end++;
                     }
                     if (end > input->cursor_byte) {
-                        kill_save(input, input->text + input->cursor_byte,
-                                  end - input->cursor_byte, was_kill);
+                        pending_cmd =
+                            kill_save(input, input->text + input->cursor_byte,
+                                      end - input->cursor_byte, was_kill);
                         memmove(input->text + input->cursor_byte, input->text + end,
                                 input->text_len - end);
                         input->text_len -= (end - input->cursor_byte);
                         input->text[input->text_len] = '\0';
+                        clear_mark_if_set(input);
                     }
                     input->last_was_kill = 1;
                 } else if (key.rune == 'n' || key.rune == 'N') {
@@ -873,18 +942,40 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     }
                     if (start < input->cursor_byte) {
                         size_t del_len = input->cursor_byte - start;
-                        kill_save(input, input->text + start, del_len, 0);
+                        pending_cmd =
+                            kill_save(input, input->text + start, del_len, 0);
                         memmove(input->text + start, input->text + input->cursor_byte,
                                 input->text_len - input->cursor_byte);
                         input->text_len -= del_len;
                         input->cursor_byte = start;
                         input->text[input->text_len] = '\0';
+                        clear_mark_if_set(input);
                         recalculate_cursor_position(input);
                     }
                     input->last_was_kill = 1;
                 } else if (key.rune == 'w' || key.rune == 'W') {
-                    /* Ctrl+W: Kill word backward */
-                    if (input->cursor_byte > 0) {
+                    /* Ctrl+W: kill region (when mark is set) or kill word
+                     * backward (default). Matches emacs's overload of
+                     * kill-region / backward-kill-word. */
+                    size_t sel_start, sel_end;
+                    if (selection_range(input, &sel_start, &sel_end) &&
+                        sel_end > sel_start) {
+                        size_t del_len = sel_end - sel_start;
+                        pending_cmd = kill_save(input, input->text + sel_start,
+                                                del_len, 0);
+                        memmove(input->text + sel_start,
+                                input->text + sel_end,
+                                input->text_len - sel_end);
+                        input->text_len -= del_len;
+                        if (input->cursor_byte > sel_end)
+                            input->cursor_byte -= del_len;
+                        else if (input->cursor_byte > sel_start)
+                            input->cursor_byte = sel_start;
+                        input->text[input->text_len] = '\0';
+                        clear_mark_if_set(input);
+                        recalculate_cursor_position(input);
+                        input->last_was_kill = 1;
+                    } else if (input->cursor_byte > 0) {
                         size_t pos = input->cursor_byte;
                         /* Skip non-word characters backward */
                         while (pos > 0 && !is_word_char(input, input->text[pos - 1]))
@@ -894,12 +985,14 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                             pos--;
                         if (pos < input->cursor_byte) {
                             size_t del_len = input->cursor_byte - pos;
-                            kill_save(input, input->text + pos, del_len, was_kill);
+                            pending_cmd = kill_save(input, input->text + pos,
+                                                    del_len, was_kill);
                             memmove(input->text + pos, input->text + input->cursor_byte,
                                     input->text_len - input->cursor_byte);
                             input->text_len -= del_len;
                             input->cursor_byte = pos;
                             input->text[input->text_len] = '\0';
+                            clear_mark_if_set(input);
                             recalculate_cursor_position(input);
                         }
                         input->last_was_kill = 1;
@@ -917,6 +1010,28 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     undo_pop(input);
                     return tui_update_result_none();
                 }
+            } else if ((key.mods & TUI_MOD_ALT) && !(key.mods & TUI_MOD_CTRL)) {
+                /* Alt-modified emacs keys. Currently only M-w (copy
+                 * region or whole input). Other Alt+key combinations are
+                 * intentionally swallowed rather than inserted as text. */
+                if (key.rune == 'w' || key.rune == 'W') {
+                    size_t sel_start, sel_end;
+                    const char *src = NULL;
+                    size_t src_len = 0;
+                    if (selection_range(input, &sel_start, &sel_end) &&
+                        sel_end > sel_start) {
+                        src = input->text + sel_start;
+                        src_len = sel_end - sel_start;
+                    } else if (input->text_len > 0) {
+                        /* No mark: copy the whole current input, matching
+                         * the viewport's "no-mark = current line" rule. */
+                        src = input->text;
+                        src_len = input->text_len;
+                    }
+                    if (src && src_len > 0)
+                        pending_cmd = tui_cmd_clipboard_copy(src, src_len);
+                    clear_mark_if_set(input);
+                }
             } else {
                 insert_codepoint(input, key.rune);
             }
@@ -928,7 +1043,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     }
 
     undo_commit(input);
-    return tui_update_result_none();
+    return tui_update_result(pending_cmd);
 }
 
 /* Render a horizontal divider line in place (no newline) */
@@ -966,6 +1081,48 @@ static void render_continuation_prompt(const TuiTextInput *input,
     }
 }
 
+/* Render input->text[byte_start..byte_end) to `out`, applying SGR_REVERSE
+ * over any portion that falls inside the active selection (when has_mark
+ * is set). Honors echo_mode by emitting '*' per codepoint while still
+ * tracking selection toggles at codepoint boundaries. */
+static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
+                              size_t byte_start, size_t byte_end)
+{
+    size_t sel_start = 0, sel_end = 0;
+    int has_sel = selection_range(input, &sel_start, &sel_end);
+
+    int reversed = 0;
+    size_t i = byte_start;
+    while (i < byte_end) {
+        int clen = tui_utf8_char_len(input->text + i);
+        if (clen < 1)
+            clen = 1;
+        if (i + (size_t)clen > byte_end)
+            clen = (int)(byte_end - i);
+
+        if (has_sel) {
+            int in_sel = (i >= sel_start && i < sel_end);
+            if (in_sel && !reversed) {
+                dynamic_buffer_append_str(out, SGR_REVERSE);
+                reversed = 1;
+            } else if (!in_sel && reversed) {
+                dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
+                reversed = 0;
+            }
+        }
+
+        if (input->echo_mode == 1)
+            dynamic_buffer_append(out, "*", 1);
+        else
+            dynamic_buffer_append(out, input->text + i, clen);
+
+        i += clen;
+    }
+
+    if (reversed)
+        dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
+}
+
 /* Render prompt and visible text slice to output buffer */
 static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
 {
@@ -977,26 +1134,15 @@ static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out
             dynamic_buffer_append_str(out, SGR_RESET);
     }
     if (input->text_len > 0) {
-        if (input->echo_mode == 1) {
-            /* Masked mode: output '*' for each visible codepoint */
-            int total_cp = tui_utf8_codepoint_count(input->text, input->text_len);
-            int start_cp = 0, end_cp = total_cp;
-            if (input->terminal_width > 0 && input->offset_right > input->offset) {
-                start_cp = input->offset;
-                end_cp = input->offset_right;
-            }
-            for (int i = start_cp; i < end_cp; i++)
-                dynamic_buffer_append(out, "*", 1);
-        } else if (input->terminal_width > 0 && input->offset_right > input->offset) {
-            size_t byte_start =
-                tui_utf8_byte_offset(input->text, input->text_len, input->offset);
-            size_t byte_end = tui_utf8_byte_offset(input->text, input->text_len,
-                                                   input->offset_right);
-            dynamic_buffer_append(out, input->text + byte_start,
-                                  byte_end - byte_start);
-        } else {
-            dynamic_buffer_append(out, input->text, input->text_len);
+        size_t byte_start = 0;
+        size_t byte_end = input->text_len;
+        if (input->terminal_width > 0 && input->offset_right > input->offset) {
+            byte_start = tui_utf8_byte_offset(input->text, input->text_len,
+                                              input->offset);
+            byte_end = tui_utf8_byte_offset(input->text, input->text_len,
+                                            input->offset_right);
         }
+        render_text_range(input, out, byte_start, byte_end);
     }
 }
 
@@ -1130,18 +1276,9 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                     render_continuation_prompt(input, out);
                 }
 
-                /* Line content */
-                if (i > line_start) {
-                    if (input->echo_mode == 1) {
-                        int cp = tui_utf8_codepoint_count(
-                            input->text + line_start, i - line_start);
-                        for (int k = 0; k < cp; k++)
-                            dynamic_buffer_append(out, "*", 1);
-                    } else {
-                        dynamic_buffer_append(out, input->text + line_start,
-                                              i - line_start);
-                    }
-                }
+                /* Line content (selection-aware) */
+                if (i > line_start)
+                    render_text_range(input, out, line_start, i);
 
                 current_line++;
                 line_start = i + 1;
@@ -1178,24 +1315,22 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                 dynamic_buffer_append_str(out, SGR_RESET);
         }
 
-        /* Output text content */
+        /* Output text content per line (selection-aware) */
         if (input->text_len > 0) {
-            for (size_t i = 0; i < input->text_len; i++) {
-                if (input->text[i] == '\n') {
-                    dynamic_buffer_append_str(out, "\r\n");
-                    /* Add continuation prompt on continued lines */
-                    if (input->show_prompt && input->prompt && input->prompt_len > 0) {
-                        render_continuation_prompt(input, out);
+            size_t line_start = 0;
+            for (size_t i = 0; i <= input->text_len; i++) {
+                if (i == input->text_len || input->text[i] == '\n') {
+                    if (i > line_start)
+                        render_text_range(input, out, line_start, i);
+                    if (i < input->text_len) {
+                        /* Found a real newline — emit row break + continuation */
+                        dynamic_buffer_append_str(out, "\r\n");
+                        if (input->show_prompt && input->prompt &&
+                            input->prompt_len > 0) {
+                            render_continuation_prompt(input, out);
+                        }
                     }
-                } else if (input->echo_mode == 1) {
-                    /* Count codepoint bytes, output single '*' per codepoint */
-                    int cplen = tui_utf8_char_len(&input->text[i]);
-                    if (cplen < 1)
-                        cplen = 1;
-                    dynamic_buffer_append(out, "*", 1);
-                    i += cplen - 1; /* loop will advance by 1 more */
-                } else {
-                    dynamic_buffer_append(out, &input->text[i], 1);
+                    line_start = i + 1;
                 }
             }
         }
@@ -1233,6 +1368,7 @@ void tui_textinput_set_text(TuiTextInput *input, const char *text)
     input->text[len] = '\0';
     input->text_len = len;
     input->cursor_byte = len;
+    clear_mark_if_set(input);
     recalculate_cursor_position(input);
 }
 
@@ -1249,6 +1385,7 @@ void tui_textinput_clear(TuiTextInput *input)
     input->offset_right = 0;
     if (input->text)
         input->text[0] = '\0';
+    clear_mark_if_set(input);
     undo_free(input);
 }
 

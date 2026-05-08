@@ -9,6 +9,7 @@
 #define BLOOM_BOBA_CMD_H
 
 #include "msg.h"
+#include <stddef.h>
 
 /* Forward declaration */
 typedef struct TuiCmd TuiCmd;
@@ -30,6 +31,7 @@ typedef enum
     TUI_CMD_SHOW_CURSOR,                  /* Show cursor */
     TUI_CMD_HIDE_CURSOR,                  /* Hide cursor */
     TUI_CMD_SET_WINDOW_TITLE,             /* Set terminal window title */
+    TUI_CMD_CLIPBOARD_COPY,               /* Copy text to system clipboard */
     TUI_CMD_CUSTOM_BASE = 1000,           /* Base for application-defined commands */
 } TuiCmdType;
 
@@ -62,6 +64,11 @@ struct TuiCmd
             int word_start; /* Byte offset where the word starts in input */
         } tab_complete;
         char *window_title; /* For TUI_CMD_SET_WINDOW_TITLE - owned, must be freed */
+        struct
+        {
+            char *text; /* Owned, must be freed (binary-safe; not null-terminated reliance) */
+            size_t len; /* Byte length of text */
+        } clipboard;
     } payload;
 };
 
@@ -102,6 +109,12 @@ TuiCmd *tui_cmd_disable_keyboard_enhancement(void);
 TuiCmd *tui_cmd_show_cursor(void);
 TuiCmd *tui_cmd_hide_cursor(void);
 TuiCmd *tui_cmd_set_window_title(const char *title);
+
+/* Create a clipboard copy command. Copies `len` bytes of `text` into the
+ * command (caller retains ownership of the input pointer). The runtime
+ * either calls the configured TuiClipboardHandler (if set) or emits OSC 52
+ * to the output. */
+TuiCmd *tui_cmd_clipboard_copy(const char *text, size_t len);
 
 /* Free a command and its associated resources */
 void tui_cmd_free(TuiCmd *cmd);

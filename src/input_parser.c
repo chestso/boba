@@ -155,6 +155,9 @@ static TuiMsg parse_csi_sequence(const unsigned char *seq, int len)
         return tui_msg_key(TUI_KEY_F3, 0, mods);
     case 'S':
         return tui_msg_key(TUI_KEY_F4, 0, mods);
+    case 'Z':
+        /* xterm legacy Shift+Tab: CSI Z */
+        return tui_msg_key(TUI_KEY_TAB, 0, mods | TUI_MOD_SHIFT);
     case 'u':
         /* CSI u - kitty keyboard protocol: ESC[keycode;modifiers u */
         if (param1 == 13) {
@@ -299,6 +302,9 @@ int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
         } else if (byte < 0x20) {
             /* Control character */
             switch (byte) {
+            case 0x00: /* Ctrl+Space (NUL) */
+                *msg = tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL);
+                return 1;
             case 0x0D: /* CR */
                 *msg = tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_NONE);
                 return 1;

@@ -436,6 +436,209 @@ static void test_get_height_dynamic(void)
     tui_textinput_free(input);
 }
 
+/* ---------- selection / clipboard tests ---------- */
+
+/* Run an update through the component interface and return the result so
+ * the test can inspect (and free) any returned cmd. */
+static TuiUpdateResult run_update(TuiTextInput *input, TuiMsg msg)
+{
+    const TuiComponent *c = tui_textinput_component();
+    return c->update((TuiModel *)input, msg);
+}
+
+static void test_ctrl_space_toggles_mark(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+
+    /* C-SPC sets mark at cursor (cursor is at byte 5 after "hello"). */
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(input->has_mark == 1);
+    assert(input->mark_byte == 5);
+    assert(r.cmd == NULL);
+
+    /* Second C-SPC clears the mark. */
+    r = run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(input->has_mark == 0);
+    assert(r.cmd == NULL);
+
+    tui_textinput_free(input);
+}
+
+static void test_m_w_no_mark_copies_whole_input(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_ALT));
+    assert(r.cmd != NULL);
+    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
+    assert(r.cmd->payload.clipboard.len == 5);
+    assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
+    tui_cmd_free(r.cmd);
+
+    tui_textinput_free(input);
+}
+
+static void test_m_w_with_mark_copies_region(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello world");
+
+    /* Place cursor at byte 5, set mark at 0, then move cursor back to 5
+     * (already there). Use the public set_cursor and direct mark assignment. */
+    tui_textinput_set_cursor(input, 0);
+    /* Set mark at byte 0 via C-SPC */
+    run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(input->has_mark == 1);
+    assert(input->mark_byte == 0);
+
+    /* Move cursor right by 5 chars via C-F */
+    for (int i = 0; i < 5; i++)
+        run_update(input, tui_msg_key(TUI_KEY_NONE, 'f', TUI_MOD_CTRL));
+    assert(input->cursor_byte == 5);
+    assert(input->has_mark == 1); /* motion preserves mark */
+
+    /* M-w copies "hello" and clears mark */
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_ALT));
+    assert(r.cmd != NULL);
+    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
+    assert(r.cmd->payload.clipboard.len == 5);
+    assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
+    assert(input->has_mark == 0);
+    tui_cmd_free(r.cmd);
+
+    tui_textinput_free(input);
+}
+
+static void test_ctrl_w_kills_region_when_mark_set(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abcdef");
+
+    tui_textinput_set_cursor(input, 1);
+    run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    /* Mark at 1; move cursor to 4 */
+    for (int i = 0; i < 3; i++)
+        run_update(input, tui_msg_key(TUI_KEY_NONE, 'f', TUI_MOD_CTRL));
+    assert(input->cursor_byte == 4);
+
+    /* C-W with mark: kills region [1,4) = "bcd" */
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_CTRL));
+    assert(strcmp(tui_textinput_text(input), "aef") == 0);
+    assert(input->has_mark == 0);
+    /* kill-ring filled */
+    assert(input->kill_buf_len == 3);
+    assert(memcmp(input->kill_buf, "bcd", 3) == 0);
+    /* clipboard cmd emitted */
+    assert(r.cmd != NULL);
+    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
+    assert(r.cmd->payload.clipboard.len == 3);
+    assert(memcmp(r.cmd->payload.clipboard.text, "bcd", 3) == 0);
+    tui_cmd_free(r.cmd);
+
+    tui_textinput_free(input);
+}
+
+static void test_ctrl_k_emits_clipboard_cmd(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+    tui_textinput_set_cursor(input, 0);
+
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'k', TUI_MOD_CTRL));
+    assert(r.cmd != NULL);
+    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
+    assert(r.cmd->payload.clipboard.len == 5);
+    assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
+    tui_cmd_free(r.cmd);
+
+    /* Buffer is now empty */
+    assert(tui_textinput_len(input) == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_ctrl_u_emits_clipboard_cmd(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+    /* Cursor at end. C-U kills back to start of line. */
+
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'u', TUI_MOD_CTRL));
+    assert(r.cmd != NULL);
+    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
+    assert(r.cmd->payload.clipboard.len == 5);
+    assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
+    tui_cmd_free(r.cmd);
+
+    assert(tui_textinput_len(input) == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_edit_clears_mark(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abc");
+    run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(input->has_mark == 1);
+
+    /* Insert a character — mark should clear. */
+    send_char(input, 'x');
+    assert(input->has_mark == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_escape_clears_mark(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abc");
+    run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(input->has_mark == 1);
+
+    run_update(input, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    assert(input->has_mark == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_view_renders_selection_with_reverse(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+    tui_textinput_set_cursor(input, 0);
+    run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    /* Move cursor to byte 3 → selection [0,3) = "hel" */
+    for (int i = 0; i < 3; i++)
+        run_update(input, tui_msg_key(TUI_KEY_NONE, 'f', TUI_MOD_CTRL));
+
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_textinput_view(input, buf);
+    const char *out = dynamic_buffer_data(buf);
+    /* SGR_REVERSE is "\033[7m" */
+    assert(strstr(out, "\033[7m") != NULL);
+    dynamic_buffer_destroy(buf);
+
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -468,6 +671,16 @@ int main(void)
     RUN_TEST(test_get_height_no_dividers);
     RUN_TEST(test_get_height_with_dividers);
     RUN_TEST(test_get_height_dynamic);
+
+    RUN_TEST(test_ctrl_space_toggles_mark);
+    RUN_TEST(test_m_w_no_mark_copies_whole_input);
+    RUN_TEST(test_m_w_with_mark_copies_region);
+    RUN_TEST(test_ctrl_w_kills_region_when_mark_set);
+    RUN_TEST(test_ctrl_k_emits_clipboard_cmd);
+    RUN_TEST(test_ctrl_u_emits_clipboard_cmd);
+    RUN_TEST(test_edit_clears_mark);
+    RUN_TEST(test_escape_clears_mark);
+    RUN_TEST(test_view_renders_selection_with_reverse);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

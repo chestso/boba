@@ -203,6 +203,7 @@ Commands represent effects returned from the update function:
 | `TUI_CMD_ENABLE/DISABLE_KEYBOARD_ENHANCEMENT` | Kitty keyboard protocol                         |
 | `TUI_CMD_SHOW/HIDE_CURSOR`                    | Cursor visibility                               |
 | `TUI_CMD_SET_WINDOW_TITLE`                    | OSC 2 window title                              |
+| `TUI_CMD_CLIPBOARD_COPY`                      | Copy text to system clipboard (OSC 52)          |
 | `TUI_CMD_CUSTOM_BASE`                         | Base value for application-defined commands     |
 
 ## Components
@@ -215,10 +216,12 @@ Features:
 
 - **Multi-line support** - Toggle between single-line and multi-line text areas
 - **Unicode/UTF-8 support** - Full international character handling with proper cursor positioning
-- **Emacs keybindings** - Ctrl+A/E (line start/end), Ctrl+B/F (char movement), Ctrl+P/N (history/line navigation), Ctrl+K/U/W (kill), Ctrl+Y (yank), Ctrl+T (transpose)
+- **Emacs keybindings** - Ctrl+A/E (line start/end), Ctrl+B/F (char movement), Ctrl+P/N (history/line navigation), Ctrl+K/U/W (kill), Ctrl+Y (yank), Ctrl+T (transpose), **Ctrl+Space** (set/toggle mark), **Alt+w** (copy region or whole input), **Ctrl+G / Esc** (clear mark)
+- **Selection** - `C-SPC` sets a mark; the active region (between mark and cursor) is rendered with `SGR_REVERSE`. Motion extends the selection; any edit clears it.
+- **System clipboard** - Both `Alt+w` and every kill (`Ctrl+K/U/W`) emit `TUI_CMD_CLIPBOARD_COPY`, going through the runtime's OSC 52 default or `clipboard_handler` override (see the [Clipboard](#clipboard) section). Matches graphical emacs's `interprogram-cut-function = gui-select-text` default — every cut is also a copy.
 - **Command history** - Up/down navigation with saved current input
 - **Tab completion** - Emits `TUI_CMD_TAB_COMPLETE` with prefix and word position
-- **Kill ring** - Consecutive kills append to the same buffer
+- **Kill ring** - Consecutive kills append to the same buffer (also reflected in the clipboard cmd as the kill ring grows)
 - **Undo** - Multiple undo levels with Ctrl+\_ or Ctrl+X Ctrl+U
 - **Absolute cursor positioning** - Flicker-free rendering with optional divider lines
 - **Prompt support** - Custom prompt strings with proper UTF-8 width calculation
@@ -256,6 +259,10 @@ Features:
 - **Memory efficient** - Automatic cleanup of old lines when exceeding maximum
 - **Visual line calculation** - Handles long lines that wrap across multiple screen rows
 - **State preservation** - Maintains ANSI SGR state across wrapped line segments
+- **Copy-mode (tmux-style)** - When focused, `C-SPC` enters a navigation mode with cursor + mark in scrollback coordinates, so selections can extend across content scrolled off the visible window. Emacs keybindings: `C-n/p/f/b/a/e`, arrow keys, `Home/End`, `C-v`/`M-v` page, `M-<`/`M->` top/bottom, `M-w` copy, `C-g`/`Esc` cancel
+- **Selection rendering** - Selected range overlaid with `SGR_REVERSE` while preserving existing per-line SGR state
+- **Mouse selection** - Left-click + drag selects (entering copy-mode automatically); drag past the top/bottom edge autoscrolls; mouse wheel scrolls without disturbing the selection
+- **System clipboard** - `M-w` returns a `TUI_CMD_CLIPBOARD_COPY` command; the runtime emits OSC 52 by default or calls a user-provided handler (see "Clipboard" below)
 
 ```c
 TuiViewport *vp = tui_viewport_create();
@@ -264,6 +271,15 @@ tui_viewport_set_render_position(vp, 1, 1);  /* Start at row 1, col 1 */
 tui_viewport_set_max_lines(vp, 1000);        /* Limit memory usage */
 tui_viewport_set_wrap_mode(vp, 1);           /* Enable line wrapping */
 tui_viewport_append(vp, "Hello, world!\n", 14);
+
+/* Enable copy-mode: focus the viewport (the parent decides who is focused
+ * and dispatches TUI_MSG_FOCUS / TUI_MSG_BLUR). */
+tui_viewport_set_focused(vp, 1);
+
+/* Hit-test for routing mouse events from a parent component: */
+if (tui_viewport_contains(vp, mouse_row, mouse_col)) {
+    /* forward the mouse event to the viewport */
+}
 ```
 
 ### textview
@@ -300,6 +316,29 @@ tui_statusbar_set_terminal_width(sb, 80);
 tui_statusbar_set_terminal_row(sb, 24);
 tui_statusbar_set_mode(sb, "NORMAL");
 tui_statusbar_set_notification(sb, "Connected");
+```
+
+## Clipboard
+
+Components emit `TUI_CMD_CLIPBOARD_COPY` (e.g., the viewport's `M-w` in copy-mode). The runtime handles it in one of two ways:
+
+- **Default — OSC 52** (`ESC ] 52 ; c ; <base64> ESC \`): the bytes are written to the configured output. Modern terminals (kitty, alacritty, wezterm, iTerm2, foot, ghostty, recent xterm) honor this and push to the system clipboard. VTE-based terminals (GNOME Terminal, XFCE Terminal, Terminator) silently drop it.
+- **App-supplied handler**: install `clipboard_handler` on `TuiRuntimeConfig` to override (e.g., shell out to `xclip` / `wl-copy` / `pbcopy` on terminals that don't support OSC 52). When set, the runtime calls the handler instead of emitting OSC 52.
+
+```c
+static void my_clipboard_copy(const char *text, size_t len, void *user_data) {
+    /* Pipe to xclip, wl-copy, pbcopy, or store somewhere else. */
+}
+
+TuiRuntimeConfig cfg = { 0 };
+cfg.clipboard_handler = my_clipboard_copy;
+TuiRuntime *rt = tui_runtime_create(&my_component, NULL, &cfg);
+```
+
+Apps can also emit the command directly:
+
+```c
+return tui_update_result(tui_cmd_clipboard_copy(text, len));
 ```
 
 ## Component Composition
@@ -365,6 +404,43 @@ TuiCmd *cmd2 = child2_result.cmd;
 TuiCmd *combined = tui_cmd_batch2(cmd1, cmd2);  /* Handles NULL gracefully */
 return tui_update_result(combined);
 ```
+
+### Focus
+
+Like Bubbletea's `examples/textinputs`, focus is owned by the parent. There is no library-side focus router — the parent tracks which child is active and dispatches `TUI_MSG_FOCUS` / `TUI_MSG_BLUR` when focus moves. Components that care about focus (`textinput`, `viewport`) update their own `focused` flag in response.
+
+```c
+typedef struct {
+    TuiModel base;
+    TuiTextInput *input;
+    TuiViewport *viewport;
+    int focus_idx;  /* 0 = input, 1 = viewport */
+} App;
+
+static void cycle_focus(App *app, int dir) {
+    /* Tell the previously focused child it lost focus. */
+    if (app->focus_idx == 0)
+        tui_textinput_update(app->input, tui_msg_blur());
+    else
+        tui_viewport_component()->update((TuiModel *)app->viewport, tui_msg_blur());
+
+    app->focus_idx = (app->focus_idx + dir + 2) % 2;
+
+    /* And tell the new one it gained focus. */
+    if (app->focus_idx == 0)
+        tui_textinput_update(app->input, tui_msg_focus());
+    else
+        tui_viewport_component()->update((TuiModel *)app->viewport, tui_msg_focus());
+}
+
+/* In the parent's update: cycle on Tab / Shift+Tab. */
+if (msg.type == TUI_MSG_KEY_PRESS && msg.data.key.key == TUI_KEY_TAB) {
+    cycle_focus(app, (msg.data.key.mods & TUI_MOD_SHIFT) ? -1 : +1);
+    return tui_update_result_none();
+}
+```
+
+The parser produces Shift+Tab as `{TUI_KEY_TAB, mods: TUI_MOD_SHIFT}` (xterm `CSI Z` and the kitty keyboard protocol), and Ctrl+Space as `{rune: ' ', mods: TUI_MOD_CTRL}`.
 
 ## How bloom-boba Adapts the Elm Architecture
 

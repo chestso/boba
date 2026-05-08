@@ -310,6 +310,30 @@ static int execute_cmd(TuiRuntime *runtime, TuiCmd *cmd)
         break;
     }
 
+    case TUI_CMD_CLIPBOARD_COPY:
+    {
+        const char *text = cmd->payload.clipboard.text;
+        size_t text_len = cmd->payload.clipboard.len;
+
+        if (runtime->config.clipboard_handler) {
+            runtime->config.clipboard_handler(
+                text, text_len, runtime->config.clipboard_handler_data);
+        } else if (text && text_len > 0) {
+            /* Default: emit OSC 52 to terminal. */
+            size_t needed = ANSI_OSC52_BUFSIZE(text_len);
+            char *seq = (char *)malloc(needed);
+            if (seq) {
+                size_t n = ansi_format_osc52(seq, needed, text, text_len);
+                if (n > 0) {
+                    fwrite(seq, 1, n, runtime->output);
+                    fflush(runtime->output);
+                }
+                free(seq);
+            }
+        }
+        break;
+    }
+
     default:
         /* Custom command - execute callback and send result message */
         if (cmd->type >= TUI_CMD_CUSTOM_BASE && cmd->payload.custom.callback) {

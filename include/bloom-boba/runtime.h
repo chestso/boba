@@ -51,6 +51,16 @@ typedef void (*TuiOnResize)(int width, int height, void *user_data);
 /* Callback: called after stdin input is processed through the runtime */
 typedef void (*TuiOnStdinProcessed)(void *user_data);
 
+/* Callback: handle a clipboard-copy command. If installed, the runtime calls
+ * this instead of emitting OSC 52 to the output. Useful when running inside
+ * a terminal that does not implement OSC 52 (notably VTE-based terminals
+ * such as GNOME Terminal, XFCE, Terminator), where the app should shell out
+ * to xclip / wl-copy / pbcopy or use another mechanism.
+ *
+ * The text is owned by the runtime (do not free). */
+typedef void (*TuiClipboardHandler)(const char *text, size_t len,
+                                    void *user_data);
+
 /* Runtime configuration */
 typedef struct TuiRuntimeConfig
 {
@@ -71,6 +81,11 @@ typedef struct TuiRuntimeConfig
     TuiOnResize on_resize;                   /* Terminal resized */
     TuiOnStdinProcessed on_stdin_processed;  /* After stdin processed */
     void *event_data;                        /* Context pointer for event callbacks */
+
+    /* Clipboard override. If non-NULL, the runtime calls this for
+     * TUI_CMD_CLIPBOARD_COPY instead of emitting OSC 52. */
+    TuiClipboardHandler clipboard_handler;
+    void *clipboard_handler_data;
 } TuiRuntimeConfig;
 
 /* Runtime state */

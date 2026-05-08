@@ -29,6 +29,13 @@ typedef struct TuiTextInput
     size_t cursor_col;  /* Visual column (0-indexed) */
     size_t cursor_row;  /* Visual row (0-indexed) */
 
+    /* Selection mark. When has_mark is set, the active region is
+     * [min(mark_byte, cursor_byte), max(mark_byte, cursor_byte)). Motion
+     * extends the region; edits clear it; Esc / C-g clear it; M-w copies
+     * it; C-w kills it. */
+    size_t mark_byte;
+    int has_mark;
+
     int width;         /* Max width (0 = unlimited) */
     int height;        /* Max visible height (0 = grow to fit) */
     int scroll_offset; /* Vertical scroll position (first visible line) */
