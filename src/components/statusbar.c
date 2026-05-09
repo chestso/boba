@@ -219,6 +219,7 @@ static const TuiComponent statusbar_component = {
     .init = statusbar_init,
     .update = statusbar_update,
     .view = statusbar_view,
+    .cursor = NULL, /* statusbar abstains — never owns the cursor */
     .free = statusbar_free,
 };
 

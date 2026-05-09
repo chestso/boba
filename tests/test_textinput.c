@@ -751,6 +751,108 @@ static void test_overflow_cursor_left_scrolls_back(void)
     tui_textinput_free(input);
 }
 
+/* ---------- cursor() tests ---------- */
+
+static void test_cursor_pos_focused_absolute(void)
+{
+    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_terminal_width(input, 80);
+    tui_textinput_set_terminal_row(input, 5);
+
+    send_string(input, "abc");
+
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.row == 5);
+    /* prompt_len(2) + cursor_cp(3) + 1 (1-indexed) = 6 */
+    assert(c.col == 6);
+
+    tui_textinput_free(input);
+}
+
+static void test_cursor_pos_blurred(void)
+{
+    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_width(input, 80);
+    tui_textinput_set_terminal_row(input, 5);
+    tui_textinput_set_focus(input, 0);
+
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_cursor_pos_relative_abstains(void)
+{
+    /* No terminal_row set → relative mode → abstain */
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_cursor_pos_multiline(void)
+{
+    TuiTextInputConfig cfg = { .prompt = ">>> ", .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_terminal_width(input, 80);
+    tui_textinput_set_terminal_row(input, 10);
+
+    /* Build "ab\ncd" with cursor at end (row=1, col=2). */
+    send_char(input, 'a');
+    send_char(input, 'b');
+    tui_textinput_update(input,
+                         tui_msg_key(TUI_KEY_NONE, '\n', 0));
+    send_char(input, 'c');
+    send_char(input, 'd');
+
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    /* row: terminal_row(10) + cursor_row(1) = 11
+     * col: cursor_col(2) - offset(0) + prompt_len(4) + 1 = 7 */
+    assert(c.row == 11);
+    assert(c.col == 7);
+
+    tui_textinput_free(input);
+}
+
+static void test_view_no_longer_emits_trailing_cup(void)
+{
+    /* With Bubbletea v2 alignment, view() must not emit cursor positioning.
+     * Single-line absolute mode used to emit "CSI <row>;<col>H" after the
+     * prompt; verify it no longer appears. */
+    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_terminal_width(input, 80);
+    tui_textinput_set_terminal_row(input, 7);
+    send_string(input, "hi");
+
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_textinput_view(input, buf);
+
+    const char *data = dynamic_buffer_data(buf);
+    /* The single CUP we expect is the row-positioning at start ("\x1b[7;1H"),
+     * not a cursor-placement at the prompt. There must be exactly one ";1H"
+     * (the line start) — cursor_visual_col would have been ";4H". */
+    int found_row_start = strstr(data, "\x1b[7;1H") != NULL;
+    int found_cursor_at_4 = strstr(data, "\x1b[7;4H") != NULL;
+    assert(found_row_start == 1);
+    assert(found_cursor_at_4 == 0);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -799,6 +901,12 @@ int main(void)
     RUN_TEST(test_overflow_multiline_cursor_line);
     RUN_TEST(test_overflow_resize_recomputes);
     RUN_TEST(test_overflow_cursor_left_scrolls_back);
+
+    RUN_TEST(test_cursor_pos_focused_absolute);
+    RUN_TEST(test_cursor_pos_blurred);
+    RUN_TEST(test_cursor_pos_relative_abstains);
+    RUN_TEST(test_cursor_pos_multiline);
+    RUN_TEST(test_view_no_longer_emits_trailing_cup);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

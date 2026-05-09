@@ -480,6 +480,71 @@ static void test_contains_hit_test(void)
     tui_viewport_free(vp);
 }
 
+/* ---------- cursor() tests ---------- */
+
+static void test_cursor_pos_passive(void)
+{
+    /* Not in copy-mode → abstain regardless of focus. */
+    TuiViewport *vp = tui_viewport_create();
+    tui_viewport_set_size(vp, 80, 5);
+    tui_viewport_set_focused(vp, 1);
+    tui_viewport_append(vp, "alpha\nbeta\n", 11);
+
+    TuiCursor c = tui_viewport_cursor_pos(vp);
+    assert(c.visible == 0);
+
+    tui_viewport_free(vp);
+}
+
+static void test_cursor_pos_unfocused_copy_mode_abstains(void)
+{
+    /* Copy-mode but not focused → abstain. */
+    TuiViewport *vp = tui_viewport_create();
+    tui_viewport_set_size(vp, 80, 5);
+    tui_viewport_set_focused(vp, 1);
+    tui_viewport_append(vp, "alpha\nbeta\n", 11);
+    tui_viewport_enter_copy_mode(vp);
+    tui_viewport_set_focused(vp, 0);
+
+    TuiCursor c = tui_viewport_cursor_pos(vp);
+    assert(c.visible == 0);
+
+    tui_viewport_free(vp);
+}
+
+static void test_cursor_pos_copy_mode(void)
+{
+    TuiViewport *vp = tui_viewport_create();
+    tui_viewport_set_size(vp, 80, 5);
+    tui_viewport_set_focused(vp, 1);
+    tui_viewport_set_auto_scroll(vp, 0);
+    tui_viewport_set_render_position(vp, 3, 2);
+    tui_viewport_append(vp, "alpha\nbeta\ngamma\n", 17);
+
+    tui_viewport_enter_copy_mode(vp);
+
+    /* Cursor lands at top-left of visible area: (render_row, render_col). */
+    TuiCursor c = tui_viewport_cursor_pos(vp);
+    assert(c.visible == 1);
+    assert(c.row == 3);
+    assert(c.col == 2);
+
+    /* Move down one line; row advances by 1, col unchanged. */
+    run_update(vp, tui_msg_key(TUI_KEY_NONE, 'n', TUI_MOD_CTRL));
+    c = tui_viewport_cursor_pos(vp);
+    assert(c.visible == 1);
+    assert(c.row == 4);
+    assert(c.col == 2);
+
+    /* End-of-line jumps col to display width of "beta" = 4 → col = 2 + 4 = 6. */
+    run_update(vp, tui_msg_key(TUI_KEY_NONE, 'e', TUI_MOD_CTRL));
+    c = tui_viewport_cursor_pos(vp);
+    assert(c.visible == 1);
+    assert(c.col == 6);
+
+    tui_viewport_free(vp);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -508,6 +573,10 @@ int main(void)
     RUN_TEST(test_m_w_emits_clipboard_command);
     RUN_TEST(test_mouse_left_press_starts_selection);
     RUN_TEST(test_contains_hit_test);
+
+    RUN_TEST(test_cursor_pos_passive);
+    RUN_TEST(test_cursor_pos_unfocused_copy_mode_abstains);
+    RUN_TEST(test_cursor_pos_copy_mode);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

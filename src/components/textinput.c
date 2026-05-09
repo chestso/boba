@@ -1283,19 +1283,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                 dynamic_buffer_append_str(out, EL_TO_END);
                 render_divider_inline(out, term_width, input->divider_color);
             }
-
-            /* Position cursor on input line */
-            if (input->focused) {
-                int prompt_width =
-                    (input->show_prompt && input->prompt) ? input->prompt_len : 0;
-                int cursor_cp = tui_utf8_cp_index(input->text, input->cursor_byte);
-                int cursor_visual_col =
-                    prompt_width + (cursor_cp - input->offset) + 1; /* 1-indexed */
-
-                snprintf(pos_buf, sizeof(pos_buf), CSI "%d;%dH", input_row,
-                         cursor_visual_col);
-                dynamic_buffer_append_str(out, pos_buf);
-            }
+            /* Cursor placement is handled by the runtime via cursor(). */
         } else {
             /* Legacy relative positioning mode (terminal_row not set) */
 
@@ -1304,20 +1292,9 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
             dynamic_buffer_append_str(out, EL_TO_END);
 
             render_prompt_and_text(input, out);
-
-            /* Position cursor */
-            if (input->focused) {
-                int prompt_width =
-                    (input->show_prompt && input->prompt) ? input->prompt_len : 0;
-                int cursor_cp = tui_utf8_cp_index(input->text, input->cursor_byte);
-                int cursor_visual_col = prompt_width + (cursor_cp - input->offset);
-
-                dynamic_buffer_append_str(out, "\r");
-                if (cursor_visual_col > 0) {
-                    snprintf(pos_buf, sizeof(pos_buf), CSI "%dC", cursor_visual_col);
-                    dynamic_buffer_append_str(out, pos_buf);
-                }
-            }
+            /* Cursor placement: relative mode has no absolute coordinate
+             * frame; cursor() abstains and the cursor naturally lands at
+             * the end of what we just wrote. */
         }
     } else if (input->terminal_row > 0) {
         /* Multi-line mode with absolute positioning */
@@ -1378,18 +1355,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
             dynamic_buffer_append_str(out, EL_TO_END);
             render_divider_inline(out, term_width, input->divider_color);
         }
-
-        /* Position cursor */
-        if (input->focused) {
-            int prompt_width =
-                line_prompt_width(input, (int)input->cursor_row);
-            int cursor_col = (int)input->cursor_col - input->offset +
-                             prompt_width + 1; /* 1-indexed */
-            int cursor_row = content_start_row + (int)input->cursor_row;
-            snprintf(pos_buf, sizeof(pos_buf), CSI "%d;%dH", cursor_row,
-                     cursor_col);
-            dynamic_buffer_append_str(out, pos_buf);
-        }
+        /* Cursor placement is handled by the runtime via cursor(). */
     } else {
         /* Multi-line mode: relative positioning (legacy) */
         /* Output prompt if set and shown */
@@ -1722,6 +1688,29 @@ int tui_textinput_get_height(const TuiTextInput *input)
     return h;
 }
 
+/* Report cursor position for the runtime. Mirrors the arithmetic the old
+ * view() used internally before cursor placement was hoisted out. */
+TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
+{
+    if (!input || !input->focused)
+        return tui_cursor_hidden();
+    if (input->terminal_row <= 0)
+        return tui_cursor_hidden();
+
+    if (!input->multiline) {
+        int prompt_width =
+            (input->show_prompt && input->prompt) ? input->prompt_len : 0;
+        int cursor_cp = tui_utf8_cp_index(input->text, input->cursor_byte);
+        int col = prompt_width + (cursor_cp - input->offset) + 1;
+        return tui_cursor_at(input->terminal_row, col);
+    }
+
+    int prompt_width = line_prompt_width(input, (int)input->cursor_row);
+    int col = (int)input->cursor_col - input->offset + prompt_width + 1;
+    int row = input->terminal_row + (int)input->cursor_row;
+    return tui_cursor_at(row, col);
+}
+
 /* Component interface wrappers */
 static TuiInitResult textinput_init(void *config)
 {
@@ -1740,6 +1729,11 @@ static void textinput_view(const TuiModel *model, DynamicBuffer *out)
     tui_textinput_view((const TuiTextInput *)model, out);
 }
 
+static TuiCursor textinput_cursor(const TuiModel *model)
+{
+    return tui_textinput_cursor_pos((const TuiTextInput *)model);
+}
+
 static void textinput_free(TuiModel *model)
 {
     tui_textinput_free((TuiTextInput *)model);
@@ -1750,6 +1744,7 @@ static const TuiComponent textinput_component = {
     .init = textinput_init,
     .update = textinput_update,
     .view = textinput_view,
+    .cursor = textinput_cursor,
     .free = textinput_free,
 };
 

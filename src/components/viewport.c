@@ -901,6 +901,20 @@ static void compute_row_selection(const TuiViewport *vp, size_t v,
         *out_end = vp->width;
 }
 
+/* Report cursor position for the runtime. Visible only when focused AND
+ * in copy-mode (the only mode where the viewport tracks a cursor). */
+TuiCursor tui_viewport_cursor_pos(const TuiViewport *vp)
+{
+    if (!vp || !vp->focused || !vp->copy_mode)
+        return tui_cursor_hidden();
+
+    /* scroll_to_cursor() keeps cursor_visual_line within the visible window
+     * after every motion, so the subtraction is non-negative. */
+    int row = vp->render_row + (int)(vp->cursor_visual_line - vp->y_offset);
+    int col = vp->render_col + (int)vp->cursor_col;
+    return tui_cursor_at(row, col);
+}
+
 /* Render viewport to output buffer */
 void tui_viewport_view(const TuiViewport *vp, DynamicBuffer *out)
 {
@@ -1158,6 +1172,11 @@ static void viewport_view(const TuiModel *model, DynamicBuffer *out)
     tui_viewport_view((const TuiViewport *)model, out);
 }
 
+static TuiCursor viewport_cursor(const TuiModel *model)
+{
+    return tui_viewport_cursor_pos((const TuiViewport *)model);
+}
+
 static void viewport_free(TuiModel *model)
 {
     tui_viewport_free((TuiViewport *)model);
@@ -1167,6 +1186,7 @@ static const TuiComponent viewport_component_instance = {
     .init = viewport_init,
     .update = viewport_update,
     .view = viewport_view,
+    .cursor = viewport_cursor,
     .free = viewport_free,
 };
 

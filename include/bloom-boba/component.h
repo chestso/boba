@@ -23,6 +23,31 @@ struct TuiModel
     int type; /* Component type identifier */
 };
 
+/* Cursor position reported by a component to the runtime.
+ *
+ * Bubbletea v2 alignment: components no longer emit cursor-positioning
+ * sequences inside view(); they instead return where they want the
+ * hardware cursor placed. Set visible=0 (or leave the slot NULL on the
+ * TuiComponent vtable) to abstain — the runtime keeps the cursor hidden. */
+typedef struct TuiCursor
+{
+    int row;     /* 1-indexed terminal row */
+    int col;     /* 1-indexed terminal column */
+    int visible; /* 0 = abstain (cursor hidden), 1 = place at row,col */
+} TuiCursor;
+
+static inline TuiCursor tui_cursor_hidden(void)
+{
+    TuiCursor c = { 0, 0, 0 };
+    return c;
+}
+
+static inline TuiCursor tui_cursor_at(int row, int col)
+{
+    TuiCursor c = { row, col, 1 };
+    return c;
+}
+
 /* Update result - returned by update function */
 typedef struct
 {
@@ -47,6 +72,11 @@ typedef struct TuiComponent
 
     /* Render model state to output buffer */
     void (*view)(const TuiModel *model, DynamicBuffer *out);
+
+    /* Optional: where the focused cursor should be placed for this frame.
+     * Return tui_cursor_hidden() (or leave the slot NULL on the vtable) to
+     * abstain — the runtime keeps the cursor hidden. */
+    TuiCursor (*cursor)(const TuiModel *model);
 
     /* Free model and associated resources */
     void (*free)(TuiModel *model);

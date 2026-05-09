@@ -476,7 +476,12 @@ void tui_runtime_stop(TuiRuntime *runtime)
     runtime->started = 0;
 }
 
-/* Render view and write to output (with cursor hide/show) */
+/* Render view, place cursor per component opinion, and write to output.
+ *
+ * Bubbletea v2 alignment: components write content only in view(); they
+ * report where the hardware cursor should land via the optional cursor()
+ * slot. The runtime hides the cursor during paint, then either places it
+ * at the reported position and shows it, or leaves it hidden. */
 void tui_runtime_flush(TuiRuntime *runtime)
 {
     if (!runtime || !runtime->component || !runtime->model)
@@ -484,17 +489,23 @@ void tui_runtime_flush(TuiRuntime *runtime)
 
     dynamic_buffer_clear(runtime->view_buf);
 
-    /* Hide cursor during render to prevent flicker */
+    /* Hide cursor during paint to prevent flicker. */
     dynamic_buffer_append_str(runtime->view_buf, ANSI_HIDE_CURSOR);
 
-    /* Render component view into buffer */
     runtime->component->view(runtime->model, runtime->view_buf);
 
-    /* Restore cursor visibility unless config says keep hidden */
-    if (!runtime->config.hide_cursor)
-        dynamic_buffer_append_str(runtime->view_buf, ANSI_SHOW_CURSOR);
+    TuiCursor cursor = tui_cursor_hidden();
+    if (runtime->component->cursor)
+        cursor = runtime->component->cursor(runtime->model);
 
-    /* Write all at once */
+    /* config.hide_cursor remains a hard override (always keep hidden). */
+    if (cursor.visible && !runtime->config.hide_cursor) {
+        char buf[32];
+        ansi_format_cursor_pos(buf, sizeof(buf), cursor.row, cursor.col);
+        dynamic_buffer_append_str(runtime->view_buf, buf);
+        dynamic_buffer_append_str(runtime->view_buf, ANSI_SHOW_CURSOR);
+    }
+
     fwrite(dynamic_buffer_data(runtime->view_buf), 1,
            dynamic_buffer_len(runtime->view_buf), runtime->output);
     fflush(runtime->output);

@@ -53,6 +53,12 @@ static void app_view(const TuiModel *m, DynamicBuffer *out)
     tui_textinput_view(a->ti, out);
 }
 
+static TuiCursor app_cursor(const TuiModel *m)
+{
+    const App *a = (const App *)m;
+    return tui_textinput_cursor_pos(a->ti);
+}
+
 static void app_free(TuiModel *m)
 {
     App *a = (App *)m;
@@ -66,6 +72,7 @@ static const TuiComponent app_component = {
     .init = app_init,
     .update = app_update,
     .view = app_view,
+    .cursor = app_cursor,
     .free = app_free,
 };
 

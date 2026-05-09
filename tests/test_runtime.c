@@ -930,6 +930,133 @@ static void test_post_wakes_event_loop(void)
 }
 #endif /* !_WIN32 */
 
+/* ========================================================================
+ * Cursor() / flush tests
+ * ======================================================================== */
+
+#include <bloom-boba/ansi_sequences.h>
+
+/* Component whose cursor() returns a configured TuiCursor. */
+static TuiCursor s_cursor_to_return = { 0, 0, 0 };
+
+static TuiInitResult cursor_stub_init(void *config)
+{
+    (void)config;
+    TestModel *m = calloc(1, sizeof(TestModel));
+    m->base.type = 994;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+static TuiCursor cursor_stub_cursor(const TuiModel *model)
+{
+    (void)model;
+    return s_cursor_to_return;
+}
+
+static TuiComponent cursor_stub_component = {
+    .init = cursor_stub_init,
+    .update = noop_update,
+    .view = test_view,
+    .cursor = cursor_stub_cursor,
+    .free = test_free,
+};
+
+static void test_flush_emits_cursor_when_visible(void)
+{
+    char outbuf[1024];
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&cursor_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    s_cursor_to_return = tui_cursor_at(7, 12);
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    /* Output should contain HIDE → view content → CSI 7;12H → SHOW. */
+    assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
+    assert(strstr(outbuf, "\x1b[7;12H") != NULL);
+    assert(strstr(outbuf, ANSI_SHOW_CURSOR) != NULL);
+
+    /* SHOW must come AFTER the CUP, not before. */
+    const char *cup = strstr(outbuf, "\x1b[7;12H");
+    const char *show = strstr(outbuf, ANSI_SHOW_CURSOR);
+    assert(cup != NULL && show != NULL && show > cup);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+static void test_flush_keeps_cursor_hidden_on_abstain(void)
+{
+    char outbuf[1024];
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&cursor_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    s_cursor_to_return = tui_cursor_hidden();
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    /* HIDE present, no SHOW emitted. */
+    assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
+    assert(strstr(outbuf, ANSI_SHOW_CURSOR) == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+static void test_flush_respects_config_hide_cursor(void)
+{
+    char outbuf[1024];
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    /* Component wants to show a cursor, but config.hide_cursor forces hide. */
+    TuiRuntimeConfig cfg = { .output = fp, .hide_cursor = 1 };
+    TuiRuntime *rt = tui_runtime_create(&cursor_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    s_cursor_to_return = tui_cursor_at(3, 5);
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
+    /* hide_cursor override → no SHOW, no CUP. */
+    assert(strstr(outbuf, ANSI_SHOW_CURSOR) == NULL);
+    assert(strstr(outbuf, "\x1b[3;5H") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+static void test_flush_with_null_cursor_slot_keeps_hidden(void)
+{
+    /* Component with cursor=NULL on the vtable: runtime treats as abstain. */
+    char outbuf[1024];
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    /* noop_component has no cursor slot (.cursor implicitly NULL). */
+    TuiRuntime *rt = tui_runtime_create(&noop_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
+    assert(strstr(outbuf, ANSI_SHOW_CURSOR) == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
 /* ======================================================================== */
 
 int main(void)
@@ -970,6 +1097,12 @@ int main(void)
     RUN_TEST(test_runtime_run_immediate_quit);
     RUN_TEST(test_post_wakes_event_loop);
 #endif
+
+    /* Cursor / flush tests */
+    RUN_TEST(test_flush_emits_cursor_when_visible);
+    RUN_TEST(test_flush_keeps_cursor_hidden_on_abstain);
+    RUN_TEST(test_flush_respects_config_hide_cursor);
+    RUN_TEST(test_flush_with_null_cursor_slot_keeps_hidden);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

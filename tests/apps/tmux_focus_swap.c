@@ -137,6 +137,13 @@ static void app_view(const TuiModel *m, DynamicBuffer *out)
                                  a->focus_idx == 0 ? "[INPUT]" : "[VIEW]");
 }
 
+static TuiCursor app_cursor(const TuiModel *m)
+{
+    const App *a = (const App *)m;
+    return a->focus_idx == 0 ? tui_textinput_cursor_pos(a->ti)
+                             : tui_viewport_cursor_pos(a->vp);
+}
+
 static void app_free(TuiModel *m)
 {
     App *a = (App *)m;
@@ -153,6 +160,7 @@ static const TuiComponent app_component = {
     .init = app_init,
     .update = app_update,
     .view = app_view,
+    .cursor = app_cursor,
     .free = app_free,
 };
 

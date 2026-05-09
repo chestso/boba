@@ -126,6 +126,10 @@ void tui_viewport_extract_selection(const TuiViewport *vp, char **out_text,
 /* Render viewport to output buffer */
 void tui_viewport_view(const TuiViewport *vp, DynamicBuffer *out);
 
+/* Report cursor position for the runtime. Visible only when the viewport
+ * is focused AND in copy-mode; otherwise abstains. */
+TuiCursor tui_viewport_cursor_pos(const TuiViewport *vp);
+
 /* Component interface for generic use */
 const TuiComponent *tui_viewport_component(void);
 

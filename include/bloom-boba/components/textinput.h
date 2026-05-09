@@ -223,6 +223,13 @@ int tui_textinput_get_echo_mode(const TuiTextInput *input);
  */
 int tui_textinput_get_height(const TuiTextInput *input);
 
+/* Report cursor position for the runtime to place the hardware cursor.
+ * Returns tui_cursor_hidden() when the input is unfocused or when
+ * terminal_row is 0 (relative-positioning mode — caller has no absolute
+ * coordinate frame). Otherwise returns the absolute (row, col) of the
+ * cursor on the input line. */
+TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input);
+
 /* Get component interface for text input */
 const TuiComponent *tui_textinput_component(void);
 

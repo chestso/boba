@@ -179,6 +179,7 @@ static const TuiComponent textview_component = {
     .init = textview_init,
     .update = textview_update,
     .view = textview_view,
+    .cursor = NULL, /* textview abstains — passive display only */
     .free = textview_free,
 };
 
