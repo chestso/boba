@@ -60,9 +60,19 @@ language. The architecture consists of three parts:
 
 Data flows in one direction:
 
-    Input → Message → Update(Model, Msg) → Model' → View → Output
-                                ↓
-                              Command → (async) → Message
+```mermaid
+flowchart LR
+    Input([Input bytes]) --> Msg[Msg]
+    Msg --> Update["update(Model, Msg)"]
+    Update -- mutates --> Model[(Model)]
+    Update --> Cmd[Cmd]
+    Model --> View["view(Model)"]
+    View --> TV["TuiView<br/>(content + cursor + mode flags)"]
+    TV --> Reconcile["reconcile against<br/>tracked terminal state"]
+    Reconcile --> Output([Output bytes])
+    Cmd --> Exec[execute]
+    Exec -. callback Msg .-> Msg
+```
 
 This unidirectional flow makes programs predictable and easy to reason about.
 
