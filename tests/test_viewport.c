@@ -274,30 +274,36 @@ static void run_update(TuiViewport *vp, TuiMsg msg)
         tui_cmd_free(r.cmd);
 }
 
-static void test_enter_copy_mode_via_ctrl_space(void)
+static void test_focus_enters_copy_mode_and_ctrl_space_toggles_mark(void)
 {
     TuiViewport *vp = tui_viewport_create();
     tui_viewport_set_size(vp, 80, 5);
-    tui_viewport_set_focused(vp, 1);
     tui_viewport_append(vp, "alpha\nbeta\n", 11);
 
-    /* C-SPC enters copy-mode */
-    run_update(vp, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    /* Gaining focus auto-enters copy-mode and parks the cursor at the
+     * top-left of the visible region. */
+    tui_viewport_set_focused(vp, 1);
     assert(vp->copy_mode == 1);
     assert(vp->has_mark == 0);
     assert(vp->cursor_visual_line == 0);
     assert(vp->cursor_col == 0);
 
-    /* Second C-SPC sets the mark */
+    /* C-SPC sets the mark at the cursor. */
     run_update(vp, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
     assert(vp->has_mark == 1);
 
-    /* Escape with mark clears mark */
+    /* Second C-SPC clears the mark. */
+    run_update(vp, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(vp->has_mark == 0);
+
+    /* Re-set the mark, then Escape clears it but stays in copy-mode. */
+    run_update(vp, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(vp->has_mark == 1);
     run_update(vp, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
     assert(vp->has_mark == 0);
     assert(vp->copy_mode == 1);
 
-    /* Escape without mark exits copy-mode */
+    /* Escape without mark exits copy-mode. */
     run_update(vp, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
     assert(vp->copy_mode == 0);
 
@@ -531,32 +537,42 @@ static void test_contains_hit_test(void)
 
 /* ---------- cursor() tests ---------- */
 
-static void test_cursor_pos_passive(void)
+static void test_cursor_pos_unfocused_abstains(void)
 {
-    /* Not in copy-mode → abstain regardless of focus. */
+    /* Cursor is hidden whenever the viewport is unfocused, regardless of
+     * copy-mode state. */
     TuiViewport *vp = tui_viewport_create();
     tui_viewport_set_size(vp, 80, 5);
-    tui_viewport_set_focused(vp, 1);
     tui_viewport_append(vp, "alpha\nbeta\n", 11);
 
+    /* Never focused → hidden. */
     TuiCursor c = tui_viewport_cursor_pos(vp);
+    assert(c.visible == 0);
+
+    /* Focus then blur → hidden again (blur exits copy-mode). */
+    tui_viewport_set_focused(vp, 1);
+    tui_viewport_set_focused(vp, 0);
+    c = tui_viewport_cursor_pos(vp);
     assert(c.visible == 0);
 
     tui_viewport_free(vp);
 }
 
-static void test_cursor_pos_unfocused_copy_mode_abstains(void)
+static void test_cursor_pos_visible_on_focus(void)
 {
-    /* Copy-mode but not focused → abstain. */
+    /* Focusing the viewport makes the cursor visible at the top-left of
+     * the visible region — no C-SPC required. */
     TuiViewport *vp = tui_viewport_create();
     tui_viewport_set_size(vp, 80, 5);
-    tui_viewport_set_focused(vp, 1);
+    tui_viewport_set_render_position(vp, 3, 2);
+    tui_viewport_set_auto_scroll(vp, 0);
     tui_viewport_append(vp, "alpha\nbeta\n", 11);
-    tui_viewport_enter_copy_mode(vp);
-    tui_viewport_set_focused(vp, 0);
 
+    tui_viewport_set_focused(vp, 1);
     TuiCursor c = tui_viewport_cursor_pos(vp);
-    assert(c.visible == 0);
+    assert(c.visible == 1);
+    assert(c.row == 3);
+    assert(c.col == 2);
 
     tui_viewport_free(vp);
 }
@@ -615,7 +631,7 @@ int main(void)
     RUN_TEST(test_word_wrap_count);
     RUN_TEST(test_word_wrap_no_break_falls_back);
 
-    RUN_TEST(test_enter_copy_mode_via_ctrl_space);
+    RUN_TEST(test_focus_enters_copy_mode_and_ctrl_space_toggles_mark);
     RUN_TEST(test_cursor_navigation);
     RUN_TEST(test_cursor_follow_scrolls);
     RUN_TEST(test_extract_selection_same_line);
@@ -625,8 +641,8 @@ int main(void)
     RUN_TEST(test_mouse_left_press_starts_selection);
     RUN_TEST(test_contains_hit_test);
 
-    RUN_TEST(test_cursor_pos_passive);
-    RUN_TEST(test_cursor_pos_unfocused_copy_mode_abstains);
+    RUN_TEST(test_cursor_pos_unfocused_abstains);
+    RUN_TEST(test_cursor_pos_visible_on_focus);
     RUN_TEST(test_cursor_pos_copy_mode);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);

@@ -772,11 +772,21 @@ size_t tui_viewport_line_count(const TuiViewport *vp)
     return vp ? vp->line_count : 0;
 }
 
-/* Set focus state */
+/* Set focus state. Mirrors the TUI_MSG_FOCUS/TUI_MSG_BLUR path: gaining
+ * focus auto-enters copy mode (cursor parked at top-left); losing focus
+ * exits copy mode and clears any mark. */
 void tui_viewport_set_focused(TuiViewport *vp, int focused)
 {
-    if (vp)
-        vp->focused = focused ? 1 : 0;
+    if (!vp)
+        return;
+    int was_focused = vp->focused;
+    vp->focused = focused ? 1 : 0;
+    if (vp->focused && !was_focused)
+        tui_viewport_enter_copy_mode(vp);
+    else if (!vp->focused && was_focused) {
+        vp->mouse_dragging = 0;
+        tui_viewport_exit_copy_mode(vp);
+    }
 }
 
 /* --- Copy-mode helpers --- */
@@ -1066,33 +1076,26 @@ static void compute_row_selection(const TuiViewport *vp, size_t v,
     *out_start = 0;
     *out_end = 0;
 
-    if (!vp->copy_mode || !vp->focused)
+    if (!vp->copy_mode || !vp->focused || !vp->has_mark)
         return;
 
     size_t start_v, end_v;
     int start_col, end_col;
 
-    if (vp->has_mark) {
-        /* Order mark and cursor */
-        int cursor_first = (vp->cursor_visual_line < vp->mark_visual_line) ||
-                           (vp->cursor_visual_line == vp->mark_visual_line &&
-                            vp->cursor_col <= vp->mark_col);
-        if (cursor_first) {
-            start_v = vp->cursor_visual_line;
-            start_col = (int)vp->cursor_col;
-            end_v = vp->mark_visual_line;
-            end_col = (int)vp->mark_col + 1;
-        } else {
-            start_v = vp->mark_visual_line;
-            start_col = (int)vp->mark_col;
-            end_v = vp->cursor_visual_line;
-            end_col = (int)vp->cursor_col + 1;
-        }
-    } else {
-        /* No mark: highlight just the cursor cell */
-        start_v = end_v = vp->cursor_visual_line;
+    /* Order mark and cursor */
+    int cursor_first = (vp->cursor_visual_line < vp->mark_visual_line) ||
+                       (vp->cursor_visual_line == vp->mark_visual_line &&
+                        vp->cursor_col <= vp->mark_col);
+    if (cursor_first) {
+        start_v = vp->cursor_visual_line;
         start_col = (int)vp->cursor_col;
-        end_col = start_col + 1;
+        end_v = vp->mark_visual_line;
+        end_col = (int)vp->mark_col + 1;
+    } else {
+        start_v = vp->mark_visual_line;
+        start_col = (int)vp->mark_col;
+        end_v = vp->cursor_visual_line;
+        end_col = (int)vp->cursor_col + 1;
     }
 
     if (v < start_v || v > end_v)
@@ -1118,11 +1121,12 @@ static void compute_row_selection(const TuiViewport *vp, size_t v,
         *out_end = vp->width;
 }
 
-/* Report cursor position for the runtime. Visible only when focused AND
- * in copy-mode (the only mode where the viewport tracks a cursor). */
+/* Report cursor position for the runtime. Visible whenever the viewport
+ * is focused — focus auto-enters copy mode, so the cursor coordinates are
+ * always live while focused. */
 TuiCursor tui_viewport_cursor_pos(const TuiViewport *vp)
 {
-    if (!vp || !vp->focused || !vp->copy_mode)
+    if (!vp || !vp->focused)
         return tui_cursor_hidden();
 
     /* scroll_to_cursor() keeps cursor_visual_line within the visible window
@@ -1350,11 +1354,13 @@ static TuiUpdateResult viewport_update(TuiModel *model, TuiMsg msg)
 
     if (msg.type == TUI_MSG_FOCUS) {
         vp->focused = 1;
+        tui_viewport_enter_copy_mode(vp);
         return tui_update_result_none();
     }
     if (msg.type == TUI_MSG_BLUR) {
         vp->focused = 0;
         vp->mouse_dragging = 0;
+        tui_viewport_exit_copy_mode(vp);
         return tui_update_result_none();
     }
 
