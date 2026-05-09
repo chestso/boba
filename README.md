@@ -122,7 +122,8 @@ tui_runtime_post(rt, msg);  /* Wakes up select() immediately */
 **Scheduling commands** — executed directly, bypassing `update()`:
 
 ```c
-TuiCmd *cmd = tui_cmd_set_window_title("New Title");
+/* e.g. push something onto the system clipboard from a worker thread */
+TuiCmd *cmd = tui_cmd_clipboard_copy(text, len);
 tui_runtime_schedule(rt, cmd);  /* Runtime takes ownership */
 ```
 
@@ -693,10 +694,12 @@ These tests are folded into `make check` automatically when `tmux` is on `PATH` 
 ```
 tests/
 ├── apps/                       # mini-apps (one per scenario)
-│   └── tmux_textinput_multi.c
+│   ├── tmux_textinput_multi.c
+│   └── tmux_focus_swap.c
 └── tmux/
     ├── lib.sh                  # bash helpers
-    └── scroll_multiline.sh
+    ├── scroll_multiline.sh
+    └── focus_shift_tab.sh
 ```
 
 A mini-app is a few dozen lines of C that wraps a component, handles `TUI_MSG_WINDOW_SIZE` to call the relevant `set_terminal_width`, and calls `tui_runtime_run()`. No quit key is needed — the driver tears down with `tmux kill-session`.
