@@ -1,6 +1,6 @@
 # tests/Makefile.am - Build and run bloom-boba unit tests
 
-UNIT_TESTS = test_textinput test_viewport test_statusbar test_runtime test_focus test_clipboard test_input_parser
+UNIT_TESTS = test_textinput test_viewport test_statusbar test_runtime test_focus test_clipboard test_input_parser test_style
 
 check_PROGRAMS = $(UNIT_TESTS)
 
@@ -16,6 +16,7 @@ test_runtime_SOURCES = test_runtime.c
 test_focus_SOURCES = test_focus.c
 test_clipboard_SOURCES = test_clipboard.c
 test_input_parser_SOURCES = test_input_parser.c
+test_style_SOURCES = test_style.c
 
 # tmux-driven end-to-end tests: separate target so the fast unit suite stays
 # hermetic. `make check-tmux` builds the mini-apps and runs the shell drivers.

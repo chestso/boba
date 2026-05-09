@@ -10,7 +10,8 @@ bloom_boba_HEADERS = \
     bloom-boba/runtime.h \
     bloom-boba/dynamic_buffer.h \
     bloom-boba/ansi_sequences.h \
-    bloom-boba/unicode.h
+    bloom-boba/unicode.h \
+    bloom-boba/style.h
 
 bloom_boba_componentsdir = $(includedir)/bloom-boba/components
 bloom_boba_components_HEADERS = \

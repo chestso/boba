@@ -11,6 +11,7 @@ libbloom_boba_a_SOURCES = \
     ansi_sequences.c \
     unicode.c \
     base64.c \
+    style.c \
     components/textinput.c \
     components/textview.c \
     components/viewport.c \
