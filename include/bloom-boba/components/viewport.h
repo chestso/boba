@@ -44,6 +44,7 @@ typedef struct TuiViewport
     /* Wrapping */
     size_t total_visual_lines; /* Sum of all lines' visual_lines */
     int wrap_mode;             /* 0 = clip (truncate at width), 1 = wrap (default) */
+    int word_wrap;             /* 0 = column-boundary wrap, 1 = word-boundary wrap */
 
     /* Render position (absolute, 1-indexed) */
     int render_row; /* Starting row */
@@ -90,6 +91,12 @@ void tui_viewport_set_render_position(TuiViewport *vp, int row, int col);
 void tui_viewport_set_max_lines(TuiViewport *vp, int max);
 void tui_viewport_set_auto_scroll(TuiViewport *vp, int enabled);
 void tui_viewport_set_wrap_mode(TuiViewport *vp, int wrap);
+
+/* Toggle word-boundary wrapping. When on (and wrap_mode is 1), long lines
+ * break at the last whitespace before viewport_width; falls back to a
+ * column-boundary break if no whitespace is reachable within ~25% of the
+ * width. Default is 0 (column-boundary wrap, current behavior). */
+void tui_viewport_set_word_wrap(TuiViewport *vp, int word_wrap);
 
 /* Get line count (for testing/debugging) */
 size_t tui_viewport_line_count(const TuiViewport *vp);

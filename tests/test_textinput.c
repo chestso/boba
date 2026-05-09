@@ -272,6 +272,84 @@ static void test_release_event_ignored(void)
     tui_textinput_free(input);
 }
 
+/* Render the textinput view to a buffer and return its data as a malloc'd
+ * copy (caller frees). */
+static char *render_view(TuiTextInput *input)
+{
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_textinput_view(input, buf);
+    size_t n = dynamic_buffer_len(buf);
+    char *out = malloc(n + 1);
+    memcpy(out, dynamic_buffer_data(buf), n);
+    out[n] = '\0';
+    dynamic_buffer_destroy(buf);
+    return out;
+}
+
+static void test_focused_blurred_styles_differ(void)
+{
+    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_terminal_width(input, 20);
+
+    /* Bold focused, faint blurred. */
+    tui_textinput_set_focused_prompt_style(
+        input, tui_style_bold(tui_style_new(), 1));
+    tui_textinput_set_blurred_prompt_style(
+        input, tui_style_faint(tui_style_new(), 1));
+
+    tui_textinput_set_focus(input, 1);
+    char *focused = render_view(input);
+    assert(strstr(focused, "\033[1m") != NULL); /* bold open */
+    free(focused);
+
+    tui_textinput_set_focus(input, 0);
+    char *blurred = render_view(input);
+    assert(strstr(blurred, "\033[2m") != NULL); /* faint open */
+    free(blurred);
+
+    tui_textinput_free(input);
+}
+
+static void test_legacy_color_still_works(void)
+{
+    /* When no TuiStyle is set, the legacy raw-ANSI setter still applies. */
+    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_terminal_width(input, 20);
+    tui_textinput_set_focus(input, 1);
+
+    tui_textinput_set_prompt_color(input, "\033[35m");
+    char *out = render_view(input);
+    assert(strstr(out, "\033[35m") != NULL);
+    free(out);
+    tui_textinput_free(input);
+}
+
+static void test_style_overrides_legacy(void)
+{
+    /* Setting both legacy color and TuiStyle: TuiStyle wins. */
+    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_terminal_width(input, 20);
+    tui_textinput_set_focus(input, 1);
+
+    tui_textinput_set_prompt_color(input, "\033[35m"); /* legacy */
+    tui_textinput_set_focused_prompt_style(
+        input, tui_style_bold(tui_style_new(), 1));
+
+    char *out = render_view(input);
+    /* bold from style is present */
+    assert(strstr(out, "\033[1m") != NULL);
+    /* legacy magenta is NOT */
+    assert(strstr(out, "\033[35m") == NULL);
+    free(out);
+    tui_textinput_free(input);
+}
+
 static void test_history_navigation(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -893,6 +971,9 @@ int main(void)
     RUN_TEST(test_focus);
     RUN_TEST(test_unfocused_ignores_input);
     RUN_TEST(test_release_event_ignored);
+    RUN_TEST(test_focused_blurred_styles_differ);
+    RUN_TEST(test_legacy_color_still_works);
+    RUN_TEST(test_style_overrides_legacy);
     RUN_TEST(test_history_navigation);
     RUN_TEST(test_tab_emits_command);
     RUN_TEST(test_tab_word_start);

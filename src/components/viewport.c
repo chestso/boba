@@ -90,13 +90,113 @@ static int calc_visual_line_count(size_t display_width, int viewport_width,
     return (int)((display_width + viewport_width - 1) / viewport_width);
 }
 
+/* Word-aware visual line scanner.
+ *
+ * For each visual sub-line, computes the byte offset where it starts.
+ * Whitespace breaks are preferred; if no whitespace is available within
+ * ~25% of `viewport_width`, falls back to a column-boundary break. ANSI
+ * escape sequences are skipped without consuming display columns.
+ *
+ * If `out_starts` is non-NULL and `max_starts > 0`, fills it with the
+ * byte offsets (out_starts[0] is always 0). Returns the total visual
+ * line count regardless of capacity. */
+static int scan_word_wrapped_lines(const char *text, size_t len,
+                                   int viewport_width, size_t *out_starts,
+                                   int max_starts)
+{
+    int n_lines = 1;
+    if (out_starts && max_starts > 0)
+        out_starts[0] = 0;
+    if (viewport_width <= 0 || len == 0)
+        return 1;
+
+    size_t cur_break = 0;
+    int col = 0;
+    /* Byte offset right after the most recent whitespace seen on the
+     * current visual line (i.e., the start of the next word). */
+    size_t last_word_start = 0;
+    int last_word_start_col = 0;
+    int in_escape = 0;
+
+    /* Fall-back threshold: if the available word break is too far from the
+     * line edge, prefer the column break. 25% feels like a reasonable
+     * heuristic — Lipgloss/Bubbles uses similar tolerances. */
+    int fallback_threshold = (viewport_width * 3) / 4;
+    if (fallback_threshold < 1)
+        fallback_threshold = 1;
+
+    size_t i = 0;
+    while (i < len) {
+        if (in_escape) {
+            if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z')) {
+                in_escape = 0;
+            }
+            i++;
+            continue;
+        }
+        if (text[i] == '\033' && i + 1 < len && text[i + 1] == '[') {
+            in_escape = 1;
+            i += 2;
+            continue;
+        }
+
+        int clen = tui_utf8_char_len(&text[i]);
+        if (clen <= 0 || i + (size_t)clen > len)
+            clen = 1;
+        uint32_t cp = tui_utf8_decode(&text[i], clen);
+        int cp_w = tui_codepoint_width(cp);
+
+        if (col + cp_w > viewport_width) {
+            size_t break_at;
+            if (last_word_start > cur_break && last_word_start_col >= fallback_threshold) {
+                /* Break at the start of the last partial word — drop the
+                 * whitespace boundary itself onto the previous line. */
+                break_at = last_word_start;
+            } else {
+                break_at = i;
+            }
+            cur_break = break_at;
+            n_lines++;
+            if (out_starts && n_lines <= max_starts)
+                out_starts[n_lines - 1] = cur_break;
+            i = cur_break;
+            col = 0;
+            last_word_start = cur_break;
+            last_word_start_col = 0;
+            continue;
+        }
+
+        col += cp_w;
+        i += clen;
+
+        if (cp == ' ' || cp == '\t') {
+            last_word_start = i;
+            last_word_start_col = col;
+        }
+    }
+    return n_lines;
+}
+
+/* Recompute visual_lines for a single line under the given wrap settings. */
+static int line_visual_lines(const TuiViewportLine *line, int viewport_width,
+                             int wrap_mode, int word_wrap)
+{
+    if (!wrap_mode || viewport_width <= 0 || line->display_width == 0)
+        return 1;
+    if (word_wrap)
+        return scan_word_wrapped_lines(line->text, line->len, viewport_width,
+                                       NULL, 0);
+    return calc_visual_line_count(line->display_width, viewport_width,
+                                  wrap_mode);
+}
+
 /* Recompute visual_lines for all lines and total_visual_lines */
 static void recompute_all_visual_lines(TuiViewport *vp)
 {
     vp->total_visual_lines = 0;
     for (size_t i = 0; i < vp->line_count; i++) {
-        vp->lines[i].visual_lines = calc_visual_line_count(
-            vp->lines[i].display_width, vp->width, vp->wrap_mode);
+        vp->lines[i].visual_lines = line_visual_lines(
+            &vp->lines[i], vp->width, vp->wrap_mode, vp->word_wrap);
         vp->total_visual_lines += vp->lines[i].visual_lines;
     }
 }
@@ -140,7 +240,7 @@ static int add_line(TuiViewport *vp, const char *text, size_t len)
     line->len = len;
     line->display_width = tui_utf8_display_width_ansi(text, len);
     line->visual_lines =
-        calc_visual_line_count(line->display_width, vp->width, vp->wrap_mode);
+        line_visual_lines(line, vp->width, vp->wrap_mode, vp->word_wrap);
     vp->total_visual_lines += line->visual_lines;
     vp->line_count++;
 
@@ -167,7 +267,7 @@ static int append_to_last_line(TuiViewport *vp, const char *text, size_t len)
     /* Update visual line count */
     vp->total_visual_lines -= last->visual_lines;
     last->visual_lines =
-        calc_visual_line_count(last->display_width, vp->width, vp->wrap_mode);
+        line_visual_lines(last, vp->width, vp->wrap_mode, vp->word_wrap);
     vp->total_visual_lines += last->visual_lines;
 
     return 0;
@@ -229,8 +329,115 @@ static size_t find_content_line_for_visual(const TuiViewport *vp,
  *
  * If sel_end > sel_start, the [sel_start, sel_end) range (in local display
  * columns within this row) is rendered with SGR_REVERSE. */
+/* Walk `text` from byte 0 up to byte `end`, accumulating non-reset SGR
+ * sequences into `sgr_buf` so the caller can re-emit them before the
+ * visible content (preventing color bleed across wrap boundaries). */
+static void collect_sgr_state_to_offset(const char *text, size_t end,
+                                        char *sgr_buf, size_t *sgr_len,
+                                        size_t sgr_buf_size)
+{
+    int in_escape = 0;
+    int in_csi = 0;
+    size_t csi_start = 0;
+    for (size_t i = 0; i < end; i++) {
+        if (in_escape) {
+            if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z')) {
+                in_escape = 0;
+                if (text[i] == 'm' && in_csi) {
+                    size_t seq_len = i - csi_start + 1;
+                    int is_reset = 0;
+                    if (seq_len == 4 && text[csi_start + 2] == '0')
+                        is_reset = 1;
+                    if (seq_len == 3)
+                        is_reset = 1;
+                    if (is_reset) {
+                        *sgr_len = 0;
+                    } else if (*sgr_len + seq_len < sgr_buf_size) {
+                        memcpy(sgr_buf + *sgr_len, text + csi_start, seq_len);
+                        *sgr_len += seq_len;
+                    }
+                }
+                in_csi = 0;
+            }
+        } else if (text[i] == '\033' && i + 1 < end && text[i + 1] == '[') {
+            in_escape = 1;
+            in_csi = 1;
+            csi_start = i;
+            i++;
+        }
+    }
+}
+
+/* Find byte offset of the start of `sub_line` under word-boundary wrap.
+ * Replays scan_word_wrapped_lines but bails out as soon as the requested
+ * sub_line index is reached. */
+static size_t find_word_wrap_subline_offset(const char *text, size_t len,
+                                            int viewport_width, int sub_line)
+{
+    if (sub_line <= 0 || viewport_width <= 0 || len == 0)
+        return 0;
+
+    int cur_line = 0;
+    size_t cur_break = 0;
+    int col = 0;
+    size_t last_word_start = 0;
+    int last_word_start_col = 0;
+    int in_escape = 0;
+    int fallback_threshold = (viewport_width * 3) / 4;
+    if (fallback_threshold < 1)
+        fallback_threshold = 1;
+
+    size_t i = 0;
+    while (i < len) {
+        if (in_escape) {
+            if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z'))
+                in_escape = 0;
+            i++;
+            continue;
+        }
+        if (text[i] == '\033' && i + 1 < len && text[i + 1] == '[') {
+            in_escape = 1;
+            i += 2;
+            continue;
+        }
+
+        int clen = tui_utf8_char_len(&text[i]);
+        if (clen <= 0 || i + (size_t)clen > len)
+            clen = 1;
+        uint32_t cp = tui_utf8_decode(&text[i], clen);
+        int cp_w = tui_codepoint_width(cp);
+
+        if (col + cp_w > viewport_width) {
+            size_t break_at;
+            if (last_word_start > cur_break && last_word_start_col >= fallback_threshold) {
+                break_at = last_word_start;
+            } else {
+                break_at = i;
+            }
+            cur_break = break_at;
+            cur_line++;
+            if (cur_line == sub_line)
+                return cur_break;
+            i = cur_break;
+            col = 0;
+            last_word_start = cur_break;
+            last_word_start_col = 0;
+            continue;
+        }
+
+        col += cp_w;
+        i += clen;
+
+        if (cp == ' ' || cp == '\t') {
+            last_word_start = i;
+            last_word_start_col = col;
+        }
+    }
+    return len;
+}
+
 static void render_line_segment(const TuiViewportLine *line, int viewport_width,
-                                int sub_line, int wrap_mode,
+                                int sub_line, int wrap_mode, int word_wrap,
                                 DynamicBuffer *out, int sel_start, int sel_end)
 {
     const char *text = line->text;
@@ -240,43 +447,46 @@ static void render_line_segment(const TuiViewportLine *line, int viewport_width,
         /* Clip mode or first visual row: emit up to viewport_width display cols */
         size_t pos = 0;
         emit_cols(text, len, &pos, viewport_width, out, sel_start, sel_end);
-        /* Reset at end to prevent color bleeding */
         dynamic_buffer_append_str(out, SGR_RESET);
+        return;
+    }
+
+    /* Wrap mode, sub_line > 0. Two paths: word-wrap finds an explicit
+     * byte offset, column-boundary wrap walks display columns inline. */
+    char sgr_buf[SGR_STATE_BUF_SIZE];
+    size_t sgr_len = 0;
+    size_t i;
+
+    if (word_wrap) {
+        i = find_word_wrap_subline_offset(text, len, viewport_width, sub_line);
+        collect_sgr_state_to_offset(text, i, sgr_buf, &sgr_len,
+                                    SGR_STATE_BUF_SIZE);
     } else {
-        /* Wrap mode, sub_line > 0: skip first sub_line * viewport_width display
-         * columns, collecting ANSI SGR state, then emit next viewport_width cols */
+        /* Column-boundary wrap: skip sub_line * viewport_width display cols,
+         * collecting SGR along the way. */
         int skip_target = sub_line * viewport_width;
         int skipped = 0;
         int in_escape = 0;
-
-        /* SGR state buffer — accumulates active SGR sequences */
-        char sgr_buf[SGR_STATE_BUF_SIZE];
-        size_t sgr_len = 0;
-
-        /* Track start of current CSI sequence for SGR capture */
         size_t csi_start = 0;
         int in_csi = 0;
 
-        size_t i = 0;
-        /* Phase 1: skip display columns, collecting ANSI state */
+        i = 0;
         for (; i < len && skipped < skip_target; i++) {
             if (in_escape) {
-                if ((text[i] >= 'A' && text[i] <= 'Z') ||
-                    (text[i] >= 'a' && text[i] <= 'z')) {
+                if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z')) {
                     in_escape = 0;
-                    /* Check if this was an SGR sequence (ends with 'm') */
                     if (text[i] == 'm' && in_csi) {
                         size_t seq_len = i - csi_start + 1;
-                        /* Check for reset: ESC[0m or ESC[m */
                         int is_reset = 0;
                         if (seq_len == 4 && text[csi_start + 2] == '0')
-                            is_reset = 1; /* ESC[0m */
+                            is_reset = 1;
                         if (seq_len == 3)
-                            is_reset = 1; /* ESC[m */
+                            is_reset = 1;
                         if (is_reset) {
                             sgr_len = 0;
                         } else if (sgr_len + seq_len < SGR_STATE_BUF_SIZE) {
-                            memcpy(sgr_buf + sgr_len, text + csi_start, seq_len);
+                            memcpy(sgr_buf + sgr_len, text + csi_start,
+                                   seq_len);
                             sgr_len += seq_len;
                         }
                     }
@@ -286,27 +496,23 @@ static void render_line_segment(const TuiViewportLine *line, int viewport_width,
                 in_escape = 1;
                 in_csi = 1;
                 csi_start = i;
-                i++; /* Skip '[' */
+                i++;
             } else if ((unsigned char)text[i] >= 0x20) {
                 int clen = tui_utf8_char_len(&text[i]);
                 if (i + clen > len)
                     clen = (int)(len - i);
                 uint32_t cp = tui_utf8_decode(&text[i], clen);
                 skipped += tui_codepoint_width(cp);
-                i += clen - 1; /* -1 because loop increments */
+                i += clen - 1;
             }
         }
-
-        /* Emit accumulated SGR state before visible content */
-        if (sgr_len > 0) {
-            dynamic_buffer_append(out, sgr_buf, sgr_len);
-        }
-
-        /* Phase 2: emit next viewport_width display columns */
-        emit_cols(text, len, &i, viewport_width, out, sel_start, sel_end);
-        /* Reset at end to prevent color bleeding */
-        dynamic_buffer_append_str(out, SGR_RESET);
     }
+
+    if (sgr_len > 0)
+        dynamic_buffer_append(out, sgr_buf, sgr_len);
+
+    emit_cols(text, len, &i, viewport_width, out, sel_start, sel_end);
+    dynamic_buffer_append_str(out, SGR_RESET);
 }
 
 /* Create a new viewport */
@@ -545,6 +751,17 @@ void tui_viewport_set_wrap_mode(TuiViewport *vp, int wrap)
         return;
 
     vp->wrap_mode = wrap ? 1 : 0;
+    recompute_all_visual_lines(vp);
+    clamp_y_offset(vp);
+}
+
+/* Set word-boundary wrap mode */
+void tui_viewport_set_word_wrap(TuiViewport *vp, int word_wrap)
+{
+    if (!vp)
+        return;
+
+    vp->word_wrap = word_wrap ? 1 : 0;
     recompute_all_visual_lines(vp);
     clamp_y_offset(vp);
 }
@@ -940,7 +1157,8 @@ void tui_viewport_view(const TuiViewport *vp, DynamicBuffer *out)
 
         if (content_idx < vp->line_count) {
             render_line_segment(&vp->lines[content_idx], vp->width, sub_line,
-                                vp->wrap_mode, out, sel_start, sel_end);
+                                vp->wrap_mode, vp->word_wrap, out, sel_start,
+                                sel_end);
             sub_line++;
             if (sub_line >= vp->lines[content_idx].visual_lines) {
                 content_idx++;

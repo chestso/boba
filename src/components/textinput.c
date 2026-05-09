@@ -720,6 +720,12 @@ TuiTextInput *tui_textinput_create(const TuiTextInputConfig *config)
     input->show_prompt = 1;  /* Show prompt by default */
     input->history_pos = -1; /* -1 means we're at current input */
 
+    /* Lipgloss-shaped focused/blurred styles default to plain (no styling). */
+    input->focused_prompt_style = tui_style_new();
+    input->blurred_prompt_style = tui_style_new();
+    input->focused_divider_style = tui_style_new();
+    input->blurred_divider_style = tui_style_new();
+
     /* No word_chars set by default — is_word_char falls back to non-whitespace */
     input->word_chars = NULL;
 
@@ -1093,23 +1099,83 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     return tui_update_result(pending_cmd);
 }
 
+/* True if a TuiStyle carries any user-visible styling (color or attribute). */
+static int style_has_styling(const TuiStyle *s)
+{
+    if (!s)
+        return 0;
+    return s->fg.type != TUI_COLOR_NONE || s->bg.type != TUI_COLOR_NONE || s->bold || s->italic || s->underline || s->strikethrough || s->reverse || s->blink || s->faint;
+}
+
+/* Pick the right TuiStyle for the input's current focus state. */
+static const TuiStyle *prompt_style_for(const TuiTextInput *input)
+{
+    return input->focused ? &input->focused_prompt_style
+                          : &input->blurred_prompt_style;
+}
+static const TuiStyle *divider_style_for(const TuiTextInput *input)
+{
+    return input->focused ? &input->focused_divider_style
+                          : &input->blurred_divider_style;
+}
+
+/* Append `content` wrapped in a TuiStyle, or in a legacy raw ANSI prefix,
+ * or unstyled. Resolves in that order: TuiStyle > legacy_color > plain. */
+static void emit_styled_or_legacy(DynamicBuffer *out, const TuiStyle *style,
+                                  const char *legacy_color,
+                                  const char *content)
+{
+    if (style_has_styling(style)) {
+        TuiStyle inline_style = *style;
+        inline_style.inline_ = 1;
+        char *rendered = tui_style_render(&inline_style, content);
+        if (rendered) {
+            dynamic_buffer_append_str(out, rendered);
+            free(rendered);
+        }
+    } else if (legacy_color && legacy_color[0] != '\0') {
+        dynamic_buffer_append_str(out, legacy_color);
+        dynamic_buffer_append_str(out, content);
+        dynamic_buffer_append_str(out, SGR_RESET);
+    } else {
+        dynamic_buffer_append_str(out, content);
+    }
+}
+
 /* Render a horizontal divider line in place (no newline) */
 static void render_divider_inline(DynamicBuffer *out, int width,
-                                  const char *color)
+                                  const TuiStyle *style,
+                                  const char *legacy_color)
 {
-    /* Use Unicode box-drawing character ─ (U+2500) */
+    /* Build the divider content (─ × width). */
+    DynamicBuffer *line = dynamic_buffer_create(64);
+    if (!line)
+        return;
     const char *line_char = "\xe2\x94\x80"; /* UTF-8 encoding of ─ */
-    /* Reset any inherited color state before applying color */
+    for (int i = 0; i < width; i++)
+        dynamic_buffer_append_str(line, line_char);
+
+    /* Reset any inherited state before applying our own. */
     dynamic_buffer_append_str(out, SGR_RESET);
-    if (color && color[0] != '\0') {
-        dynamic_buffer_append_str(out, color);
+
+    if (style_has_styling(style)) {
+        TuiStyle inline_style = *style;
+        inline_style.inline_ = 1;
+        char *rendered =
+            tui_style_render(&inline_style, dynamic_buffer_data(line));
+        if (rendered) {
+            dynamic_buffer_append_str(out, rendered);
+            free(rendered);
+        }
     } else {
-        dynamic_buffer_append_str(out, SGR_DIM);
+        const char *color = (legacy_color && legacy_color[0] != '\0')
+                                ? legacy_color
+                                : SGR_DIM;
+        dynamic_buffer_append_str(out, color);
+        dynamic_buffer_append_str(out, dynamic_buffer_data(line));
+        dynamic_buffer_append_str(out, SGR_RESET);
     }
-    for (int i = 0; i < width; i++) {
-        dynamic_buffer_append_str(out, line_char);
-    }
-    dynamic_buffer_append_str(out, SGR_RESET);
+    dynamic_buffer_destroy(line);
 }
 
 /* Render continuation prompt or space-padding for lines after the first */
@@ -1117,11 +1183,8 @@ static void render_continuation_prompt(const TuiTextInput *input,
                                        DynamicBuffer *out)
 {
     if (input->continuation_prompt && input->continuation_prompt_len > 0) {
-        if (input->prompt_color[0] != '\0')
-            dynamic_buffer_append_str(out, input->prompt_color);
-        dynamic_buffer_append_str(out, input->continuation_prompt);
-        if (input->prompt_color[0] != '\0')
-            dynamic_buffer_append_str(out, SGR_RESET);
+        emit_styled_or_legacy(out, prompt_style_for(input),
+                              input->prompt_color, input->continuation_prompt);
     } else {
         for (int j = 0; j < input->prompt_len; j++)
             dynamic_buffer_append(out, " ", 1);
@@ -1213,11 +1276,8 @@ static void get_line_render_range(const TuiTextInput *input, size_t line_start,
 static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
 {
     if (input->show_prompt && input->prompt && input->prompt_len > 0) {
-        if (input->prompt_color[0] != '\0')
-            dynamic_buffer_append_str(out, input->prompt_color);
-        dynamic_buffer_append_str(out, input->prompt);
-        if (input->prompt_color[0] != '\0')
-            dynamic_buffer_append_str(out, SGR_RESET);
+        emit_styled_or_legacy(out, prompt_style_for(input),
+                              input->prompt_color, input->prompt);
     }
     if (input->text_len > 0) {
         size_t byte_start = 0;
@@ -1268,7 +1328,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                     snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", top_row);
                     dynamic_buffer_append_str(out, pos_buf);
                     dynamic_buffer_append_str(out, EL_TO_END);
-                    render_divider_inline(out, term_width, input->divider_color);
+                    render_divider_inline(out, term_width, divider_style_for(input), input->divider_color);
                 }
             }
 
@@ -1285,7 +1345,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                 snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", bottom_row);
                 dynamic_buffer_append_str(out, pos_buf);
                 dynamic_buffer_append_str(out, EL_TO_END);
-                render_divider_inline(out, term_width, input->divider_color);
+                render_divider_inline(out, term_width, divider_style_for(input), input->divider_color);
             }
             /* Cursor placement is handled by the runtime via cursor(). */
         } else {
@@ -1312,7 +1372,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                 snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", top_row);
                 dynamic_buffer_append_str(out, pos_buf);
                 dynamic_buffer_append_str(out, EL_TO_END);
-                render_divider_inline(out, term_width, input->divider_color);
+                render_divider_inline(out, term_width, divider_style_for(input), input->divider_color);
             }
         }
 
@@ -1357,7 +1417,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
             snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", bottom_row);
             dynamic_buffer_append_str(out, pos_buf);
             dynamic_buffer_append_str(out, EL_TO_END);
-            render_divider_inline(out, term_width, input->divider_color);
+            render_divider_inline(out, term_width, divider_style_for(input), input->divider_color);
         }
         /* Cursor placement is handled by the runtime via cursor(). */
     } else {
@@ -1663,6 +1723,30 @@ void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color)
     } else {
         input->prompt_color[0] = '\0';
     }
+}
+
+void tui_textinput_set_focused_prompt_style(TuiTextInput *input, TuiStyle s)
+{
+    if (input)
+        input->focused_prompt_style = s;
+}
+
+void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s)
+{
+    if (input)
+        input->blurred_prompt_style = s;
+}
+
+void tui_textinput_set_focused_divider_style(TuiTextInput *input, TuiStyle s)
+{
+    if (input)
+        input->focused_divider_style = s;
+}
+
+void tui_textinput_set_blurred_divider_style(TuiTextInput *input, TuiStyle s)
+{
+    if (input)
+        input->blurred_divider_style = s;
 }
 
 /* Set terminal width for divider rendering */

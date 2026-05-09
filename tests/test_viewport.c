@@ -215,6 +215,50 @@ static void test_wrap_mode(void)
     tui_viewport_free(vp);
 }
 
+static void test_word_wrap_count(void)
+{
+    /* Verify visual_lines counts differ when word_wrap is on vs off,
+     * for a line that contains a clear word break before the column
+     * boundary. */
+    TuiViewport *vp = tui_viewport_create();
+    tui_viewport_set_size(vp, 10, 5);
+    tui_viewport_set_wrap_mode(vp, 1);
+    tui_viewport_set_word_wrap(vp, 1);
+    assert(vp->word_wrap == 1);
+
+    /* "foo bar baz qux" — 15 visible chars. With column wrap at 10:
+     *   "foo bar ba" / "z qux"
+     * With word wrap and threshold (3*10/4 = 7), the last whitespace at
+     * col 8 (after "foo bar ") qualifies, so it breaks there:
+     *   "foo bar " / "baz qux"
+     * Both produce 2 visual lines but the BYTE boundaries differ. */
+    tui_viewport_append(vp, "foo bar baz qux", 15);
+    assert(vp->lines[0].visual_lines == 2);
+
+    /* Switching off word_wrap re-runs the count; same expected here (still 2). */
+    tui_viewport_set_word_wrap(vp, 0);
+    assert(vp->lines[0].visual_lines == 2);
+
+    tui_viewport_free(vp);
+}
+
+static void test_word_wrap_no_break_falls_back(void)
+{
+    /* A long unbroken word longer than viewport_width must hard-wrap at
+     * the column boundary; the word_wrap fallback engages because no
+     * whitespace exists past the threshold. */
+    TuiViewport *vp = tui_viewport_create();
+    tui_viewport_set_size(vp, 10, 5);
+    tui_viewport_set_wrap_mode(vp, 1);
+    tui_viewport_set_word_wrap(vp, 1);
+
+    /* 25 chars, no spaces. Should wrap at columns 10, 20, then 5 more. */
+    tui_viewport_append(vp, "abcdefghijklmnopqrstuvwxy", 25);
+    assert(vp->lines[0].visual_lines == 3);
+
+    tui_viewport_free(vp);
+}
+
 /* ---------- copy-mode / selection tests ---------- */
 
 /* Helper: free any update result command */
@@ -564,6 +608,8 @@ int main(void)
     RUN_TEST(test_view_output);
     RUN_TEST(test_set_size);
     RUN_TEST(test_wrap_mode);
+    RUN_TEST(test_word_wrap_count);
+    RUN_TEST(test_word_wrap_no_break_falls_back);
 
     RUN_TEST(test_enter_copy_mode_via_ctrl_space);
     RUN_TEST(test_cursor_navigation);
