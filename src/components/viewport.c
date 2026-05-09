@@ -1144,6 +1144,10 @@ static TuiUpdateResult viewport_update(TuiModel *model, TuiMsg msg)
         return tui_update_result_none();
 
     if (msg.type == TUI_MSG_KEY_PRESS) {
+        /* Ignore key release events (only emitted under Kitty kbd protocol). */
+        if (msg.data.key.action == TUI_KEY_ACTION_RELEASE)
+            return tui_update_result_none();
+
         const TuiKeyMsg *k = &msg.data.key;
 
         /* Outside copy-mode: only C-SPC enters it; everything else passes

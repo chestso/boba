@@ -778,6 +778,10 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     if (msg.type != TUI_MSG_KEY_PRESS)
         return tui_update_result_none();
 
+    /* Ignore key release events (only emitted under Kitty kbd protocol). */
+    if (msg.data.key.action == TUI_KEY_ACTION_RELEASE)
+        return tui_update_result_none();
+
     TuiKeyMsg key = msg.data.key;
 
     /* Handle C-x prefix: if set, check for C-x C-u (undo) */

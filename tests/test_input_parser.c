@@ -167,6 +167,69 @@ static void test_regular_char_still_parses(void)
     assert(m.data.key.rune == 'a');
 }
 
+/* ----- Kitty keyboard protocol: press/release -------------------------- */
+
+static void test_kitty_press_default_action(void)
+{
+    /* CSI 65 u — 'A' press. No event-type given → defaults to PRESS. */
+    TuiMsg m = parse_one("\033[65u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.rune == 'A');
+    assert(m.data.key.action == TUI_KEY_ACTION_PRESS);
+}
+
+static void test_kitty_press_explicit_event_type(void)
+{
+    /* CSI 65;1:1 u — 'A' press with explicit event-type 1. */
+    TuiMsg m = parse_one("\033[65;1:1u");
+    assert(m.data.key.rune == 'A');
+    assert(m.data.key.action == TUI_KEY_ACTION_PRESS);
+}
+
+static void test_kitty_repeat_maps_to_press(void)
+{
+    /* CSI 65;1:2 u — 'A' repeat. Folds into PRESS. */
+    TuiMsg m = parse_one("\033[65;1:2u");
+    assert(m.data.key.action == TUI_KEY_ACTION_PRESS);
+}
+
+static void test_kitty_release(void)
+{
+    /* CSI 65;1:3 u — 'A' release. Type stays KEY_PRESS; action discriminates. */
+    TuiMsg m = parse_one("\033[65;1:3u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.rune == 'A');
+    assert(m.data.key.action == TUI_KEY_ACTION_RELEASE);
+}
+
+static void test_kitty_release_with_ctrl(void)
+{
+    /* CSI 65;5:3 u — Ctrl+'A' release. */
+    TuiMsg m = parse_one("\033[65;5:3u");
+    assert(m.data.key.rune == 'A');
+    assert(m.data.key.mods == TUI_MOD_CTRL);
+    assert(m.data.key.action == TUI_KEY_ACTION_RELEASE);
+}
+
+static void test_kitty_release_special_key(void)
+{
+    /* CSI 13;1:3 u — Enter release. */
+    TuiMsg m = parse_one("\033[13;1:3u");
+    assert(m.data.key.key == TUI_KEY_ENTER);
+    assert(m.data.key.action == TUI_KEY_ACTION_RELEASE);
+}
+
+/* Regression: standard CSI sequences with ';' separator still parse after
+ * the param-array refactor. */
+static void test_csi_ctrl_up_still_works(void)
+{
+    /* CSI 1;5A — Ctrl+Up arrow. */
+    TuiMsg m = parse_one("\033[1;5A");
+    assert(m.data.key.key == TUI_KEY_UP);
+    assert(m.data.key.mods == TUI_MOD_CTRL);
+    assert(m.data.key.action == TUI_KEY_ACTION_PRESS);
+}
+
 /* ----- bracketed paste ------------------------------------------------- */
 
 /* Feed the whole input in one shot and assert exactly `expected` messages
@@ -327,6 +390,14 @@ int main(void)
     RUN_TEST(test_motion_with_ctrl);
 
     RUN_TEST(test_regular_char_still_parses);
+
+    RUN_TEST(test_kitty_press_default_action);
+    RUN_TEST(test_kitty_press_explicit_event_type);
+    RUN_TEST(test_kitty_repeat_maps_to_press);
+    RUN_TEST(test_kitty_release);
+    RUN_TEST(test_kitty_release_with_ctrl);
+    RUN_TEST(test_kitty_release_special_key);
+    RUN_TEST(test_csi_ctrl_up_still_works);
 
     RUN_TEST(test_paste_simple);
     RUN_TEST(test_paste_empty);

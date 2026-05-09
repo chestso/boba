@@ -256,6 +256,22 @@ static void test_unfocused_ignores_input(void)
     tui_textinput_free(input);
 }
 
+static void test_release_event_ignored(void)
+{
+    /* Release events (only emitted under Kitty kbd protocol) must not
+     * insert text, even though the message type is TUI_MSG_KEY_PRESS. */
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+
+    tui_textinput_update(input, tui_msg_key_release(TUI_KEY_NONE, 'a', 0));
+    assert(strcmp(tui_textinput_text(input), "") == 0);
+
+    /* Press still inserts. */
+    send_char(input, 'a');
+    assert(strcmp(tui_textinput_text(input), "a") == 0);
+    tui_textinput_free(input);
+}
+
 static void test_history_navigation(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -876,6 +892,7 @@ int main(void)
     RUN_TEST(test_clear);
     RUN_TEST(test_focus);
     RUN_TEST(test_unfocused_ignores_input);
+    RUN_TEST(test_release_event_ignored);
     RUN_TEST(test_history_navigation);
     RUN_TEST(test_tab_emits_command);
     RUN_TEST(test_tab_word_start);

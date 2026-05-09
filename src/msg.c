@@ -25,6 +25,14 @@ TuiMsg tui_msg_key(int key, uint32_t rune, int mods)
     return msg;
 }
 
+/* Create a key release message */
+TuiMsg tui_msg_key_release(int key, uint32_t rune, int mods)
+{
+    TuiMsg msg = tui_msg_key(key, rune, mods);
+    msg.data.key.action = TUI_KEY_ACTION_RELEASE;
+    return msg;
+}
+
 /* Create a key press message for a regular character */
 TuiMsg tui_msg_char(uint32_t rune, int mods)
 {

@@ -36,6 +36,19 @@ typedef enum
     TUI_MOD_META = 1 << 3,
 } TuiKeyMod;
 
+/* Key event action — press vs release.
+ *
+ * TUI_KEY_ACTION_PRESS is the default and what most apps want; release
+ * events only arrive when the consumer enables the Kitty keyboard
+ * protocol (set TuiView.kbd_enhancements = TUI_KBD_KITTY) and the
+ * terminal supports it. Repeat events are folded into PRESS to match
+ * Bubbletea v2's KeyMsg semantics. */
+typedef enum
+{
+    TUI_KEY_ACTION_PRESS = 0,
+    TUI_KEY_ACTION_RELEASE,
+} TuiKeyAction;
+
 /* Mouse button codes (SGR extended mode) */
 typedef enum
 {
@@ -102,9 +115,10 @@ typedef enum
 /* Key press message data */
 typedef struct
 {
-    int key;       /* Special key code (TuiKeyCode) or 0 for regular char */
-    uint32_t rune; /* Unicode codepoint for regular characters */
-    int mods;      /* Modifier flags (TuiKeyMod) */
+    int key;             /* Special key code (TuiKeyCode) or 0 for regular char */
+    uint32_t rune;       /* Unicode codepoint for regular characters */
+    int mods;            /* Modifier flags (TuiKeyMod) */
+    TuiKeyAction action; /* Press (default) vs release */
 } TuiKeyMsg;
 
 /* Window size message data */
@@ -149,6 +163,11 @@ TuiMsg tui_msg_none(void);
 
 /* Create a key press message with special key code */
 TuiMsg tui_msg_key(int key, uint32_t rune, int mods);
+
+/* Create a key release message — same shape as tui_msg_key but with
+ * action = TUI_KEY_ACTION_RELEASE. Only emitted by the parser when the
+ * Kitty keyboard protocol is in use. */
+TuiMsg tui_msg_key_release(int key, uint32_t rune, int mods);
 
 /* Create a key press message for a regular character */
 TuiMsg tui_msg_char(uint32_t rune, int mods);

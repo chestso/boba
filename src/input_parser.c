@@ -115,39 +115,57 @@ static TuiMsg parse_csi_sequence(const unsigned char *seq, int len)
     if (len == 0)
         return msg;
 
-    /* Check for modifier parameters (e.g., ESC[1;5A for Ctrl+Up) */
-    int param1 = 0, param2 = 0;
+    /* Parse decimal parameters separated by ';' or ':'.
+     * - ';' is the standard CSI parameter separator.
+     * - ':' is the sub-parameter separator (used by the Kitty keyboard
+     *   protocol, e.g. CSI 65 ; 5 : 3 u for Ctrl+'A' release).
+     * For our flat dispatch we treat both identically. */
+    int params[8] = { 0 };
+    int n_params = 0;
     const char *p = (const char *)seq;
     char final = seq[len - 1];
 
-    /* Parse numeric parameters */
-    while (*p >= '0' && *p <= '9') {
-        param1 = param1 * 10 + (*p - '0');
-        p++;
-    }
-    if (*p == ';') {
-        p++;
+    while (n_params < 8) {
+        int v = 0;
+        int saw_digit = 0;
         while (*p >= '0' && *p <= '9') {
-            param2 = param2 * 10 + (*p - '0');
+            v = v * 10 + (*p - '0');
             p++;
+            saw_digit = 1;
         }
-        /* param2 encodes modifiers: 1=none, 2=shift, 3=alt, etc */
-        if (param2 >= 2) {
-            if (param2 == 2)
-                mods |= TUI_MOD_SHIFT;
-            else if (param2 == 3)
-                mods |= TUI_MOD_ALT;
-            else if (param2 == 4)
-                mods |= TUI_MOD_ALT | TUI_MOD_SHIFT;
-            else if (param2 == 5)
-                mods |= TUI_MOD_CTRL;
-            else if (param2 == 6)
-                mods |= TUI_MOD_CTRL | TUI_MOD_SHIFT;
-            else if (param2 == 7)
-                mods |= TUI_MOD_CTRL | TUI_MOD_ALT;
-            else if (param2 == 8)
-                mods |= TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_SHIFT;
+        if (saw_digit) {
+            params[n_params++] = v;
         }
+        if (*p == ';' || *p == ':') {
+            if (!saw_digit && n_params < 8) {
+                /* Empty slot (e.g. ";;3" — leave previous defaults at 0). */
+                params[n_params++] = 0;
+            }
+            p++;
+        } else {
+            break;
+        }
+    }
+
+    int param1 = params[0];
+    int param2 = params[1];
+
+    /* param2 encodes modifiers: 1=none, 2=shift, 3=alt, etc */
+    if (param2 >= 2) {
+        if (param2 == 2)
+            mods |= TUI_MOD_SHIFT;
+        else if (param2 == 3)
+            mods |= TUI_MOD_ALT;
+        else if (param2 == 4)
+            mods |= TUI_MOD_ALT | TUI_MOD_SHIFT;
+        else if (param2 == 5)
+            mods |= TUI_MOD_CTRL;
+        else if (param2 == 6)
+            mods |= TUI_MOD_CTRL | TUI_MOD_SHIFT;
+        else if (param2 == 7)
+            mods |= TUI_MOD_CTRL | TUI_MOD_ALT;
+        else if (param2 == 8)
+            mods |= TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_SHIFT;
     }
 
     /* Map final character to key */
@@ -209,24 +227,33 @@ static TuiMsg parse_csi_sequence(const unsigned char *seq, int len)
         /* xterm legacy Shift+Tab: CSI Z */
         return tui_msg_key(TUI_KEY_TAB, 0, mods | TUI_MOD_SHIFT);
     case 'u':
-        /* CSI u - kitty keyboard protocol: ESC[keycode;modifiers u */
-        if (param1 == 13) {
-            return tui_msg_key(TUI_KEY_ENTER, 0, mods);
-        }
-        if (param1 == 9) {
-            return tui_msg_key(TUI_KEY_TAB, 0, mods);
-        }
-        if (param1 == 27) {
-            return tui_msg_key(TUI_KEY_ESCAPE, 0, mods);
-        }
-        if (param1 == 127) {
-            return tui_msg_key(TUI_KEY_BACKSPACE, 0, mods);
-        }
-        /* Regular codepoint with modifiers */
-        if (param1 >= 0x20) {
-            return tui_msg_key(TUI_KEY_NONE, (uint32_t)param1, mods);
-        }
-        break;
+    {
+        /* CSI u — Kitty keyboard protocol.
+         *   CSI codepoint ; modifiers : event-type u
+         * event-type: 1=press (default), 2=repeat, 3=release.
+         * Repeat folds into PRESS to match Bubbletea v2's KeyMsg shape. */
+        TuiKeyAction action = (params[2] == 3) ? TUI_KEY_ACTION_RELEASE
+                                               : TUI_KEY_ACTION_PRESS;
+
+        int key_code = TUI_KEY_NONE;
+        uint32_t rune = 0;
+        if (param1 == 13)
+            key_code = TUI_KEY_ENTER;
+        else if (param1 == 9)
+            key_code = TUI_KEY_TAB;
+        else if (param1 == 27)
+            key_code = TUI_KEY_ESCAPE;
+        else if (param1 == 127)
+            key_code = TUI_KEY_BACKSPACE;
+        else if (param1 >= 0x20)
+            rune = (uint32_t)param1;
+        else
+            break; /* Unrecognized — drop. */
+
+        TuiMsg km = tui_msg_key(key_code, rune, mods);
+        km.data.key.action = action;
+        return km;
+    }
     }
 
     return msg;
