@@ -164,9 +164,10 @@ static TuiUpdateResult textview_update(TuiModel *model, TuiMsg msg)
     return tui_textview_update((TuiTextView *)model, msg);
 }
 
-static void textview_view(const TuiModel *model, DynamicBuffer *out)
+static TuiView textview_view_slot(const TuiModel *model, DynamicBuffer *out)
 {
     tui_textview_view((const TuiTextView *)model, out);
+    return tui_view_default(out);
 }
 
 static void textview_free(TuiModel *model)
@@ -178,8 +179,7 @@ static void textview_free(TuiModel *model)
 static const TuiComponent textview_component = {
     .init = textview_init,
     .update = textview_update,
-    .view = textview_view,
-    .cursor = NULL, /* textview abstains — passive display only */
+    .view = textview_view_slot,
     .free = textview_free,
 };
 

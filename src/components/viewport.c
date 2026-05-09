@@ -1167,14 +1167,13 @@ static TuiUpdateResult viewport_update(TuiModel *model, TuiMsg msg)
     return tui_update_result_none();
 }
 
-static void viewport_view(const TuiModel *model, DynamicBuffer *out)
+static TuiView viewport_view_slot(const TuiModel *model, DynamicBuffer *out)
 {
-    tui_viewport_view((const TuiViewport *)model, out);
-}
-
-static TuiCursor viewport_cursor(const TuiModel *model)
-{
-    return tui_viewport_cursor_pos((const TuiViewport *)model);
+    const TuiViewport *vp = (const TuiViewport *)model;
+    tui_viewport_view(vp, out);
+    TuiView v = tui_view_default(out);
+    v.cursor = tui_viewport_cursor_pos(vp);
+    return v;
 }
 
 static void viewport_free(TuiModel *model)
@@ -1185,8 +1184,7 @@ static void viewport_free(TuiModel *model)
 static const TuiComponent viewport_component_instance = {
     .init = viewport_init,
     .update = viewport_update,
-    .view = viewport_view,
-    .cursor = viewport_cursor,
+    .view = viewport_view_slot,
     .free = viewport_free,
 };
 

@@ -110,68 +110,6 @@ TuiCmd *tui_cmd_tab_complete(char *prefix, int word_start)
     return cmd;
 }
 
-/* Helper: create a simple command with no payload */
-static TuiCmd *make_simple_cmd(TuiCmdType type)
-{
-    TuiCmd *cmd = (TuiCmd *)malloc(sizeof(TuiCmd));
-    if (!cmd)
-        return NULL;
-    memset(cmd, 0, sizeof(TuiCmd));
-    cmd->type = type;
-    return cmd;
-}
-
-TuiCmd *tui_cmd_enter_alt_screen(void)
-{
-    return make_simple_cmd(TUI_CMD_ENTER_ALT_SCREEN);
-}
-
-TuiCmd *tui_cmd_exit_alt_screen(void)
-{
-    return make_simple_cmd(TUI_CMD_EXIT_ALT_SCREEN);
-}
-
-TuiCmd *tui_cmd_enable_mouse(void)
-{
-    return make_simple_cmd(TUI_CMD_ENABLE_MOUSE);
-}
-
-TuiCmd *tui_cmd_disable_mouse(void)
-{
-    return make_simple_cmd(TUI_CMD_DISABLE_MOUSE);
-}
-
-TuiCmd *tui_cmd_enable_keyboard_enhancement(void)
-{
-    return make_simple_cmd(TUI_CMD_ENABLE_KEYBOARD_ENHANCEMENT);
-}
-
-TuiCmd *tui_cmd_disable_keyboard_enhancement(void)
-{
-    return make_simple_cmd(TUI_CMD_DISABLE_KEYBOARD_ENHANCEMENT);
-}
-
-TuiCmd *tui_cmd_show_cursor(void)
-{
-    return make_simple_cmd(TUI_CMD_SHOW_CURSOR);
-}
-
-TuiCmd *tui_cmd_hide_cursor(void)
-{
-    return make_simple_cmd(TUI_CMD_HIDE_CURSOR);
-}
-
-TuiCmd *tui_cmd_set_window_title(const char *title)
-{
-    TuiCmd *cmd = (TuiCmd *)malloc(sizeof(TuiCmd));
-    if (!cmd)
-        return NULL;
-    memset(cmd, 0, sizeof(TuiCmd));
-    cmd->type = TUI_CMD_SET_WINDOW_TITLE;
-    cmd->payload.window_title = title ? strdup(title) : NULL;
-    return cmd;
-}
-
 TuiCmd *tui_cmd_clipboard_copy(const char *text, size_t len)
 {
     TuiCmd *cmd = (TuiCmd *)malloc(sizeof(TuiCmd));
@@ -231,12 +169,6 @@ void tui_cmd_free(TuiCmd *cmd)
         }
         break;
 
-    case TUI_CMD_SET_WINDOW_TITLE:
-        if (cmd->payload.window_title) {
-            free(cmd->payload.window_title);
-        }
-        break;
-
     case TUI_CMD_CLIPBOARD_COPY:
         if (cmd->payload.clipboard.text) {
             free(cmd->payload.clipboard.text);
@@ -245,14 +177,6 @@ void tui_cmd_free(TuiCmd *cmd)
 
     case TUI_CMD_NONE:
     case TUI_CMD_QUIT:
-    case TUI_CMD_ENTER_ALT_SCREEN:
-    case TUI_CMD_EXIT_ALT_SCREEN:
-    case TUI_CMD_ENABLE_MOUSE:
-    case TUI_CMD_DISABLE_MOUSE:
-    case TUI_CMD_ENABLE_KEYBOARD_ENHANCEMENT:
-    case TUI_CMD_DISABLE_KEYBOARD_ENHANCEMENT:
-    case TUI_CMD_SHOW_CURSOR:
-    case TUI_CMD_HIDE_CURSOR:
         /* No resources to free */
         break;
     }

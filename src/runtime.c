@@ -251,65 +251,6 @@ static int execute_cmd(TuiRuntime *runtime, TuiCmd *cmd)
     case TUI_CMD_NONE:
         break;
 
-    /* Terminal control commands — write sequences to output */
-    case TUI_CMD_ENTER_ALT_SCREEN:
-        if (!runtime->in_alt_screen) {
-            runtime_write(runtime, DECSC);
-            runtime_write(runtime, ANSI_ENTER_ALT_SCREEN);
-            runtime->in_alt_screen = 1;
-            fflush(runtime->output);
-        }
-        break;
-
-    case TUI_CMD_EXIT_ALT_SCREEN:
-        if (runtime->in_alt_screen) {
-            runtime_write(runtime, ANSI_EXIT_ALT_SCREEN);
-            runtime_write(runtime, DECRC);
-            runtime->in_alt_screen = 0;
-            fflush(runtime->output);
-        }
-        break;
-
-    case TUI_CMD_ENABLE_MOUSE:
-        runtime_write(runtime, ANSI_ENABLE_MOUSE);
-        fflush(runtime->output);
-        break;
-
-    case TUI_CMD_DISABLE_MOUSE:
-        runtime_write(runtime, ANSI_DISABLE_MOUSE);
-        fflush(runtime->output);
-        break;
-
-    case TUI_CMD_ENABLE_KEYBOARD_ENHANCEMENT:
-        runtime_write(runtime, ANSI_ENABLE_KITTY_KBD);
-        fflush(runtime->output);
-        break;
-
-    case TUI_CMD_DISABLE_KEYBOARD_ENHANCEMENT:
-        runtime_write(runtime, ANSI_DISABLE_KITTY_KBD);
-        fflush(runtime->output);
-        break;
-
-    case TUI_CMD_SHOW_CURSOR:
-        runtime_write(runtime, ANSI_SHOW_CURSOR);
-        fflush(runtime->output);
-        break;
-
-    case TUI_CMD_HIDE_CURSOR:
-        runtime_write(runtime, ANSI_HIDE_CURSOR);
-        fflush(runtime->output);
-        break;
-
-    case TUI_CMD_SET_WINDOW_TITLE:
-    {
-        char buf[512];
-        ansi_set_window_title(buf, sizeof(buf),
-                              cmd->payload.window_title ? cmd->payload.window_title : "");
-        runtime_write(runtime, buf);
-        fflush(runtime->output);
-        break;
-    }
-
     case TUI_CMD_CLIPBOARD_COPY:
     {
         const char *text = cmd->payload.clipboard.text;
@@ -425,33 +366,19 @@ void tui_runtime_quit(TuiRuntime *runtime)
     }
 }
 
-/* Start terminal mode: enter alt screen, enable mouse/keyboard per config */
+/* Start terminal mode. Just guards idempotent start/stop and saves
+ * cursor state for restoration. Actual mode bytes (alt-screen, mouse,
+ * etc.) are emitted by tui_runtime_flush based on the first View. */
 void tui_runtime_start(TuiRuntime *runtime)
 {
     if (!runtime || runtime->started)
         return;
-
-    if (runtime->config.use_alternate_screen) {
-        runtime_write(runtime, DECSC);
-        runtime_write(runtime, ANSI_ENTER_ALT_SCREEN);
-        runtime_write(runtime, ED_ENTIRE CUP_HOME);
-        runtime->in_alt_screen = 1;
-    }
-
-    if (runtime->config.enable_mouse)
-        runtime_write(runtime, ANSI_ENABLE_MOUSE);
-
-    if (runtime->config.enable_keyboard_enhancement)
-        runtime_write(runtime, ANSI_ENABLE_KITTY_KBD);
-
-    if (runtime->config.hide_cursor)
-        runtime_write(runtime, ANSI_HIDE_CURSOR);
-
+    runtime_write(runtime, DECSC); /* Save cursor for stop() to restore */
     fflush(runtime->output);
     runtime->started = 1;
 }
 
-/* Stop terminal mode: reverse of start */
+/* Stop terminal mode: undo whatever the last View asked for. */
 void tui_runtime_stop(TuiRuntime *runtime)
 {
     if (!runtime || !runtime->started)
@@ -460,55 +387,89 @@ void tui_runtime_stop(TuiRuntime *runtime)
     runtime_write(runtime, SGR_RESET);
     runtime_write(runtime, ANSI_SHOW_CURSOR);
 
-    if (runtime->config.enable_keyboard_enhancement)
+    if (runtime->cur_kbd_enhancements & TUI_KBD_KITTY) {
         runtime_write(runtime, ANSI_DISABLE_KITTY_KBD);
-
-    if (runtime->config.enable_mouse)
+        runtime->cur_kbd_enhancements = TUI_KBD_NONE;
+    }
+    if (runtime->cur_mouse_mode != TUI_MOUSE_MODE_NONE) {
         runtime_write(runtime, ANSI_DISABLE_MOUSE);
-
+        runtime->cur_mouse_mode = TUI_MOUSE_MODE_NONE;
+    }
     if (runtime->in_alt_screen) {
         runtime_write(runtime, ANSI_EXIT_ALT_SCREEN);
-        runtime_write(runtime, DECRC);
         runtime->in_alt_screen = 0;
     }
+    runtime_write(runtime, DECRC); /* Restore saved cursor position */
 
     fflush(runtime->output);
     runtime->started = 0;
 }
 
-/* Render view, place cursor per component opinion, and write to output.
+/* Render view, reconcile terminal mode against the View's declarations,
+ * and write the resulting bytes.
  *
- * Bubbletea v2 alignment: components write content only in view(); they
- * report where the hardware cursor should land via the optional cursor()
- * slot. The runtime hides the cursor during paint, then either places it
- * at the reported position and shows it, or leaves it hidden. */
+ * Bubbletea v2 alignment: components return a TuiView from view(). The
+ * order matters — mode toggles MUST precede content so the content
+ * lands on the right screen buffer / sees the right mouse mode.
+ *
+ * Output sequence:
+ *   HIDE_CURSOR → mode toggles → content → window title → cursor placement → SHOW_CURSOR
+ */
 void tui_runtime_flush(TuiRuntime *runtime)
 {
     if (!runtime || !runtime->component || !runtime->model)
         return;
 
-    dynamic_buffer_clear(runtime->view_buf);
+    /* Render content into the view buffer. */
+    DynamicBuffer *content = runtime->view_buf;
+    dynamic_buffer_clear(content);
+    TuiView v = runtime->component->view(runtime->model, content);
 
-    /* Hide cursor during paint to prevent flicker. */
-    dynamic_buffer_append_str(runtime->view_buf, ANSI_HIDE_CURSOR);
+    FILE *fp = runtime->output;
 
-    runtime->component->view(runtime->model, runtime->view_buf);
+    /* 1. Hide cursor while painting to prevent flicker. */
+    fputs(ANSI_HIDE_CURSOR, fp);
 
-    TuiCursor cursor = tui_cursor_hidden();
-    if (runtime->component->cursor)
-        cursor = runtime->component->cursor(runtime->model);
-
-    /* config.hide_cursor remains a hard override (always keep hidden). */
-    if (cursor.visible && !runtime->config.hide_cursor) {
-        char buf[32];
-        ansi_format_cursor_pos(buf, sizeof(buf), cursor.row, cursor.col);
-        dynamic_buffer_append_str(runtime->view_buf, buf);
-        dynamic_buffer_append_str(runtime->view_buf, ANSI_SHOW_CURSOR);
+    /* 2. Reconcile mode toggles before content. */
+    if (v.alt_screen != runtime->in_alt_screen) {
+        fputs(v.alt_screen ? ANSI_ENTER_ALT_SCREEN : ANSI_EXIT_ALT_SCREEN, fp);
+        runtime->in_alt_screen = v.alt_screen;
+    }
+    if (v.mouse_mode != runtime->cur_mouse_mode) {
+        if (runtime->cur_mouse_mode != TUI_MOUSE_MODE_NONE)
+            fputs(ANSI_DISABLE_MOUSE, fp);
+        if (v.mouse_mode != TUI_MOUSE_MODE_NONE)
+            fputs(ANSI_ENABLE_MOUSE, fp);
+        runtime->cur_mouse_mode = v.mouse_mode;
+    }
+    if (v.kbd_enhancements != runtime->cur_kbd_enhancements) {
+        if (runtime->cur_kbd_enhancements & TUI_KBD_KITTY)
+            fputs(ANSI_DISABLE_KITTY_KBD, fp);
+        if (v.kbd_enhancements & TUI_KBD_KITTY)
+            fputs(ANSI_ENABLE_KITTY_KBD, fp);
+        runtime->cur_kbd_enhancements = v.kbd_enhancements;
     }
 
-    fwrite(dynamic_buffer_data(runtime->view_buf), 1,
-           dynamic_buffer_len(runtime->view_buf), runtime->output);
-    fflush(runtime->output);
+    /* 3. Content. */
+    fwrite(dynamic_buffer_data(content), 1, dynamic_buffer_len(content), fp);
+
+    /* 4. Window title. */
+    if (v.window_title) {
+        char title_buf[512];
+        ansi_set_window_title(title_buf, sizeof(title_buf), v.window_title);
+        fputs(title_buf, fp);
+    }
+
+    /* 5. Cursor placement. */
+    if (v.cursor.visible) {
+        char cur_buf[32];
+        ansi_format_cursor_pos(cur_buf, sizeof(cur_buf), v.cursor.row,
+                               v.cursor.col);
+        fputs(cur_buf, fp);
+        fputs(ANSI_SHOW_CURSOR, fp);
+    }
+
+    fflush(fp);
 }
 
 /* Execute a TuiCmd synchronously, outside the runtime's event loop.

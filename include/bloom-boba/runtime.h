@@ -61,17 +61,18 @@ typedef void (*TuiOnStdinProcessed)(void *user_data);
 typedef void (*TuiClipboardHandler)(const char *text, size_t len,
                                     void *user_data);
 
-/* Runtime configuration */
+/* Runtime configuration.
+ *
+ * Bubbletea v2 alignment: terminal-mode flags (alt screen, mouse,
+ * keyboard enhancements, cursor visibility) are no longer set here.
+ * Components declare them on the TuiView returned from view() and the
+ * runtime reconciles each frame. */
 typedef struct TuiRuntimeConfig
 {
-    int use_alternate_screen;        /* Use alternate screen buffer */
-    int hide_cursor;                 /* Hide cursor during rendering */
-    int raw_mode;                    /* Enable raw terminal mode */
-    int enable_mouse;                /* Enable mouse tracking */
-    int enable_keyboard_enhancement; /* Enable kitty keyboard protocol */
-    FILE *output;                    /* Output target (NULL = stdout) */
-    TuiCmdHandler cmd_handler;       /* App command callback */
-    void *cmd_handler_data;          /* Callback context */
+    int raw_mode;              /* Enable raw terminal mode */
+    FILE *output;              /* Output target (NULL = stdout) */
+    TuiCmdHandler cmd_handler; /* App command callback */
+    void *cmd_handler_data;    /* Callback context */
 
     /* Event loop callbacks (used by tui_runtime_run) */
     TuiGetExternalFd get_external_fd;        /* External FD to poll */
@@ -100,9 +101,15 @@ struct TuiRuntime
     int running;             /* Whether runtime is running */
     int quit_requested;      /* Quit has been requested */
     int started;             /* Idempotent start/stop guard */
-    int in_alt_screen;       /* Currently in alternate screen buffer */
     int term_width;          /* Current terminal width */
     int term_height;         /* Current terminal height */
+
+    /* Tracked terminal state — diffed against TuiView each flush. */
+    int in_alt_screen;
+    TuiMouseMode cur_mouse_mode;
+    TuiKeyboardEnhancements cur_kbd_enhancements;
+    int cur_report_focus;
+    int cur_bracketed_paste;
 #ifndef _WIN32
     struct termios orig_termios; /* Saved terminal settings */
     int raw_mode_active;         /* Raw mode currently enabled */

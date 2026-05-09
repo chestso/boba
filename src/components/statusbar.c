@@ -204,9 +204,10 @@ static TuiUpdateResult statusbar_update(TuiModel *model, TuiMsg msg)
     return tui_statusbar_update((TuiStatusBar *)model, msg);
 }
 
-static void statusbar_view(const TuiModel *model, DynamicBuffer *out)
+static TuiView statusbar_view_slot(const TuiModel *model, DynamicBuffer *out)
 {
     tui_statusbar_view((const TuiStatusBar *)model, out);
+    return tui_view_default(out);
 }
 
 static void statusbar_free(TuiModel *model)
@@ -218,8 +219,7 @@ static void statusbar_free(TuiModel *model)
 static const TuiComponent statusbar_component = {
     .init = statusbar_init,
     .update = statusbar_update,
-    .view = statusbar_view,
-    .cursor = NULL, /* statusbar abstains — never owns the cursor */
+    .view = statusbar_view_slot,
     .free = statusbar_free,
 };
 

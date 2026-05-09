@@ -1724,14 +1724,13 @@ static TuiUpdateResult textinput_update(TuiModel *model, TuiMsg msg)
     return tui_textinput_update((TuiTextInput *)model, msg);
 }
 
-static void textinput_view(const TuiModel *model, DynamicBuffer *out)
+static TuiView textinput_view_slot(const TuiModel *model, DynamicBuffer *out)
 {
-    tui_textinput_view((const TuiTextInput *)model, out);
-}
-
-static TuiCursor textinput_cursor(const TuiModel *model)
-{
-    return tui_textinput_cursor_pos((const TuiTextInput *)model);
+    const TuiTextInput *input = (const TuiTextInput *)model;
+    tui_textinput_view(input, out);
+    TuiView v = tui_view_default(out);
+    v.cursor = tui_textinput_cursor_pos(input);
+    return v;
 }
 
 static void textinput_free(TuiModel *model)
@@ -1743,8 +1742,7 @@ static void textinput_free(TuiModel *model)
 static const TuiComponent textinput_component = {
     .init = textinput_init,
     .update = textinput_update,
-    .view = textinput_view,
-    .cursor = textinput_cursor,
+    .view = textinput_view_slot,
     .free = textinput_free,
 };
 

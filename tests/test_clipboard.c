@@ -114,10 +114,10 @@ static TuiUpdateResult stub_update(TuiModel *model, TuiMsg msg)
     return tui_update_result_none();
 }
 
-static void stub_view(const TuiModel *model, DynamicBuffer *out)
+static TuiView stub_view(const TuiModel *model, DynamicBuffer *out)
 {
     (void)model;
-    (void)out;
+    return tui_view_default(out);
 }
 
 static void stub_free(TuiModel *model) { free(model); }

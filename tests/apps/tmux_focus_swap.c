@@ -123,7 +123,7 @@ static TuiUpdateResult app_update(TuiModel *m, TuiMsg msg)
     return c->update(child_m, msg);
 }
 
-static void app_view(const TuiModel *m, DynamicBuffer *out)
+static TuiView app_view(const TuiModel *m, DynamicBuffer *out)
 {
     const App *a = (const App *)m;
 
@@ -135,13 +135,12 @@ static void app_view(const TuiModel *m, DynamicBuffer *out)
     int row = a->term_h > 0 ? a->term_h : 1;
     dynamic_buffer_append_printf(out, "\x1b[%d;1H%s", row,
                                  a->focus_idx == 0 ? "[INPUT]" : "[VIEW]");
-}
 
-static TuiCursor app_cursor(const TuiModel *m)
-{
-    const App *a = (const App *)m;
-    return a->focus_idx == 0 ? tui_textinput_cursor_pos(a->ti)
-                             : tui_viewport_cursor_pos(a->vp);
+    TuiView v = tui_view_default(out);
+    v.alt_screen = 1;
+    v.cursor = a->focus_idx == 0 ? tui_textinput_cursor_pos(a->ti)
+                                 : tui_viewport_cursor_pos(a->vp);
+    return v;
 }
 
 static void app_free(TuiModel *m)
@@ -160,14 +159,12 @@ static const TuiComponent app_component = {
     .init = app_init,
     .update = app_update,
     .view = app_view,
-    .cursor = app_cursor,
     .free = app_free,
 };
 
 int main(void)
 {
     TuiRuntimeConfig rc = {
-        .use_alternate_screen = 1,
         .raw_mode = 1,
         .output = stdout,
     };

@@ -23,17 +23,16 @@ struct TuiModel
     int type; /* Component type identifier */
 };
 
-/* Cursor position reported by a component to the runtime.
+/* Cursor position carried on TuiView.
  *
  * Bubbletea v2 alignment: components no longer emit cursor-positioning
- * sequences inside view(); they instead return where they want the
- * hardware cursor placed. Set visible=0 (or leave the slot NULL on the
- * TuiComponent vtable) to abstain — the runtime keeps the cursor hidden. */
+ * sequences inside view(); they declare cursor placement on the
+ * TuiView returned by view(). Set visible=0 to keep the cursor hidden. */
 typedef struct TuiCursor
 {
     int row;     /* 1-indexed terminal row */
     int col;     /* 1-indexed terminal column */
-    int visible; /* 0 = abstain (cursor hidden), 1 = place at row,col */
+    int visible; /* 0 = hidden, 1 = place at row,col */
 } TuiCursor;
 
 static inline TuiCursor tui_cursor_hidden(void)
@@ -46,6 +45,57 @@ static inline TuiCursor tui_cursor_at(int row, int col)
 {
     TuiCursor c = { row, col, 1 };
     return c;
+}
+
+/* Mouse tracking modes — declared each frame on TuiView. */
+typedef enum
+{
+    TUI_MOUSE_MODE_NONE = 0,
+    TUI_MOUSE_MODE_CELL_MOTION, /* SGR mouse, button events + cell motion */
+    TUI_MOUSE_MODE_ALL_MOTION,  /* SGR mouse, all motion regardless of button */
+} TuiMouseMode;
+
+/* Keyboard-enhancement bitmask — declared each frame on TuiView. */
+typedef enum
+{
+    TUI_KBD_NONE = 0,
+    TUI_KBD_KITTY = 1 << 0, /* Kitty keyboard protocol */
+} TuiKeyboardEnhancements;
+
+/* Per-frame view: rendered content plus terminal-mode declarations.
+ *
+ * Bubbletea v2 alignment: components return a TuiView from their
+ * view() slot. The runtime diffs each frame's TuiView against tracked
+ * terminal state and emits only the bytes needed to reach the requested
+ * state. Terminal-mode imperative commands (TUI_CMD_ENTER_ALT_SCREEN,
+ * TUI_CMD_SET_WINDOW_TITLE, etc.) are gone — declare what you want
+ * here instead. */
+typedef struct TuiView
+{
+    /* Rendered content. The component writes bytes to this buffer; the
+     * runtime owns its lifetime and clears it before each view() call. */
+    DynamicBuffer *layer;
+
+    /* Terminal-mode declarations. */
+    int alt_screen;                           /* 1 = use alternate screen */
+    TuiMouseMode mouse_mode;                  /* mouse tracking */
+    TuiKeyboardEnhancements kbd_enhancements; /* keyboard protocol */
+    int report_focus;                         /* 1 = enable focus events */
+    int bracketed_paste;                      /* 1 = enable bracketed paste */
+
+    /* Window title. NULL = leave alone. */
+    const char *window_title;
+
+    /* Cursor placement. visible=0 = hidden. */
+    TuiCursor cursor;
+} TuiView;
+
+/* Initialise a TuiView with all modes off and the given content buffer. */
+static inline TuiView tui_view_default(DynamicBuffer *layer)
+{
+    TuiView v = { 0 };
+    v.layer = layer;
+    return v;
 }
 
 /* Update result - returned by update function */
@@ -70,13 +120,11 @@ typedef struct TuiComponent
     /* Update model with message, return optional command */
     TuiUpdateResult (*update)(TuiModel *model, TuiMsg msg);
 
-    /* Render model state to output buffer */
-    void (*view)(const TuiModel *model, DynamicBuffer *out);
-
-    /* Optional: where the focused cursor should be placed for this frame.
-     * Return tui_cursor_hidden() (or leave the slot NULL on the vtable) to
-     * abstain — the runtime keeps the cursor hidden. */
-    TuiCursor (*cursor)(const TuiModel *model);
+    /* Render model state. Component writes content bytes to `out` and
+     * returns a TuiView whose layer is `out`, populated with the
+     * terminal-mode declarations the component wants for this frame
+     * (alt-screen, mouse mode, cursor, window title, etc.). */
+    TuiView (*view)(const TuiModel *model, DynamicBuffer *out);
 
     /* Free model and associated resources */
     void (*free)(TuiModel *model);

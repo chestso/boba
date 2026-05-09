@@ -70,10 +70,11 @@ static TuiUpdateResult test_update(TuiModel *model, TuiMsg msg)
     return tui_update_result_none();
 }
 
-static void test_view(const TuiModel *model, DynamicBuffer *out)
+static TuiView test_view(const TuiModel *model, DynamicBuffer *out)
 {
     (void)model;
     dynamic_buffer_append_str(out, "test view");
+    return tui_view_default(out);
 }
 
 static void test_free(TuiModel *model)
@@ -171,9 +172,6 @@ static void test_start_idempotent(void)
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
-        .use_alternate_screen = 1,
-        .enable_mouse = 1,
-        .enable_keyboard_enhancement = 1,
         .output = devnull,
     };
 
@@ -202,7 +200,6 @@ static void test_stop_idempotent(void)
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
-        .use_alternate_screen = 1,
         .output = devnull,
     };
 
@@ -234,8 +231,6 @@ static void test_start_stop_cycle(void)
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
-        .use_alternate_screen = 1,
-        .enable_mouse = 1,
         .output = devnull,
     };
 
@@ -371,10 +366,7 @@ static void test_runtime_run_immediate_quit(void)
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
-        .use_alternate_screen = 0, /* Don't need alt screen for test */
-        .raw_mode = 0,             /* Skip raw mode (may not have a TTY) */
-        .enable_mouse = 0,
-        .enable_keyboard_enhancement = 0,
+        .raw_mode = 0, /* Skip raw mode (may not have a TTY) */
         .output = devnull,
     };
 
@@ -801,9 +793,10 @@ static void test_free_with_pending_commands(void)
     TuiRuntime *rt = tui_runtime_create(&noop_component, NULL, &cfg);
     assert(rt != NULL);
 
-    /* Schedule commands but don't drain — free should clean them up */
-    tui_runtime_schedule(rt, tui_cmd_set_window_title("title1"));
-    tui_runtime_schedule(rt, tui_cmd_set_window_title("title2"));
+    /* Schedule commands but don't drain — free should clean them up.
+     * Use clipboard_copy as a stand-in (any owned-payload command works). */
+    tui_runtime_schedule(rt, tui_cmd_clipboard_copy("a", 1));
+    tui_runtime_schedule(rt, tui_cmd_clipboard_copy("b", 1));
     assert(rt->cmd_queue_count == 2);
 
     /* This should free the pending commands without leaking */
@@ -931,15 +924,15 @@ static void test_post_wakes_event_loop(void)
 #endif /* !_WIN32 */
 
 /* ========================================================================
- * Cursor() / flush tests
+ * TuiView / flush tests
  * ======================================================================== */
 
 #include <bloom-boba/ansi_sequences.h>
 
-/* Component whose cursor() returns a configured TuiCursor. */
-static TuiCursor s_cursor_to_return = { 0, 0, 0 };
+/* Component whose view() returns a configurable TuiView. */
+static TuiView s_view_to_return = { 0 };
 
-static TuiInitResult cursor_stub_init(void *config)
+static TuiInitResult view_stub_init(void *config)
 {
     (void)config;
     TestModel *m = calloc(1, sizeof(TestModel));
@@ -947,19 +940,25 @@ static TuiInitResult cursor_stub_init(void *config)
     return tui_init_result_none((TuiModel *)m);
 }
 
-static TuiCursor cursor_stub_cursor(const TuiModel *model)
+static TuiView view_stub_view(const TuiModel *model, DynamicBuffer *out)
 {
     (void)model;
-    return s_cursor_to_return;
+    s_view_to_return.layer = out;
+    return s_view_to_return;
 }
 
-static TuiComponent cursor_stub_component = {
-    .init = cursor_stub_init,
+static TuiComponent view_stub_component = {
+    .init = view_stub_init,
     .update = noop_update,
-    .view = test_view,
-    .cursor = cursor_stub_cursor,
+    .view = view_stub_view,
     .free = test_free,
 };
+
+static void reset_view_stub(void)
+{
+    TuiView empty = { 0 };
+    s_view_to_return = empty;
+}
 
 static void test_flush_emits_cursor_when_visible(void)
 {
@@ -968,19 +967,18 @@ static void test_flush_emits_cursor_when_visible(void)
     assert(fp != NULL);
 
     TuiRuntimeConfig cfg = { .output = fp };
-    TuiRuntime *rt = tui_runtime_create(&cursor_stub_component, NULL, &cfg);
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
     assert(rt != NULL);
 
-    s_cursor_to_return = tui_cursor_at(7, 12);
+    reset_view_stub();
+    s_view_to_return.cursor = tui_cursor_at(7, 12);
     tui_runtime_flush(rt);
     fflush(fp);
 
-    /* Output should contain HIDE → view content → CSI 7;12H → SHOW. */
     assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
     assert(strstr(outbuf, "\x1b[7;12H") != NULL);
     assert(strstr(outbuf, ANSI_SHOW_CURSOR) != NULL);
 
-    /* SHOW must come AFTER the CUP, not before. */
     const char *cup = strstr(outbuf, "\x1b[7;12H");
     const char *show = strstr(outbuf, ANSI_SHOW_CURSOR);
     assert(cup != NULL && show != NULL && show > cup);
@@ -989,21 +987,21 @@ static void test_flush_emits_cursor_when_visible(void)
     fclose(fp);
 }
 
-static void test_flush_keeps_cursor_hidden_on_abstain(void)
+static void test_flush_keeps_cursor_hidden_when_view_abstains(void)
 {
     char outbuf[1024];
     FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
     assert(fp != NULL);
 
     TuiRuntimeConfig cfg = { .output = fp };
-    TuiRuntime *rt = tui_runtime_create(&cursor_stub_component, NULL, &cfg);
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
     assert(rt != NULL);
 
-    s_cursor_to_return = tui_cursor_hidden();
+    reset_view_stub();
+    /* cursor.visible = 0 by default → no SHOW emitted. */
     tui_runtime_flush(rt);
     fflush(fp);
 
-    /* HIDE present, no SHOW emitted. */
     assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
     assert(strstr(outbuf, ANSI_SHOW_CURSOR) == NULL);
 
@@ -1011,47 +1009,94 @@ static void test_flush_keeps_cursor_hidden_on_abstain(void)
     fclose(fp);
 }
 
-static void test_flush_respects_config_hide_cursor(void)
+static void test_flush_alt_screen_transition(void)
 {
-    char outbuf[1024];
+    char outbuf[2048];
     FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
     assert(fp != NULL);
 
-    /* Component wants to show a cursor, but config.hide_cursor forces hide. */
-    TuiRuntimeConfig cfg = { .output = fp, .hide_cursor = 1 };
-    TuiRuntime *rt = tui_runtime_create(&cursor_stub_component, NULL, &cfg);
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
     assert(rt != NULL);
 
-    s_cursor_to_return = tui_cursor_at(3, 5);
+    /* Frame 1: alt_screen=1 → ENTER_ALT_SCREEN emitted. */
+    reset_view_stub();
+    s_view_to_return.alt_screen = 1;
     tui_runtime_flush(rt);
     fflush(fp);
+    size_t pos1 = ftell(fp);
+    assert(strstr(outbuf, ANSI_ENTER_ALT_SCREEN) != NULL);
+    assert(rt->in_alt_screen == 1);
 
-    assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
-    /* hide_cursor override → no SHOW, no CUP. */
-    assert(strstr(outbuf, ANSI_SHOW_CURSOR) == NULL);
-    assert(strstr(outbuf, "\x1b[3;5H") == NULL);
+    /* Frame 2: alt_screen=1 again → no transition, no enter sequence. */
+    reset_view_stub();
+    s_view_to_return.alt_screen = 1;
+    tui_runtime_flush(rt);
+    fflush(fp);
+    /* The string after pos1 must NOT contain another ENTER_ALT_SCREEN */
+    assert(strstr(outbuf + pos1, ANSI_ENTER_ALT_SCREEN) == NULL);
+
+    /* Frame 3: alt_screen=0 → EXIT_ALT_SCREEN emitted. */
+    size_t pos2 = ftell(fp);
+    reset_view_stub();
+    s_view_to_return.alt_screen = 0;
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(strstr(outbuf + pos2, ANSI_EXIT_ALT_SCREEN) != NULL);
+    assert(rt->in_alt_screen == 0);
 
     tui_runtime_free(rt);
     fclose(fp);
 }
 
-static void test_flush_with_null_cursor_slot_keeps_hidden(void)
+static void test_flush_window_title(void)
 {
-    /* Component with cursor=NULL on the vtable: runtime treats as abstain. */
     char outbuf[1024];
     FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
     assert(fp != NULL);
 
     TuiRuntimeConfig cfg = { .output = fp };
-    /* noop_component has no cursor slot (.cursor implicitly NULL). */
-    TuiRuntime *rt = tui_runtime_create(&noop_component, NULL, &cfg);
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
     assert(rt != NULL);
 
+    reset_view_stub();
+    s_view_to_return.window_title = "hello";
     tui_runtime_flush(rt);
     fflush(fp);
 
-    assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
-    assert(strstr(outbuf, ANSI_SHOW_CURSOR) == NULL);
+    /* OSC 2 prefix + the title string. */
+    assert(strstr(outbuf, "\x1b]2;hello") != NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+static void test_flush_mouse_mode_transition(void)
+{
+    char outbuf[2048];
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    /* Frame 1: enable mouse. */
+    reset_view_stub();
+    s_view_to_return.mouse_mode = TUI_MOUSE_MODE_CELL_MOTION;
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(strstr(outbuf, "\x1b[?1000h") != NULL);
+    assert(rt->cur_mouse_mode == TUI_MOUSE_MODE_CELL_MOTION);
+
+    /* Frame 2: disable. */
+    size_t pos = ftell(fp);
+    reset_view_stub();
+    s_view_to_return.mouse_mode = TUI_MOUSE_MODE_NONE;
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(strstr(outbuf + pos, "\x1b[?1000l") != NULL);
+    assert(rt->cur_mouse_mode == TUI_MOUSE_MODE_NONE);
 
     tui_runtime_free(rt);
     fclose(fp);
@@ -1098,11 +1143,12 @@ int main(void)
     RUN_TEST(test_post_wakes_event_loop);
 #endif
 
-    /* Cursor / flush tests */
+    /* TuiView / flush tests */
     RUN_TEST(test_flush_emits_cursor_when_visible);
-    RUN_TEST(test_flush_keeps_cursor_hidden_on_abstain);
-    RUN_TEST(test_flush_respects_config_hide_cursor);
-    RUN_TEST(test_flush_with_null_cursor_slot_keeps_hidden);
+    RUN_TEST(test_flush_keeps_cursor_hidden_when_view_abstains);
+    RUN_TEST(test_flush_alt_screen_transition);
+    RUN_TEST(test_flush_window_title);
+    RUN_TEST(test_flush_mouse_mode_transition);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

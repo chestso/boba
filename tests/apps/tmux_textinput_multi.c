@@ -47,16 +47,14 @@ static TuiUpdateResult app_update(TuiModel *m, TuiMsg msg)
     return tui_textinput_update(a->ti, msg);
 }
 
-static void app_view(const TuiModel *m, DynamicBuffer *out)
+static TuiView app_view(const TuiModel *m, DynamicBuffer *out)
 {
     const App *a = (const App *)m;
     tui_textinput_view(a->ti, out);
-}
-
-static TuiCursor app_cursor(const TuiModel *m)
-{
-    const App *a = (const App *)m;
-    return tui_textinput_cursor_pos(a->ti);
+    TuiView v = tui_view_default(out);
+    v.alt_screen = 1;
+    v.cursor = tui_textinput_cursor_pos(a->ti);
+    return v;
 }
 
 static void app_free(TuiModel *m)
@@ -72,14 +70,14 @@ static const TuiComponent app_component = {
     .init = app_init,
     .update = app_update,
     .view = app_view,
-    .cursor = app_cursor,
     .free = app_free,
 };
 
 int main(void)
 {
+    /* Alt-screen is now declared on TuiView (see app_view) — no longer
+     * a runtime-config field. */
     TuiRuntimeConfig rc = {
-        .use_alternate_screen = 1,
         .raw_mode = 1,
         .output = stdout,
     };

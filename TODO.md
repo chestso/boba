@@ -61,3 +61,43 @@ None of these are blockers — they extend or polish what's already in place.
   do not share state at the code level — only the `TUI_CMD_CLIPBOARD_COPY`
   pipeline. Revisit only if a third consumer of selection appears with
   the same shape as one of the existing two.
+
+## v2 alignment (deferred from declarative-View migration)
+
+These were called out as out-of-scope when the declarative `TuiView`
+landed. None block usage; each closes a gap with the Charm v2 reference
+(see `https://charm.land/blog/v2/` and the per-repo upgrade guides).
+
+- **Key message press/release split.** Bubbletea v2 splits `KeyMsg`
+  into `KeyPressMsg` / `KeyReleaseMsg`. In C the natural shape is an
+  `action: PRESS | RELEASE` field on `TuiKeyMsg` plus parser support
+  for Kitty keyboard-protocol release events (today the parser only
+  handles release for mouse). Cosmetic v2 renames (`Type → Code`,
+  `Runes → Text`) intentionally skipped — current names read better
+  in C.
+
+- **Bracketed paste messages.** Parser doesn't handle
+  `ESC [ 200 ~ … ESC [ 201 ~` today. Add detection and emit
+  `TUI_MSG_PASTE_START`, `TUI_MSG_PASTE` (carrying buffered text),
+  `TUI_MSG_PASTE_END`. Components opt in via the
+  `TuiView.bracketed_paste` field that already exists.
+
+- **Mouse message audit.** Button constants are already v2-aligned
+  (`TUI_MOUSE_LEFT`, `TUI_MOUSE_WHEEL_UP`); the `action` field carries
+  press/release/motion. Verify nothing's missing against Bubbletea v2's
+  `MouseClickMsg` / `MouseReleaseMsg` / `MouseMotionMsg` /
+  `MouseWheelMsg` interface split — likely no work, just confirm.
+
+- **Lipgloss-equivalent.** A C library for color/style/layout in the
+  Lipgloss v2 shape (Style values, `image/color.Color`-equivalent,
+  `Place`/`Join`/`Border` primitives). Out of scope for bloom-boba —
+  belongs in a separate `bloom-lipgloss` (or similarly named) project.
+
+- **Bubbles parity audit.** Bubbles v2 added textarea improvements
+  (virtual cursor mode, scroll position helpers), viewport features
+  (soft wrap, left gutter, highlighting), and styling state separation
+  (`Styles.Focused` / `Styles.Blurred`). bloom-boba's textinput /
+  viewport don't have to mirror everything, but a once-over for
+  obviously-missing capabilities — soft wrap in viewport,
+  focused/blurred style separation in textinput — could pay for
+  itself. Defer until a concrete use case appears.
