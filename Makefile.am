@@ -44,12 +44,6 @@ format:
 	    echo "prettier not found - skipping Markdown formatting." >&2; \
 	fi
 
-# tmux end-to-end tests. Delegated to tests/Makefile (skips cleanly when tmux
-# was not detected at configure time).
-.PHONY: check-tmux
-check-tmux:
-	$(MAKE) -C tests check-tmux
-
 # Bear target — produce compile_commands.json for clangd by intercepting
 # the build. Cleans first so bear sees every compile invocation.
 .PHONY: bear

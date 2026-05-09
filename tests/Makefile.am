@@ -4,8 +4,6 @@ UNIT_TESTS = test_textinput test_viewport test_statusbar test_runtime test_focus
 
 check_PROGRAMS = $(UNIT_TESTS)
 
-TESTS = $(UNIT_TESTS)
-
 AM_CPPFLAGS = -I$(top_srcdir)/include
 LDADD = $(top_builddir)/src/libbloom-boba.a
 
@@ -18,29 +16,26 @@ test_clipboard_SOURCES = test_clipboard.c
 test_input_parser_SOURCES = test_input_parser.c
 test_style_SOURCES = test_style.c
 
-# tmux-driven end-to-end tests: separate target so the fast unit suite stays
-# hermetic. `make check-tmux` builds the mini-apps and runs the shell drivers.
+# tmux-driven end-to-end tests. Folded into `make check` when tmux was
+# detected at configure time, so a regression in shell-driven UI tests
+# can never silently slip through. The mini-apps the scripts drive are
+# in check_PROGRAMS, so automake builds them before TESTS runs.
+TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh
+
 if HAVE_TMUX
 check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap
 apps_tmux_textinput_multi_SOURCES = apps/tmux_textinput_multi.c
 apps_tmux_focus_swap_SOURCES = apps/tmux_focus_swap.c
+TESTS = $(UNIT_TESTS) $(TMUX_TESTS)
+else
+TESTS = $(UNIT_TESTS)
 endif
 
-TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh
+TEST_EXTENSIONS = .sh
+SH_LOG_COMPILER = $(SHELL)
+
+AM_TESTS_ENVIRONMENT = \
+    TMUX_BIN_DIR="$(abs_builddir)/apps"; \
+    export TMUX_BIN_DIR;
 
 EXTRA_DIST = tmux/lib.sh $(TMUX_TESTS)
-
-check-tmux: $(check_PROGRAMS)
-if HAVE_TMUX
-	@set -e; \
-	failed=0; \
-	for t in $(TMUX_TESTS); do \
-	  echo "  TMUX  $$t"; \
-	  TMUX_BIN_DIR=$(builddir)/apps $(SHELL) $(srcdir)/$$t || failed=1; \
-	done; \
-	test $$failed -eq 0
-else
-	@echo "  SKIP  tmux not found at configure time; skipping check-tmux"
-endif
-
-.PHONY: check-tmux
