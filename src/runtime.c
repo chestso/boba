@@ -500,7 +500,8 @@ void tui_runtime_flush(TuiRuntime *runtime)
     fflush(runtime->output);
 }
 
-/* Execute a command outside the update cycle */
+/* Execute a TuiCmd synchronously, outside the runtime's event loop.
+ * Escape hatch for embedding scenarios; not for use inside update(). */
 void tui_runtime_exec(TuiRuntime *runtime, TuiCmd *cmd)
 {
     if (!runtime || !cmd)
@@ -557,7 +558,8 @@ void tui_runtime_post(TuiRuntime *runtime, TuiMsg msg)
     runtime_wakeup(runtime);
 }
 
-/* Schedule a command to be executed on the next event loop iteration */
+/* Defer a command for asynchronous execution by the runtime; any
+ * resulting message flows back through update(). */
 void tui_runtime_schedule(TuiRuntime *runtime, TuiCmd *cmd)
 {
     if (!runtime || !cmd)

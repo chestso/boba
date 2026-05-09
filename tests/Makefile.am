@@ -19,11 +19,12 @@ test_clipboard_SOURCES = test_clipboard.c
 # tmux-driven end-to-end tests: separate target so the fast unit suite stays
 # hermetic. `make check-tmux` builds the mini-apps and runs the shell drivers.
 if HAVE_TMUX
-check_PROGRAMS += apps/tmux_textinput_multi
+check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap
 apps_tmux_textinput_multi_SOURCES = apps/tmux_textinput_multi.c
+apps_tmux_focus_swap_SOURCES = apps/tmux_focus_swap.c
 endif
 
-TMUX_TESTS = tmux/scroll_multiline.sh
+TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh
 
 EXTRA_DIST = tmux/lib.sh $(TMUX_TESTS)
 

@@ -185,7 +185,13 @@ void tui_runtime_stop(TuiRuntime *runtime);
 /* Render view and write to output (with cursor hide/show) */
 void tui_runtime_flush(TuiRuntime *runtime);
 
-/* Execute a command outside the update cycle */
+/* Execute a TuiCmd synchronously, outside the runtime's event loop.
+ *
+ * Escape hatch for callers that are NOT inside an update() / view()
+ * invocation — typically embedding scenarios (e.g. a Lisp builtin
+ * reaching in to set the window title). For effects driven by message
+ * handling, return the Cmd from update() and let the runtime execute
+ * it; do not call this from inside update(). */
 void tui_runtime_exec(TuiRuntime *runtime, TuiCmd *cmd);
 
 /* Run the full event loop (blocking). Owns raw mode, signals, select().
@@ -202,8 +208,8 @@ int tui_runtime_get_height(TuiRuntime *runtime);
 void tui_runtime_post(TuiRuntime *runtime, TuiMsg msg);
 
 /* Schedule a command to be executed on the next event loop iteration.
- * Executed directly via execute_cmd() (bypasses update).
- * Runtime takes ownership of the command. */
+ * Defers the command for asynchronous execution; any resulting message
+ * flows back through update(). Runtime takes ownership of the command. */
 void tui_runtime_schedule(TuiRuntime *runtime, TuiCmd *cmd);
 
 /* Process all pending queued commands and messages.

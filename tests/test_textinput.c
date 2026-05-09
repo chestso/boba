@@ -325,6 +325,26 @@ static void test_tab_word_start(void)
     tui_textinput_free(input);
 }
 
+static void test_tab_with_shift_is_noop(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+
+    send_string(input, "foo");
+    size_t cursor_before = tui_textinput_cursor(input);
+
+    /* Shift+Tab is not bound by textinput. It must not emit a
+     * tab-complete command and must not modify the buffer — that
+     * leaves the parent free to use it for focus cycling. */
+    TuiUpdateResult r = tui_textinput_update(
+        input, tui_msg_key(TUI_KEY_TAB, 0, TUI_MOD_SHIFT));
+    assert(r.cmd == NULL);
+    assert(strcmp(tui_textinput_text(input), "foo") == 0);
+    assert(tui_textinput_cursor(input) == cursor_before);
+
+    tui_textinput_free(input);
+}
+
 static void test_insert_completion(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -666,9 +686,14 @@ static void test_overflow_multiline_cursor_line(void)
     tui_textinput_set_show_prompt(input, 0);
     tui_textinput_set_terminal_width(input, 20);
 
-    /* Short first line, then a long second line */
+    /* Short first line, then a long second line. In multiline mode
+     * plain Enter submits (clears the buffer); Shift+Enter inserts
+     * a literal newline — see src/components/textinput.c:886. */
     send_string(input, "short");
-    send_key(input, TUI_KEY_ENTER);
+    TuiUpdateResult r = tui_textinput_update(
+        input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
     for (int i = 0; i < 40; i++)
         send_char(input, 'a' + (i % 26));
 
@@ -677,9 +702,12 @@ static void test_overflow_multiline_cursor_line(void)
     assert(input->cursor_row == 1);
     assert(input->offset > 0);
     assert(input->offset_right - input->offset <= 20);
-    /* If offsets were global, offset_right would be > 40 (5 + newline + 40);
-     * scoped to the second line it should be <= 40. */
-    assert(input->offset_right <= 40);
+    /* offset_right is in line-local codepoint space and includes the
+     * cursor sentinel (one past the last character). For a 40-char
+     * second line that's 41 — see the single-line case at line 677
+     * (30 chars → offset_right == 31). If offsets were global it
+     * would land in the 40s+ once you count "short\n" prefix bytes. */
+    assert(input->offset_right <= 41);
 
     tui_textinput_free(input);
 }
@@ -747,6 +775,7 @@ int main(void)
     RUN_TEST(test_history_navigation);
     RUN_TEST(test_tab_emits_command);
     RUN_TEST(test_tab_word_start);
+    RUN_TEST(test_tab_with_shift_is_noop);
     RUN_TEST(test_insert_completion);
     RUN_TEST(test_view_output);
     RUN_TEST(test_set_cursor);

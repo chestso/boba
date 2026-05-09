@@ -261,6 +261,10 @@ static void test_cursor_navigation(void)
     TuiViewport *vp = tui_viewport_create();
     tui_viewport_set_size(vp, 80, 3);
     tui_viewport_set_focused(vp, 1);
+    /* Disable auto-scroll so y_offset stays at 0 after append; otherwise
+     * enter_copy_mode would position the cursor on the bottom-most
+     * visible line ("four"), not "one". */
+    tui_viewport_set_auto_scroll(vp, 0);
     tui_viewport_append(vp, "one\ntwo\nthree\nfour\nfive\n", 24);
 
     tui_viewport_enter_copy_mode(vp);

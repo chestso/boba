@@ -123,21 +123,6 @@ void tui_textview_view(const TuiTextView *view, DynamicBuffer *out)
     }
 }
 
-/* Write directly to terminal (for live output, bypasses buffer) */
-void tui_textview_write_direct(TuiTextView *view, const char *text,
-                               size_t len)
-{
-    if (!view || !text || len == 0)
-        return;
-
-    /* Append to internal buffer for history */
-    tui_textview_append(view, text, len);
-
-    /* Write directly to stdout */
-    fwrite(text, 1, len, stdout);
-    fflush(stdout);
-}
-
 /* Get content length */
 size_t tui_textview_len(const TuiTextView *view)
 {

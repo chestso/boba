@@ -843,6 +843,9 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
 
     case TUI_KEY_TAB:
     {
+        /* Shift+Tab is not bound by textinput; let the parent route it. */
+        if (key.mods & TUI_MOD_SHIFT)
+            return tui_update_result_none();
         /* Find word start by scanning backward from cursor for non-word chars */
         int word_start = (int)input->cursor_byte;
         while (word_start > 0 &&

@@ -73,9 +73,6 @@ void tui_textview_set_terminal_size(TuiTextView *view, int width, int height);
  */
 void tui_textview_view(const TuiTextView *view, DynamicBuffer *out);
 
-/* Write directly to terminal (bypasses buffer, for live output) */
-void tui_textview_write_direct(TuiTextView *view, const char *text, size_t len);
-
 /* Get content length */
 size_t tui_textview_len(const TuiTextView *view);
 
