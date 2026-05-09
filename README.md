@@ -663,25 +663,21 @@ gcc -o myapp myapp.c $(pkg-config --cflags --libs bloom-boba)
 
 ## Testing
 
-bloom-boba ships two test suites.
-
-### Unit tests — `make check`
-
-Fast, hermetic state-based tests under `tests/`. Each test binary links `libbloom-boba.a`, constructs a component directly, drives it with messages, and asserts on internal state.
+`make check` runs both suites in one go:
 
 ```bash
 cd build && make check
 ```
 
-### Terminal end-to-end tests — `make check-tmux`
+### Unit tests
+
+Fast, hermetic state-based tests under `tests/`. Each test binary links `libbloom-boba.a`, constructs a component directly, drives it with messages, and asserts on internal state.
+
+### Terminal end-to-end tests
 
 Purpose-built mini-apps that run inside a real `tmux` session. A bash driver sends keystrokes with `tmux send-keys`, captures the visible grid via `tmux capture-pane -p`, and inspects the cursor with `tmux display-message -p '#{cursor_x}'`. This catches rendering regressions that unit tests miss — e.g., a malformed CSI sequence, off-by-one cursor positioning, or content overflowing the visible area.
 
-```bash
-cd build && make check-tmux
-```
-
-`tmux` must be on `PATH` at configure time. If absent, the target prints a SKIP line and exits 0.
+These tests are folded into `make check` automatically when `tmux` is on `PATH` at configure time. If `tmux` is absent, the unit-test suite still runs and the tmux scripts are simply not registered with automake.
 
 #### Layout
 
