@@ -10,11 +10,15 @@ component collection. The shared spine is the
 into idiomatic C.
 
 The Charm ecosystem (now at [charm.land](https://charm.land)) has released a
-[v2 generation](https://charm.land/blog/v2/) with an evolved API — most
-visibly, components now report cursor placement via a dedicated `Cursor()`
-method instead of emitting positioning sequences inside `view()`. bloom-boba
-is in the process of aligning with v2; the `cursor` slot on `TuiComponent`
-and the runtime cursor handling described below already reflect that work.
+[v2 generation](https://charm.land/blog/v2/) with an evolved API. bloom-boba
+follows that direction: `view()` returns a `TuiView` that declares cursor
+placement, alt-screen, mouse mode, keyboard enhancements, focus reporting,
+bracketed paste, and window title each frame, and the runtime reconciles
+against tracked terminal state. Focus is message-driven (`TUI_MSG_FOCUS` /
+`TUI_MSG_BLUR`) and a Lipgloss-shaped `TuiStyle` covers colors, text
+attributes, padding/margin, alignment, and borders. A handful of legacy
+imperative setters remain marked `BLOOM_BOBA_DEPRECATED` with their
+declarative replacements documented inline.
 
 ## Why "boba"?
 
@@ -22,22 +26,27 @@ The name pays homage to Bubbletea. Boba are the tapioca pearls in bubble tea.
 
 ## What bloom-boba Provides
 
-Like Bubbletea, bloom-boba has two parts:
+bloom-boba has three parts:
 
-**Runtime** (`TuiRuntime`) - The event loop that:
+**Runtime** (`TuiRuntime`) — The event loop that:
 
 - Receives input and converts it to messages
 - Calls your model's `update()` function
 - Executes returned commands
-- Calls `view()` to render output
+- Calls `view()` to get a `TuiView` (content + terminal-mode declarations)
+- Reconciles the requested terminal state and writes the next frame
 - Repeats
 
-**Components** - Reusable UI building blocks:
+**Style** (`TuiStyle`) — A Lipgloss-shaped, value-typed style record covering
+colors (ANSI / 256 / truecolor / adaptive), text attributes, padding/margin,
+alignment, and borders. Composable without mutation.
 
-- `textinput` - Text input with history, completion, Unicode support, multi-line editing
-- `viewport` - Scrollable content area with software-based scrolling
-- `statusbar` - Status bar with mode indicator and notifications
-- `textview` - Simple text display (for basic use cases)
+**Components** — Reusable UI building blocks:
+
+- `textinput` — Text input with history, completion, Unicode support, multi-line editing, focus-aware styling
+- `viewport` — Scrollable content area with software scrolling and tmux-style copy-mode
+- `statusbar` — Status bar with mode indicator and notifications
+- `textview` — Simple text display (for basic use cases)
 
 ## Philosophy
 
@@ -59,11 +68,18 @@ This unidirectional flow makes programs predictable and easy to reason about.
 
 ## Adapting for C
 
-Since C lacks garbage collection and sum types, bloom-boba makes pragmatic choices:
+Since C lacks garbage collection, sum types, and method chaining, bloom-boba
+makes pragmatic choices:
 
 - **Mutable models** — Update modifies the model in place rather than returning a copy
-- **Tagged unions** — Messages use `enum` + `union` to simulate sum types
-- **Explicit memory** — Components provide `create` and `free` functions
+- **Tagged unions** — `TuiMsg` and `TuiCmd` use `enum` + `union` to simulate sum types
+- **Explicit memory** — Components provide matching `*_create()` / `*_free()` functions
+- **Declarative `TuiView`** — `view()` returns a small struct (content buffer +
+  terminal-mode flags + cursor) that the runtime diffs against tracked state.
+  This is the C analogue of returning a Bubbletea v2 `View` value.
+- **Value-typed styles** — `TuiStyle` is a plain struct; setters take and
+  return a value (`s = tui_style_bold(s, 1)`) instead of mutating, giving
+  Lipgloss-style composition without method chains.
 
 ## Runtime
 
@@ -162,18 +178,35 @@ The component interface follows the Elm Architecture pattern:
 
 ```c
 typedef struct TuiComponent {
-  TuiInitResult (*init)(void *config);      /* Create model + initial command */
-  TuiUpdateResult (*update)(TuiModel *model, TuiMsg msg);  /* Handle message */
-  void (*view)(const TuiModel *model, DynamicBuffer *out); /* Render content */
-  TuiCursor (*cursor)(const TuiModel *model);              /* Cursor placement (optional) */
-  void (*free)(TuiModel *model);            /* Cleanup */
+  TuiInitResult (*init)(void *config);                          /* Create model + initial command */
+  TuiUpdateResult (*update)(TuiModel *model, TuiMsg msg);        /* Handle message */
+  TuiView (*view)(const TuiModel *model, DynamicBuffer *out);    /* Render content + declare modes */
+  void (*free)(TuiModel *model);                                 /* Cleanup */
 } TuiComponent;
 ```
 
-The `cursor` slot mirrors Bubbletea v2's `Cursor()` method: components write
-content only in `view()` and report where the hardware cursor should land in
-`cursor()`. Returning `tui_cursor_hidden()` (or leaving the slot NULL) makes
-the runtime keep the cursor hidden for that frame.
+`view()` writes content bytes to `out` and returns a `TuiView` describing the
+desired terminal state for the frame:
+
+```c
+typedef struct TuiView {
+  DynamicBuffer *layer;                     /* Rendered content (== out) */
+  int alt_screen;                            /* 1 = alternate screen */
+  TuiMouseMode mouse_mode;                   /* NONE / CELL_MOTION / ALL_MOTION */
+  TuiKeyboardEnhancements kbd_enhancements;  /* Kitty keyboard protocol bitmask */
+  int report_focus;                          /* 1 = enable focus events */
+  int bracketed_paste;                       /* 1 = enable bracketed paste */
+  const char *window_title;                  /* NULL = leave alone */
+  TuiCursor cursor;                          /* visible=0 = hidden */
+} TuiView;
+```
+
+The runtime diffs each frame's `TuiView` against the terminal state it tracks
+and emits only the bytes needed to reach the requested state — no imperative
+"enter alt screen" / "show cursor" commands. Use `tui_view_default(out)` to
+start with everything off, set the fields you care about, and return the
+struct. Set `cursor.visible = 0` (or use `tui_cursor_hidden()`) to keep the
+cursor hidden for that frame.
 
 ### Init returns (Model, Cmd)
 
@@ -196,33 +229,35 @@ fetch initial data).
 
 Messages represent events flowing into the update function:
 
-| Type                             | Description                                       |
-| -------------------------------- | ------------------------------------------------- |
-| `TUI_MSG_KEY_PRESS`              | Key press with modifiers (Ctrl, Alt, Shift, Meta) |
-| `TUI_MSG_MOUSE`                  | Mouse button/wheel/motion with SGR coordinates    |
-| `TUI_MSG_WINDOW_SIZE`            | Terminal resized                                  |
-| `TUI_MSG_FOCUS` / `TUI_MSG_BLUR` | Application-level focus management                |
-| `TUI_MSG_LINE_SUBMIT`            | Line submitted from text input                    |
-| `TUI_MSG_EOF`                    | End of input (Ctrl+D on empty line)               |
-| `TUI_MSG_CUSTOM_BASE`            | Base value for application-defined messages       |
+| Type                                                          | Description                                            |
+| ------------------------------------------------------------- | ------------------------------------------------------ |
+| `TUI_MSG_KEY_PRESS`                                           | Key press with modifiers (Ctrl, Alt, Shift, Meta)      |
+| `TUI_MSG_MOUSE`                                               | Mouse button/wheel/motion with SGR coordinates         |
+| `TUI_MSG_WINDOW_SIZE`                                         | Terminal resized                                       |
+| `TUI_MSG_FOCUS` / `TUI_MSG_BLUR`                              | Focus state — dispatched by parents to children        |
+| `TUI_MSG_PASTE_START` / `TUI_MSG_PASTE` / `TUI_MSG_PASTE_END` | Bracketed paste (opt in via `TuiView.bracketed_paste`) |
+| `TUI_MSG_LINE_SUBMIT`                                         | Line submitted from text input                         |
+| `TUI_MSG_EOF`                                                 | End of input (Ctrl+D on empty line)                    |
+| `TUI_MSG_CUSTOM_BASE`                                         | Base value for application-defined messages            |
 
 ### Command Types
 
 Commands represent effects returned from the update function:
 
-| Type                                          | Description                                     |
-| --------------------------------------------- | ----------------------------------------------- |
-| `TUI_CMD_QUIT`                                | Exit the application                            |
-| `TUI_CMD_BATCH`                               | Run multiple commands                           |
-| `TUI_CMD_LINE_SUBMIT`                         | Line submitted (contains text)                  |
-| `TUI_CMD_TAB_COMPLETE`                        | Tab completion request (prefix + word position) |
-| `TUI_CMD_ENTER/EXIT_ALT_SCREEN`               | Alternate screen buffer                         |
-| `TUI_CMD_ENABLE/DISABLE_MOUSE`                | SGR mouse tracking                              |
-| `TUI_CMD_ENABLE/DISABLE_KEYBOARD_ENHANCEMENT` | Kitty keyboard protocol                         |
-| `TUI_CMD_SHOW/HIDE_CURSOR`                    | Cursor visibility                               |
-| `TUI_CMD_SET_WINDOW_TITLE`                    | OSC 2 window title                              |
-| `TUI_CMD_CLIPBOARD_COPY`                      | Copy text to system clipboard (OSC 52)          |
-| `TUI_CMD_CUSTOM_BASE`                         | Base value for application-defined commands     |
+| Type                     | Description                                     |
+| ------------------------ | ----------------------------------------------- |
+| `TUI_CMD_NONE`           | No-op (returned by helpers when no work needed) |
+| `TUI_CMD_QUIT`           | Exit the application                            |
+| `TUI_CMD_BATCH`          | Run multiple commands                           |
+| `TUI_CMD_LINE_SUBMIT`    | Line submitted (contains text)                  |
+| `TUI_CMD_TAB_COMPLETE`   | Tab completion request (prefix + word position) |
+| `TUI_CMD_CLIPBOARD_COPY` | Copy text to system clipboard (OSC 52)          |
+| `TUI_CMD_CUSTOM_BASE`    | Base value for application-defined commands     |
+
+Terminal-mode toggles (alt screen, mouse, keyboard enhancements, cursor
+visibility, focus reporting, bracketed paste, window title) are no longer
+commands — declare them on the `TuiView` returned from `view()` and the
+runtime reconciles each frame.
 
 ## Components
 
@@ -243,22 +278,28 @@ Features:
 - **Undo** - Multiple undo levels with Ctrl+\_ or Ctrl+X Ctrl+U
 - **Absolute cursor positioning** - Flicker-free rendering with optional divider lines
 - **Prompt support** - Custom prompt strings with proper UTF-8 width calculation
-- **Visual dividers** - Optional Unicode box-drawing lines with configurable color
+- **Visual dividers** - Optional Unicode box-drawing lines, styled per focus state
 - **Configurable word characters** - Whitelist-based word boundaries for completion and movement
 - **Echo mode** - Password masking (shows `*` per codepoint)
-- **Prompt color** - Custom ANSI color for the prompt string
+- **Focus-aware styling** - Separate focused / blurred `TuiStyle` for prompt and dividers (Bubbles parity)
 - **Continuation prompt** - Custom prompt for lines after the first in multi-line mode
 
 ```c
 TuiTextInput *input = tui_textinput_create(NULL);
 tui_textinput_set_prompt(input, "> ");
-tui_textinput_set_prompt_color(input, "\033[38;2;255;6;183m");
 tui_textinput_set_history_size(input, 100);
-tui_textinput_set_terminal_row(input, 23);    /* Absolute positioning */
-tui_textinput_set_show_dividers(input, 1);    /* Show decorative lines */
-tui_textinput_set_divider_color(input, "36"); /* Cyan dividers */
+tui_textinput_set_terminal_row(input, 23);     /* Absolute positioning */
+tui_textinput_set_show_dividers(input, 1);     /* Show decorative lines */
 tui_textinput_set_word_chars(input, "abc..."); /* Word boundary chars */
-tui_textinput_set_echo_mode(input, 1);        /* Password masking */
+tui_textinput_set_echo_mode(input, 1);         /* Password masking */
+
+/* Lipgloss-shaped focus-aware styling */
+TuiStyle pink   = tui_style_foreground(tui_style_new(), tui_color_hex("#ff06b7"));
+TuiStyle dim    = tui_style_faint(tui_style_new(), 1);
+tui_textinput_set_focused_prompt_style(input, pink);
+tui_textinput_set_blurred_prompt_style(input, dim);
+tui_textinput_set_focused_divider_style(input,
+    tui_style_foreground(tui_style_new(), tui_color_ansi(6)));   /* cyan */
 ```
 
 ### viewport
@@ -290,9 +331,9 @@ tui_viewport_set_max_lines(vp, 1000);        /* Limit memory usage */
 tui_viewport_set_wrap_mode(vp, 1);           /* Enable line wrapping */
 tui_viewport_append(vp, "Hello, world!\n", 14);
 
-/* Enable copy-mode: focus the viewport (the parent decides who is focused
- * and dispatches TUI_MSG_FOCUS / TUI_MSG_BLUR). */
-tui_viewport_set_focused(vp, 1);
+/* Enable copy-mode: the parent decides who is focused and dispatches
+ * TUI_MSG_FOCUS / TUI_MSG_BLUR through the viewport's update path. */
+tui_viewport_component()->update((TuiModel *)vp, tui_msg_focus());
 
 /* Hit-test for routing mouse events from a parent component: */
 if (tui_viewport_contains(vp, mouse_row, mouse_col)) {
@@ -359,6 +400,35 @@ Apps can also emit the command directly:
 return tui_update_result(tui_cmd_clipboard_copy(text, len));
 ```
 
+## Styles
+
+`TuiStyle` is bloom-boba's Lipgloss equivalent: a value-typed style record
+covering colors, text attributes, padding/margin, alignment, and borders.
+Setters take and return a `TuiStyle` so styles compose without mutation:
+
+```c
+TuiStyle title = tui_style_padding_x(
+    tui_style_bold(
+        tui_style_foreground(tui_style_new(),
+                             tui_color_hex("#ff06b7")),
+        1),
+    1);
+
+DynamicBuffer *out = dynamic_buffer_create(64);
+tui_style_render(&title, "Hello, world", out);
+```
+
+Colors come from `tui_color_ansi(n)` (16-color), `tui_color_rgb(r,g,b)`,
+`tui_color_hex("#rrggbb")`, or `tui_color_adaptive(light, dark)` (picks the
+right one based on detected background). Borders ship as five prefab
+`TuiBorder` styles (normal, rounded, thick, double, hidden). Use
+`tui_style_get_width()` / `tui_style_get_height()` to measure rendered
+content without producing the bytes.
+
+The textinput component consumes `TuiStyle` values directly via
+`tui_textinput_set_focused_prompt_style()` and friends; the same shape is
+how user code is expected to style its own components.
+
 ## Component Composition
 
 bloom-boba follows the same composition pattern as Bubbletea:
@@ -400,37 +470,33 @@ TuiUpdateResult my_app_update(MyAppModel *app, TuiMsg msg) {
 
 ### Composing Views
 
-The parent's view function composes child outputs:
+The parent's view function writes children's content into `out` and
+returns a `TuiView` carrying the desired terminal-mode declarations:
 
 ```c
-void my_app_view(const MyAppModel *app, DynamicBuffer *out) {
-  /* Render viewport (uses absolute positioning) */
+TuiView my_app_view(const TuiModel *m, DynamicBuffer *out) {
+  const MyAppModel *app = (const MyAppModel *)m;
+
+  /* Children render via absolute positioning into `out` */
   tui_viewport_view(app->viewport, out);
-
-  /* Render input area (uses absolute positioning) */
   tui_textinput_view(app->textinput, out);
+
+  /* Parent declares terminal state for the frame */
+  TuiView v = tui_view_default(out);
+  v.bracketed_paste = 1;
+  v.cursor = tui_textinput_cursor_pos(app->textinput);
+  return v;
 }
 ```
 
-### Composing Cursor
+### Composing Cursor Across Multiple Focusable Children
 
-Children no longer place the hardware cursor inside `view()`; the parent
-delegates `cursor()` to whichever child currently owns it (typically the
-focused one):
-
-```c
-TuiCursor my_app_cursor(const TuiModel *m) {
-  const MyAppModel *app = (const MyAppModel *)m;
-  return tui_textinput_cursor_pos(app->textinput);
-}
-```
-
-For multi-focus parents (e.g., a text input alongside a copy-mode viewport),
-branch on the focused child:
+`tui_textinput_cursor_pos()` and `tui_viewport_cursor_pos()` return
+`tui_cursor_hidden()` when the child is unfocused, so for two-pane layouts
+the focused child's cursor naturally wins:
 
 ```c
-TuiCursor my_app_cursor(const TuiModel *m) {
-  const MyAppModel *app = (const MyAppModel *)m;
+TuiCursor pick_cursor(const MyAppModel *app) {
   return app->focus_idx == 0
       ? tui_textinput_cursor_pos(app->input)
       : tui_viewport_cursor_pos(app->viewport);
@@ -497,14 +563,19 @@ and the host terminal controls what happens in the scrollback buffer. Software
 scrolling avoids all of this: the viewport owns every pixel it draws, wrapping,
 clipping, and scroll position are just arithmetic on an in-memory line buffer.
 
-### Commands
+### Commands and TuiView
 
-In Elm, commands are opaque values the runtime interprets. bloom-boba's built-in
-commands (`TUI_CMD_QUIT`, `TUI_CMD_LINE_SUBMIT`, `TUI_CMD_SET_WINDOW_TITLE`, etc.)
-work the same way — they are tagged union variants that the runtime's `execute_cmd()`
-function switches over. Application-defined custom commands add a callback, because
-that is the simplest way for application code to define arbitrary effects without
-the runtime needing to know about them in advance.
+In Elm, commands are opaque values the runtime interprets. bloom-boba splits
+"things that happen" into two channels: discrete one-shot effects flow as
+`TuiCmd` values returned from `update()` (`TUI_CMD_QUIT`, `TUI_CMD_LINE_SUBMIT`,
+`TUI_CMD_CLIPBOARD_COPY`, etc.) and the runtime switches over the tag, while
+ongoing terminal state (alt screen, mouse, keyboard enhancements, cursor,
+focus reporting, bracketed paste, window title) is declared per frame on the
+`TuiView` returned from `view()`. The runtime tracks current terminal state
+and emits only the bytes needed to reach the requested state, the same way
+Bubbletea v2 reconciles its `View`. Application-defined custom commands add a
+callback, because that is the simplest way for application code to define
+arbitrary effects without the runtime needing to know about them in advance.
 
 ### Subscriptions
 
