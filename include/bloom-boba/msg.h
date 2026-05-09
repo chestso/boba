@@ -42,6 +42,8 @@ typedef enum
     TUI_MOUSE_RELEASE = 3, /* Button release (no specific button) */
     TUI_MOUSE_WHEEL_UP = 64,
     TUI_MOUSE_WHEEL_DOWN = 65,
+    TUI_MOUSE_WHEEL_LEFT = 66,
+    TUI_MOUSE_WHEEL_RIGHT = 67,
 } TuiMouseButton;
 
 /* Mouse action types */
@@ -57,8 +59,9 @@ typedef struct
 {
     TuiMouseButton button;
     TuiMouseAction action;
-    int col; /* 1-indexed column */
-    int row; /* 1-indexed row */
+    int col;  /* 1-indexed column */
+    int row;  /* 1-indexed row */
+    int mods; /* Modifier flags (TuiKeyMod) */
 } TuiMouseMsg;
 
 /* Special key codes (non-printable keys) */
@@ -146,7 +149,7 @@ TuiMsg tui_msg_custom(int type, void *data);
 
 /* Create a mouse message */
 TuiMsg tui_msg_mouse(TuiMouseButton button, TuiMouseAction action, int col,
-                     int row);
+                     int row, int mods);
 
 /* Check if message is a key press of specific type */
 int tui_msg_is_key(TuiMsg msg, int key);

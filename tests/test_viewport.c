@@ -441,7 +441,8 @@ static void test_mouse_left_press_starts_selection(void)
     tui_viewport_append(vp, "abcdef\nghijkl\n", 14);
 
     /* Click at row 1, col 3 (1-indexed; local row 0, col 2). */
-    run_update(vp, tui_msg_mouse(TUI_MOUSE_LEFT, TUI_MOUSE_ACTION_PRESS, 3, 1));
+    run_update(vp,
+               tui_msg_mouse(TUI_MOUSE_LEFT, TUI_MOUSE_ACTION_PRESS, 3, 1, 0));
     assert(vp->copy_mode == 1);
     assert(vp->has_mark == 1);
     assert(vp->cursor_col == 2);
@@ -450,13 +451,13 @@ static void test_mouse_left_press_starts_selection(void)
 
     /* Drag to row 2, col 5 (local row 1, col 4). */
     run_update(vp,
-               tui_msg_mouse(TUI_MOUSE_LEFT, TUI_MOUSE_ACTION_MOTION, 5, 2));
+               tui_msg_mouse(TUI_MOUSE_LEFT, TUI_MOUSE_ACTION_MOTION, 5, 2, 0));
     assert(vp->cursor_visual_line == vp->y_offset + 1);
     assert(vp->cursor_col == 4);
 
     /* Release stops dragging. */
-    run_update(vp,
-               tui_msg_mouse(TUI_MOUSE_LEFT, TUI_MOUSE_ACTION_RELEASE, 5, 2));
+    run_update(
+        vp, tui_msg_mouse(TUI_MOUSE_LEFT, TUI_MOUSE_ACTION_RELEASE, 5, 2, 0));
     assert(vp->mouse_dragging == 0);
 
     tui_viewport_free(vp);

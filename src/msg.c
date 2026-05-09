@@ -71,7 +71,7 @@ TuiMsg tui_msg_custom(int type, void *data)
 
 /* Create a mouse message */
 TuiMsg tui_msg_mouse(TuiMouseButton button, TuiMouseAction action, int col,
-                     int row)
+                     int row, int mods)
 {
     TuiMsg msg;
     memset(&msg, 0, sizeof(msg));
@@ -80,6 +80,7 @@ TuiMsg tui_msg_mouse(TuiMouseButton button, TuiMouseAction action, int col,
     msg.data.mouse.action = action;
     msg.data.mouse.col = col;
     msg.data.mouse.row = row;
+    msg.data.mouse.mods = mods;
     return msg;
 }
 

@@ -258,29 +258,52 @@ static TuiMsg parse_sgr_mouse_sequence(const unsigned char *seq, int len)
         return tui_msg_none();
     }
 
-    /* Map button code - lower 2 bits are button, bit 5 (32) is motion */
+    /* Decode button code:
+     *   bits 0-1: button (0=L, 1=M, 2=R, 3=release/no-button)
+     *   bit  2 (4):  Shift
+     *   bit  3 (8):  Meta/Alt
+     *   bit  4 (16): Ctrl
+     *   bit  5 (32): motion event flag
+     *   bit  6 (64): wheel/extra block (bits 0-1 give wheel direction)
+     */
+    int mods = 0;
+    if (button & 4)
+        mods |= TUI_MOD_SHIFT;
+    if (button & 8)
+        mods |= TUI_MOD_META;
+    if (button & 16)
+        mods |= TUI_MOD_CTRL;
+
+    int motion = (button & 32) != 0;
+    int wheel = (button & 64) != 0;
+    int btn_low = button & 3;
+
     TuiMouseButton mouse_button;
-    if (button >= 64) {
-        /* Wheel events: 64 = up, 65 = down */
-        mouse_button = (TuiMouseButton)button;
+    if (wheel) {
+        /* 64=up, 65=down, 66=left, 67=right */
+        if (btn_low == 0)
+            mouse_button = TUI_MOUSE_WHEEL_UP;
+        else if (btn_low == 1)
+            mouse_button = TUI_MOUSE_WHEEL_DOWN;
+        else if (btn_low == 2)
+            mouse_button = TUI_MOUSE_WHEEL_LEFT;
+        else
+            mouse_button = TUI_MOUSE_WHEEL_RIGHT;
     } else {
-        int btn = button & 3;
-        if (btn == 0)
+        if (btn_low == 0)
             mouse_button = TUI_MOUSE_LEFT;
-        else if (btn == 1)
+        else if (btn_low == 1)
             mouse_button = TUI_MOUSE_MIDDLE;
-        else if (btn == 2)
+        else if (btn_low == 2)
             mouse_button = TUI_MOUSE_RIGHT;
         else
             mouse_button = TUI_MOUSE_RELEASE;
 
-        /* Check for motion (button 32+ indicates motion while button held) */
-        if (button & 32) {
+        if (motion)
             action = TUI_MOUSE_ACTION_MOTION;
-        }
     }
 
-    return tui_msg_mouse(mouse_button, action, col, row);
+    return tui_msg_mouse(mouse_button, action, col, row, mods);
 }
 
 /* Parse a single byte and return message if complete */
