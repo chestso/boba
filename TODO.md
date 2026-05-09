@@ -46,31 +46,17 @@ display_col)`; textinput tracks `cursor_byte`. They only share the
   `TUI_CMD_CLIPBOARD_COPY` pipeline. Revisit only if a third consumer
   with the same shape appears.
 
-## v2 alignment (deferred from declarative-View migration)
+## Declarative API alignment
 
-Each closes a gap with the Charm v2 reference (see
-`https://charm.land/blog/v2/`). None block usage. Cosmetic v2 renames
-(`Type → Code`, `Runes → Text`) intentionally skipped — current names
-read better in C.
-
-- **Key press/release split.** Add `action: PRESS | RELEASE` to
-  `TuiKeyMsg` and parser support for Kitty keyboard-protocol release
-  events (parser handles release for mouse only today).
-
-- **Bracketed paste.** Detect `ESC [ 200 ~ … ESC [ 201 ~` and emit
-  `TUI_MSG_PASTE_START` / `TUI_MSG_PASTE` / `TUI_MSG_PASTE_END`.
-  Components opt in via the existing `TuiView.bracketed_paste` field.
-
-- **Mouse message audit.** Buttons and `action` are already v2-aligned.
-  Verify nothing's missing against `MouseClickMsg` / `MouseReleaseMsg` /
-  `MouseMotionMsg` / `MouseWheelMsg` — likely no work, just confirm.
-
-- **Lipgloss-equivalent.** `TuiColor`, `TuiStyle`, and
-  `Render` / `Place` / `Join` / `Border` primitives. bloom-boba is the
-  all-in-one (bubbletea + lipgloss + bubbles), so this lives here, not
-  in a separate repo.
-
-- **Bubbles parity audit.** Once-over for obviously-missing capabilities:
-  viewport soft wrap, focused/blurred style separation in textinput,
-  textarea virtual-cursor / scroll helpers. Defer until a concrete use
-  case appears.
+- **Declarative replacements for textinput/viewport setters.** The
+  bulk of `tui_textinput_set_*()` / `tui_viewport_set_*()` setters
+  (`set_history_size`, `set_terminal_width`, `set_terminal_row`,
+  `set_show_dividers`, `set_echo_mode`, `set_word_chars`, etc.) are
+  imperative and don't yet have a declarative equivalent. Designing
+  one needs three calls: which init-time options grow on
+  `TuiTextInputConfig`, where render-time positioning lives (likely
+  new `TuiView` fields or parent-dispatched messages), and which
+  mid-life mutations become message-driven vs. stay as setters. Once
+  designed, these setters become deprecation candidates. Tracked
+  separately from the v2-alignment plan because it's API design, not
+  a mechanical attribute pass.

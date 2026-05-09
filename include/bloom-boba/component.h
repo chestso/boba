@@ -14,6 +14,15 @@
 #include "dynamic_buffer.h"
 #include "msg.h"
 
+/* Mark an API as deprecated. Emits a compiler warning on use under
+ * GCC/Clang; expands to nothing under other compilers. The argument
+ * is a short message naming the recommended replacement. */
+#if defined(__GNUC__) || defined(__clang__)
+#define BLOOM_BOBA_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#else
+#define BLOOM_BOBA_DEPRECATED(msg)
+#endif
+
 /* Forward declaration for model base type */
 typedef struct TuiModel TuiModel;
 

@@ -155,6 +155,8 @@ void tui_textinput_set_text(TuiTextInput *input, const char *text);
 void tui_textinput_clear(TuiTextInput *input);
 
 /* Set focus state */
+BLOOM_BOBA_DEPRECATED(
+    "send tui_msg_focus() / tui_msg_blur() through tui_textinput_update()")
 void tui_textinput_set_focus(TuiTextInput *input, int focused);
 
 /* Check if focused */
@@ -207,12 +209,16 @@ void tui_textinput_set_terminal_row(TuiTextInput *input, int row);
  * Pass an ANSI SGR sequence (e.g., "\033[38;2;37;160;101m").
  * Pass NULL or "" to reset to default (SGR_DIM).
  */
+BLOOM_BOBA_DEPRECATED(
+    "use tui_textinput_set_focused_divider_style / _blurred_divider_style")
 void tui_textinput_set_divider_color(TuiTextInput *input, const char *color);
 
 /* Set custom ANSI color escape sequence for the prompt.
  * Pass an ANSI SGR sequence (e.g., "\033[38;2;255;6;183m").
  * Pass NULL or "" to reset to default (no color).
  */
+BLOOM_BOBA_DEPRECATED(
+    "use tui_textinput_set_focused_prompt_style / _blurred_prompt_style")
 void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color);
 
 /* Lipgloss-shaped style setters. When set (i.e., the style has any

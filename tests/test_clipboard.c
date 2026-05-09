@@ -16,7 +16,11 @@
 #include <bloom-boba/component.h>
 #include <bloom-boba/runtime.h>
 
-static int tests_run = 0;
+/* Tests use tui_runtime_exec() to drive clipboard commands directly,
+ * outside the update() loop, since that's the path under test. */
+_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+
+    static int tests_run = 0;
 static int tests_passed = 0;
 
 #define RUN_TEST(fn)                 \

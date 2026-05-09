@@ -22,7 +22,11 @@
 #include <bloom-boba/msg.h>
 #include <bloom-boba/runtime.h>
 
-static int tests_run = 0;
+/* test_runtime_quit deliberately exercises the deprecated imperative
+ * tui_runtime_quit() to verify the legacy entry point still works. */
+_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+
+    static int tests_run = 0;
 static int tests_passed = 0;
 
 #define RUN_TEST(fn)                 \

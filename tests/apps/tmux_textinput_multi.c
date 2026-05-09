@@ -11,10 +11,13 @@
 #include <bloom-boba/msg.h>
 #include <bloom-boba/runtime.h>
 
+/* App uses the legacy convenience setter to focus the textinput at startup. */
+_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+
 #include <stdio.h>
 #include <stdlib.h>
 
-typedef struct
+    typedef struct
 {
     TuiModel base;
     TuiTextInput *ti;

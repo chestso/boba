@@ -10,7 +10,11 @@
 #include <bloom-boba/dynamic_buffer.h>
 #include <bloom-boba/msg.h>
 
-static int tests_run = 0;
+/* Tests deliberately exercise tui_viewport_set_focused to verify focus
+ * behavior; the message-driven path is covered separately. */
+_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+
+    static int tests_run = 0;
 static int tests_passed = 0;
 
 #define RUN_TEST(fn)                 \

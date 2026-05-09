@@ -16,7 +16,11 @@
 #include <bloom-boba/input_parser.h>
 #include <bloom-boba/msg.h>
 
-static int tests_run = 0;
+/* Test 7 directly exercises the deprecated tui_viewport_set_focused()
+ * to confirm the legacy convenience setter still works. */
+_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+
+    static int tests_run = 0;
 static int tests_passed = 0;
 
 #define RUN_TEST(fn)                 \
