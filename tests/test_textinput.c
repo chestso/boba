@@ -807,11 +807,13 @@ static void test_cursor_pos_multiline(void)
     tui_textinput_set_terminal_width(input, 80);
     tui_textinput_set_terminal_row(input, 10);
 
-    /* Build "ab\ncd" with cursor at end (row=1, col=2). */
+    /* Build "ab\ncd" with cursor at end (row=1, col=2). Newline insertion
+     * in multiline mode goes through Ctrl+J, the same path used when the
+     * parser sees a literal 0x0A byte from the terminal. */
     send_char(input, 'a');
     send_char(input, 'b');
     tui_textinput_update(input,
-                         tui_msg_key(TUI_KEY_NONE, '\n', 0));
+                         tui_msg_key(TUI_KEY_NONE, 'j', TUI_MOD_CTRL));
     send_char(input, 'c');
     send_char(input, 'd');
 
