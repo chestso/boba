@@ -65,9 +65,10 @@ read better in C.
   Verify nothing's missing against `MouseClickMsg` / `MouseReleaseMsg` /
   `MouseMotionMsg` / `MouseWheelMsg` — likely no work, just confirm.
 
-- **Lipgloss-equivalent.** C library for color/style/layout in the
-  Lipgloss v2 shape. Out of scope here — belongs in a separate
-  `bloom-lipgloss`.
+- **Lipgloss-equivalent.** `TuiColor`, `TuiStyle`, and
+  `Render` / `Place` / `Join` / `Border` primitives. bloom-boba is the
+  all-in-one (bubbletea + lipgloss + bubbles), so this lives here, not
+  in a separate repo.
 
 - **Bubbles parity audit.** Once-over for obviously-missing capabilities:
   viewport soft wrap, focused/blurred style separation in textinput,

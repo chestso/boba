@@ -1,11 +1,13 @@
 # bloom-boba
 
-A C library for building terminal user interfaces. bloom-boba's principal
-purpose is to bring the [Elm Architecture](https://guide.elm-lang.org/architecture/)
-to C, faithfully following the API design of the Charm libraries:
-[Bubbletea](https://github.com/charmbracelet/bubbletea) (runtime),
-[Lipgloss](https://github.com/charmbracelet/lipgloss) (styling), and
-[Bubbles](https://github.com/charmbracelet/bubbles) (components).
+A C library for building terminal user interfaces. bloom-boba is the C
+equivalent of Charm's three v2 projects rolled into a single library:
+the [Bubbletea](https://github.com/charmbracelet/bubbletea) runtime,
+the [Lipgloss](https://github.com/charmbracelet/lipgloss) style/layout
+system, and the [Bubbles](https://github.com/charmbracelet/bubbles)
+component collection. The shared spine is the
+[Elm Architecture](https://guide.elm-lang.org/architecture/), translated
+into idiomatic C.
 
 The Charm ecosystem (now at [charm.land](https://charm.land)) has released a
 [v2 generation](https://charm.land/blog/v2/) with an evolved API — most
