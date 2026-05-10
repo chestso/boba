@@ -241,6 +241,121 @@ static void test_render_border_rounded(void)
     free(out);
 }
 
+/* ----- Horizontal border edge (the lipgloss divider idiom) ------------ */
+
+static void test_border_render_horizontal_basic(void)
+{
+    /* Top edge of normal border × 10 columns = 10 ─ glyphs. */
+    char *out = tui_border_render_horizontal(&TUI_BORDER_NORMAL, 1, 10, NULL,
+                                             NULL, TUI_BORDER_TITLE_LEFT, 0, 0);
+    assert(out != NULL);
+    /* No SGR (style was NULL). */
+    assert(strstr(out, "\033[") == NULL);
+    /* Exactly 10 display columns. */
+    assert(tui_utf8_display_width(out) == 10);
+    free(out);
+}
+
+static void test_border_render_horizontal_bottom_edge(void)
+{
+    /* Pass top=0 → uses border->bottom. Use DOUBLE so top vs bottom differ
+     * visually if anyone confuses them (both are "═" for double, so use a
+     * custom border instead). */
+    TuiBorder b = { .top = "X", .bottom = "Y", .top_left = "L", .top_right = "R", .bottom_left = "l", .bottom_right = "r" };
+    char *out = tui_border_render_horizontal(&b, 0, 5, NULL, NULL,
+                                             TUI_BORDER_TITLE_LEFT, 0, 0);
+    assert(out != NULL);
+    assert(strcmp(out, "YYYYY") == 0);
+    free(out);
+}
+
+static void test_border_render_horizontal_styled(void)
+{
+    TuiStyle s = tui_style_foreground(tui_style_new(), tui_color_ansi(1));
+    char *out = tui_border_render_horizontal(&TUI_BORDER_NORMAL, 1, 4, &s,
+                                             NULL, TUI_BORDER_TITLE_LEFT, 0, 0);
+    assert(out != NULL);
+    /* Red fg = "\033[31m" present, then reset. */
+    assert(strstr(out, "\033[31m") != NULL);
+    assert(strstr(out, "\033[0m") != NULL);
+    /* Visible width still 4 columns (SGR escapes don't count). */
+    assert((int)tui_utf8_display_width_ansi(out, strlen(out)) == 4);
+    free(out);
+}
+
+static void test_border_render_horizontal_title_left(void)
+{
+    /* width=20, title="Hi" (w=2), pad 1+1 → slot=4, remaining=16 → all right. */
+    char *out = tui_border_render_horizontal(&TUI_BORDER_NORMAL, 1, 20, NULL,
+                                             "Hi", TUI_BORDER_TITLE_LEFT, 1, 1);
+    assert(out != NULL);
+    /* Layout: <0 left tiles> + " " + "Hi" + " " + <16 right tiles> */
+    assert(strncmp(out, " Hi ", 4) == 0);
+    assert(tui_utf8_display_width(out) == 20);
+    free(out);
+}
+
+static void test_border_render_horizontal_title_center(void)
+{
+    /* width=10, title="X" (w=1), pad 0+0 → slot=1, remaining=9 → 4 left, 5 right. */
+    char *out = tui_border_render_horizontal(&TUI_BORDER_NORMAL, 1, 10, NULL,
+                                             "X", TUI_BORDER_TITLE_CENTER, 0, 0);
+    assert(out != NULL);
+    assert(tui_utf8_display_width(out) == 10);
+    /* "X" should appear after exactly 4 ─ glyphs and before exactly 5. */
+    const char *x = strchr(out, 'X');
+    assert(x != NULL);
+    free(out);
+}
+
+static void test_border_render_horizontal_title_right(void)
+{
+    /* width=12, title="End" (w=3), pad 1+1 → slot=5, remaining=7 → 7 left, 0 right. */
+    char *out = tui_border_render_horizontal(&TUI_BORDER_NORMAL, 1, 12, NULL,
+                                             "End", TUI_BORDER_TITLE_RIGHT, 1, 1);
+    assert(out != NULL);
+    assert(tui_utf8_display_width(out) == 12);
+    /* Last 5 columns are " End ". */
+    /* The string ends with " End " (note: byte string, not column). Find by suffix. */
+    size_t len = strlen(out);
+    assert(len >= 5);
+    assert(strcmp(out + len - 5, " End ") == 0);
+    free(out);
+}
+
+static void test_border_render_horizontal_wide_title(void)
+{
+    /* CJK title "日本" has display width 4. width=10, pad 0+0 → remaining=6 → 0 left, 6 right (LEFT align). */
+    char *out = tui_border_render_horizontal(&TUI_BORDER_NORMAL, 1, 10, NULL,
+                                             "日本", TUI_BORDER_TITLE_LEFT, 0, 0);
+    assert(out != NULL);
+    assert(tui_utf8_display_width(out) == 10);
+    free(out);
+}
+
+static void test_border_render_horizontal_multi_codepoint_pattern(void)
+{
+    /* Custom border with 3-rune top pattern; tile across width=9 → "─◆ ─◆ ─◆ ". */
+    TuiBorder b = { .top = "─◆ ", .bottom = "─" };
+    char *out = tui_border_render_horizontal(&b, 1, 9, NULL, NULL,
+                                             TUI_BORDER_TITLE_LEFT, 0, 0);
+    assert(out != NULL);
+    assert(tui_utf8_display_width(out) == 9);
+    /* Pattern starts with ─◆<space> then repeats. */
+    assert(strstr(out, "─◆ ─◆ ─◆ ") != NULL);
+    free(out);
+}
+
+static void test_border_render_horizontal_invalid_args(void)
+{
+    /* NULL border → NULL */
+    assert(tui_border_render_horizontal(NULL, 1, 10, NULL, NULL,
+                                        TUI_BORDER_TITLE_LEFT, 0, 0) == NULL);
+    /* width <= 0 → NULL */
+    assert(tui_border_render_horizontal(&TUI_BORDER_NORMAL, 1, 0, NULL, NULL,
+                                        TUI_BORDER_TITLE_LEFT, 0, 0) == NULL);
+}
+
 /* ----- Sizing helpers -------------------------------------------------- */
 
 static void test_get_width_natural(void)
@@ -353,6 +468,16 @@ int main(void)
 
     RUN_TEST(test_render_border_normal);
     RUN_TEST(test_render_border_rounded);
+
+    RUN_TEST(test_border_render_horizontal_basic);
+    RUN_TEST(test_border_render_horizontal_bottom_edge);
+    RUN_TEST(test_border_render_horizontal_styled);
+    RUN_TEST(test_border_render_horizontal_title_left);
+    RUN_TEST(test_border_render_horizontal_title_center);
+    RUN_TEST(test_border_render_horizontal_title_right);
+    RUN_TEST(test_border_render_horizontal_wide_title);
+    RUN_TEST(test_border_render_horizontal_multi_codepoint_pattern);
+    RUN_TEST(test_border_render_horizontal_invalid_args);
 
     RUN_TEST(test_get_width_natural);
     RUN_TEST(test_get_width_with_padding_margin_border);

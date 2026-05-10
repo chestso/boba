@@ -90,6 +90,16 @@ extern const TuiBorder TUI_BORDER_THICK;   /* ┏━┓┃┗━┛ */
 extern const TuiBorder TUI_BORDER_DOUBLE;  /* ╔═╗║╚═╝ */
 extern const TuiBorder TUI_BORDER_HIDDEN;  /* spaces, occupies space */
 
+/* Title alignment within a horizontal border edge. */
+typedef enum
+{
+    TUI_BORDER_TITLE_LEFT = 0,
+    TUI_BORDER_TITLE_CENTER = 1,
+    TUI_BORDER_TITLE_RIGHT = 2,
+} TuiBorderTitleAlign;
+
+/* tui_border_render_horizontal is declared below the TuiStyle definition. */
+
 /* ----- Style ----------------------------------------------------------- */
 
 typedef enum
@@ -182,6 +192,27 @@ TuiStyle tui_style_inline(TuiStyle s, int on);
  * The result includes ANSI SGR sequences for colors/attrs, padding,
  * borders, alignment, and margins. */
 char *tui_style_render(const TuiStyle *style, const char *content);
+
+/* Render one horizontal border edge as a styled string sized to `width`
+ * display columns. `top` selects the edge: 1 = border->top, 0 = border->bottom.
+ *
+ * The chosen edge string tiles cyclically across the available width
+ * (matches lipgloss's renderHorizontalEdge). If `style` is non-NULL, it
+ * is applied inline (SGR-only — no padding/margin/box).
+ *
+ * If `title` is non-NULL and non-empty, it is embedded inside the line
+ * surrounded by `title_pad_left`/`title_pad_right` spaces, positioned
+ * per `align`. The remaining columns on each side are tiled with the
+ * edge string. If title + paddings exceed `width`, the title is emitted
+ * in full and the line overflows beyond `width` — matches lipgloss's
+ * no-Width-set behaviour; caller pre-truncates if needed.
+ *
+ * Returns a malloc'd, NUL-terminated string. Caller frees. NULL on
+ * alloc failure or invalid arguments (border==NULL, width<=0). */
+char *tui_border_render_horizontal(const TuiBorder *border, int top, int width,
+                                   const TuiStyle *style, const char *title,
+                                   TuiBorderTitleAlign align,
+                                   int title_pad_left, int title_pad_right);
 
 /* Compute rendered display width (terminal columns) without doing the
  * full render. Includes padding/border/margin contributions. */

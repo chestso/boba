@@ -902,6 +902,117 @@ char *tui_style_render(const TuiStyle *style, const char *content)
 }
 
 /* =====================================================================
+ * Border render helper
+ *
+ * Lipgloss draws dividers with `lipgloss.NewStyle().Render(strings.Repeat(
+ * border.Top, n))` — a tiled glyph wrapped in an inline-styled string.
+ * Style.Render with borders is for full 4-sided boxes; horizontal lines
+ * are a separate idiom. This helper is the C analogue of that idiom,
+ * with bloom-boba's title-in-edge extension folded in (lipgloss has no
+ * built-in title API as of v2.0.3).
+ * ===================================================================== */
+
+/* Tile the codepoints of `pattern` cyclically until `cols` display columns
+ * have been emitted, accounting for wide characters via tui_codepoint_width. */
+static void append_pattern_tiled(DynamicBuffer *buf, const char *pattern,
+                                 int cols)
+{
+    if (!buf || !pattern || !*pattern || cols <= 0)
+        return;
+    size_t plen = strlen(pattern);
+    size_t bp = 0;
+    int emitted = 0;
+    while (emitted < cols) {
+        if (bp >= plen)
+            bp = 0;
+        int clen = tui_utf8_char_len(pattern + bp);
+        if (clen < 1)
+            clen = 1;
+        if (bp + (size_t)clen > plen)
+            clen = (int)(plen - bp);
+        uint32_t cp = tui_utf8_decode(pattern + bp, clen);
+        int w = tui_codepoint_width(cp);
+        if (w < 1)
+            w = 1;
+        if (emitted + w > cols)
+            break;
+        dynamic_buffer_append(buf, pattern + bp, (size_t)clen);
+        bp += (size_t)clen;
+        emitted += w;
+    }
+    while (emitted < cols) {
+        dynamic_buffer_append(buf, " ", 1);
+        emitted++;
+    }
+}
+
+char *tui_border_render_horizontal(const TuiBorder *border, int top, int width,
+                                   const TuiStyle *style, const char *title,
+                                   TuiBorderTitleAlign align,
+                                   int title_pad_left, int title_pad_right)
+{
+    if (!border || width <= 0)
+        return NULL;
+
+    const char *edge = top ? border->top : border->bottom;
+    if (!edge || !*edge)
+        edge = " ";
+    if (title_pad_left < 0)
+        title_pad_left = 0;
+    if (title_pad_right < 0)
+        title_pad_right = 0;
+
+    DynamicBuffer *buf = dynamic_buffer_create(64);
+    if (!buf)
+        return NULL;
+
+    if (!title || !*title) {
+        append_pattern_tiled(buf, edge, width);
+    } else {
+        int title_w = tui_utf8_display_width(title);
+        int slot = title_pad_left + title_w + title_pad_right;
+        int remaining = width - slot;
+        if (remaining < 0)
+            remaining = 0;
+        int left, right;
+        switch (align) {
+        case TUI_BORDER_TITLE_CENTER:
+            left = remaining / 2;
+            right = remaining - left;
+            break;
+        case TUI_BORDER_TITLE_RIGHT:
+            left = remaining;
+            right = 0;
+            break;
+        case TUI_BORDER_TITLE_LEFT:
+        default:
+            left = 0;
+            right = remaining;
+            break;
+        }
+        append_pattern_tiled(buf, edge, left);
+        append_spaces(buf, title_pad_left);
+        dynamic_buffer_append_str(buf, title);
+        append_spaces(buf, title_pad_right);
+        append_pattern_tiled(buf, edge, right);
+    }
+
+    char *raw = finalize_buf(buf);
+    if (!raw)
+        return NULL;
+
+    /* Apply style inline (SGR-only). If style has no styling, returns
+     * a copy of `raw` with no SGR. */
+    if (!style)
+        return raw;
+    TuiStyle inline_style = *style;
+    inline_style.inline_ = 1;
+    char *styled = tui_style_render(&inline_style, raw);
+    free(raw);
+    return styled;
+}
+
+/* =====================================================================
  * Sizing helpers
  * ===================================================================== */
 

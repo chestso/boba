@@ -528,29 +528,22 @@ static void test_prompt(void)
     tui_textinput_free(input);
 }
 
-static void test_get_height_no_dividers(void)
+static void test_get_height_single_line(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     assert(tui_textinput_get_height(input) == 1);
     tui_textinput_free(input);
 }
 
-static void test_get_height_with_dividers(void)
+static void test_get_height_multiline(void)
 {
-    TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_show_dividers(input, 1);
-    assert(tui_textinput_get_height(input) == 3);
-    tui_textinput_free(input);
-}
-
-static void test_get_height_dynamic(void)
-{
-    TuiTextInput *input = tui_textinput_create(NULL);
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
     assert(tui_textinput_get_height(input) == 1);
-    tui_textinput_set_show_dividers(input, 1);
-    assert(tui_textinput_get_height(input) == 3);
-    tui_textinput_set_show_dividers(input, 0);
-    assert(tui_textinput_get_height(input) == 1);
+    /* Insert a newline (Ctrl+J in multiline) — height grows to 2. */
+    tui_textinput_update(input, tui_msg_key(TUI_KEY_NONE, 'j', TUI_MOD_CTRL));
+    assert(tui_textinput_get_height(input) == 2);
     tui_textinput_free(input);
 }
 
@@ -987,9 +980,8 @@ int main(void)
     RUN_TEST(test_set_cursor);
     RUN_TEST(test_line_count);
     RUN_TEST(test_prompt);
-    RUN_TEST(test_get_height_no_dividers);
-    RUN_TEST(test_get_height_with_dividers);
-    RUN_TEST(test_get_height_dynamic);
+    RUN_TEST(test_get_height_single_line);
+    RUN_TEST(test_get_height_multiline);
 
     RUN_TEST(test_ctrl_space_toggles_mark);
     RUN_TEST(test_m_w_no_mark_copies_whole_input);

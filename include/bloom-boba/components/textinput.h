@@ -48,23 +48,18 @@ typedef struct TuiTextInput
     const char *continuation_prompt; /* Prompt for continuation lines (not owned) */
     int continuation_prompt_len;     /* Cached continuation prompt display width */
 
-    int focused;            /* Whether component has focus */
-    int multiline;          /* Allow multiple lines (Enter inserts newline) */
-    int show_prompt;        /* Whether to display the prompt (default: 1) */
-    int show_dividers;      /* Whether to show dividers above/below (default: 0) */
-    int terminal_width;     /* Terminal width for divider rendering (0 = 80) */
-    int terminal_row;       /* Row for absolute positioning (1-indexed, 0 = not set) */
-    char divider_color[32]; /* Custom ANSI color for dividers (empty = SGR_DIM) */
-    char prompt_color[32];  /* Custom ANSI color for prompt (empty = no color) */
+    int focused;           /* Whether component has focus */
+    int multiline;         /* Allow multiple lines (Enter inserts newline) */
+    int show_prompt;       /* Whether to display the prompt (default: 1) */
+    int terminal_width;    /* Width used for line wrapping / overflow (0 = 80) */
+    int terminal_row;      /* Row for absolute positioning (1-indexed, 0 = not set) */
+    char prompt_color[32]; /* Custom ANSI color for prompt (empty = no color) */
 
-    /* Lipgloss-shaped focused/blurred styles. When any of these has a
-     * non-default styling (color or attribute), it overrides the legacy
-     * divider_color / prompt_color fields above for the matching focus
-     * state. Set via tui_textinput_set_*_style() builders. */
+    /* Lipgloss-shaped focused/blurred styles for the prompt. When any of
+     * these has a non-default styling (color or attribute), it overrides
+     * the legacy prompt_color field above for the matching focus state. */
     TuiStyle focused_prompt_style;
     TuiStyle blurred_prompt_style;
-    TuiStyle focused_divider_style;
-    TuiStyle blurred_divider_style;
 
     /* History management */
     char **history;    /* Array of past input lines */
@@ -193,25 +188,14 @@ void tui_textinput_set_show_prompt(TuiTextInput *input, int show);
 /* Set the prompt string */
 void tui_textinput_set_prompt(TuiTextInput *input, const char *prompt);
 
-/* Set whether to show dividers above/below the input */
-void tui_textinput_set_show_dividers(TuiTextInput *input, int show);
-
-/* Set terminal width for divider rendering */
+/* Set width used for line wrapping / horizontal overflow */
 void tui_textinput_set_terminal_width(TuiTextInput *input, int width);
 
-/* Set terminal row for absolute positioning (1-indexed)
- * When set, view() uses absolute cursor positioning instead of relative moves.
- * This is the row for the input line; dividers use adjacent rows.
+/* Set terminal row for absolute positioning (1-indexed).
+ * When set, view() uses absolute cursor positioning instead of relative
+ * moves. This is the row for the input line.
  */
 void tui_textinput_set_terminal_row(TuiTextInput *input, int row);
-
-/* Set custom ANSI color escape sequence for dividers.
- * Pass an ANSI SGR sequence (e.g., "\033[38;2;37;160;101m").
- * Pass NULL or "" to reset to default (SGR_DIM).
- */
-BLOOM_BOBA_DEPRECATED(
-    "use tui_textinput_set_focused_divider_style / _blurred_divider_style")
-void tui_textinput_set_divider_color(TuiTextInput *input, const char *color);
 
 /* Set custom ANSI color escape sequence for the prompt.
  * Pass an ANSI SGR sequence (e.g., "\033[38;2;255;6;183m").
@@ -221,15 +205,13 @@ BLOOM_BOBA_DEPRECATED(
     "use tui_textinput_set_focused_prompt_style / _blurred_prompt_style")
 void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color);
 
-/* Lipgloss-shaped style setters. When set (i.e., the style has any
- * color or attribute set), these take precedence over the legacy
- * set_prompt_color / set_divider_color above for the matching focus
- * state. The style's box-model (padding/margin/border) is ignored —
- * styling is applied inline. */
+/* Lipgloss-shaped style setters for the prompt. When set (i.e., the
+ * style has any color or attribute set), these take precedence over
+ * the legacy set_prompt_color above for the matching focus state. The
+ * style's box-model (padding/margin/border) is ignored — styling is
+ * applied inline. */
 void tui_textinput_set_focused_prompt_style(TuiTextInput *input, TuiStyle s);
 void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s);
-void tui_textinput_set_focused_divider_style(TuiTextInput *input, TuiStyle s);
-void tui_textinput_set_blurred_divider_style(TuiTextInput *input, TuiStyle s);
 
 /* Set the continuation prompt string (shown on lines after the first).
  * Must have the same display width as the main prompt.
@@ -244,8 +226,8 @@ void tui_textinput_set_echo_mode(TuiTextInput *input, int mode);
 /* Get echo mode */
 int tui_textinput_get_echo_mode(const TuiTextInput *input);
 
-/* Get render height in rows (includes dividers if enabled)
- * Returns 1 for the input line itself, +2 if show_dividers is enabled.
+/* Get render height in rows.
+ * Returns 1 for single-line input, line count for multi-line.
  */
 int tui_textinput_get_height(const TuiTextInput *input);
 
