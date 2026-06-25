@@ -676,7 +676,7 @@ Pure GNU Autotools — no wrapper script. From a clean checkout:
 ```bash
 ./autogen.sh
 mkdir build && cd build
-../configure --prefix=$HOME/.local --enable-debug
+../configure --prefix=$HOME/.local
 make -j$(nproc)
 make check          # run the test suite
 make install        # install library + headers + pkg-config file

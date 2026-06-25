@@ -634,8 +634,10 @@ static void test_schedule_null(void)
     TuiRuntime *rt = tui_runtime_create(&noop_component, NULL, &cfg);
     assert(rt != NULL);
 
-    /* NULL runtime */
-    tui_runtime_schedule(NULL, tui_cmd_quit());
+    /* NULL runtime — cmd must be freed since it won't be enqueued */
+    TuiCmd *quit_cmd = tui_cmd_quit();
+    tui_runtime_schedule(NULL, quit_cmd);
+    free(quit_cmd);
 
     /* NULL cmd */
     tui_runtime_schedule(rt, NULL);

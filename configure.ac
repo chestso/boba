@@ -24,6 +24,7 @@ AC_SUBST([BLOOM_BOBA_VERSION])
 AC_MSG_NOTICE([bloom-boba version: $BLOOM_BOBA_VERSION])
 
 dnl Check for programs
+user_cflags="$CFLAGS"
 AC_PROG_CC
 AC_PROG_RANLIB
 AM_PROG_AR
@@ -32,20 +33,29 @@ dnl Optional: tmux for end-to-end terminal tests (`make check-tmux`)
 AC_CHECK_PROG([TMUX], [tmux], [yes], [no])
 AM_CONDITIONAL([HAVE_TMUX], [test "x$TMUX" = "xyes"])
 
-dnl Debug option
+dnl Build mode selection (--enable-release > --enable-debug > default ASan)
 AC_ARG_ENABLE([debug],
   [AS_HELP_STRING([--enable-debug],
-    [enable debug symbols and disable optimizations])],
+    [unsanitized debug build (-O0 -g3, no ASan)])],
   [enable_debug=$enableval],
   [enable_debug=no])
 
-if test "x$enable_debug" = "xyes"; then
-  CFLAGS="-O0 -g3 -DDEBUG $CFLAGS"
-  AC_MSG_NOTICE([Debug mode enabled: CFLAGS set to -O0 -g3 -DDEBUG])
-else
-  if test "x$CFLAGS" = "x"; then
-    CFLAGS="-O2"
-  fi
+AC_ARG_ENABLE([release],
+  [AS_HELP_STRING([--enable-release],
+    [optimized release build (-O3 -DNDEBUG)])],
+  [enable_release=$enableval],
+  [enable_release=no])
+
+if test "x$enable_release" = "xyes"; then
+  CFLAGS="-O3 -DNDEBUG"
+  AC_MSG_NOTICE([Release mode: CFLAGS set to -O3 -DNDEBUG])
+elif test "x$enable_debug" = "xyes"; then
+  CFLAGS="-O0 -g3"
+  AC_MSG_NOTICE([Debug mode: CFLAGS set to -O0 -g3])
+elif test "x$user_cflags" = "x"; then
+  CFLAGS="-O1 -g3 -fno-omit-frame-pointer -fno-common -fsanitize=address,undefined -fno-sanitize-recover=undefined"
+  LDFLAGS="-fsanitize=address,undefined $LDFLAGS"
+  AC_MSG_NOTICE([ASan+UBSan mode (default): CFLAGS=$CFLAGS])
 fi
 
 dnl Check for header files
