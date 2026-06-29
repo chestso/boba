@@ -87,8 +87,8 @@ size_t ansi_format_osc52(char *buf, size_t size, const char *text,
 
     memcpy(buf, prefix, prefix_len);
     size_t written = boba_base64_encode((const unsigned char *)text,
-                                              text_len, buf + prefix_len,
-                                              size - prefix_len);
+                                        text_len, buf + prefix_len,
+                                        size - prefix_len);
     if (written != b64_len)
         return 0;
     memcpy(buf + prefix_len + b64_len, suffix, suffix_len);

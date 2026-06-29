@@ -8,7 +8,7 @@ static const char b64_alphabet[64] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 size_t boba_base64_encode(const unsigned char *in, size_t in_len,
-                                char *out, size_t out_size)
+                          char *out, size_t out_size)
 {
     if (!out)
         return 0;

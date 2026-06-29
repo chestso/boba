@@ -17,6 +17,6 @@
  * Returns the number of bytes written, or 0 on failure (NULL args, buffer
  * too small). */
 size_t boba_base64_encode(const unsigned char *in, size_t in_len,
-                                char *out, size_t out_size);
+                          char *out, size_t out_size);
 
 #endif /* BOBA_INTERNAL_BASE64_H */

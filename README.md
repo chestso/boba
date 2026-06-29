@@ -613,7 +613,7 @@ ongoing event sources that change based on model state — subscribe to a WebSoc
 only when connected, start a timer only in a certain mode. boba covers the
 same use cases through runtime config callbacks:
 
-| Elm subscription               | boba equivalent                                            |
+| Elm subscription               | boba equivalent                                                  |
 | ------------------------------ | ---------------------------------------------------------------- |
 | `Time.every 1000 Tick`         | `on_tick` + `get_tick_timeout_ms`                                |
 | Window resize                  | Automatic `TUI_MSG_WINDOW_SIZE` + `on_resize`                    |

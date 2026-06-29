@@ -15,7 +15,7 @@ None are blockers — they extend or polish what's already in place.
   large clipboards (>~64 KB) hit terminal line-length limits and get
   silently truncated (8 KB is the common cap). (b) Auto-pick OSC 52 vs.
   `clipboard_handler` based on `$TERM` / `$TERM_PROGRAM` — probably
-  belongs in the consumer (mudlark, bloom-lisp), worth documenting.
+  belongs in the consumer (mudlark, ditty), worth documenting.
 
 - **Mouse drag-to-select in textinput.** Map mouse `(row, col)` to byte
   offsets — straightforward for single-line, harder in multiline where
