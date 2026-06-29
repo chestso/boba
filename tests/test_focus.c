@@ -12,9 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <bloom-boba/components/viewport.h>
-#include <bloom-boba/input_parser.h>
-#include <bloom-boba/msg.h>
+#include <boba/components/viewport.h>
+#include <boba/input_parser.h>
+#include <boba/msg.h>
 
 /* Test 7 directly exercises the deprecated tui_viewport_set_focused()
  * to confirm the legacy convenience setter still works. */

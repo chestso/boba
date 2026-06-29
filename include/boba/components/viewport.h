@@ -11,8 +11,8 @@
 #ifndef TUI_VIEWPORT_H
 #define TUI_VIEWPORT_H
 
-#include <bloom-boba/component.h>
-#include <bloom-boba/dynamic_buffer.h>
+#include <boba/component.h>
+#include <boba/dynamic_buffer.h>
 #include <stddef.h>
 
 /* A single line in the viewport */
@@ -104,7 +104,7 @@ size_t tui_viewport_line_count(const TuiViewport *vp);
 /* Set focus state directly. Apps usually drive this via TUI_MSG_FOCUS /
  * TUI_MSG_BLUR through the component update path; this is a convenience for
  * apps that manage focus without going through messages. */
-BLOOM_BOBA_DEPRECATED(
+BOBA_DEPRECATED(
     "send tui_msg_focus() / tui_msg_blur() through the viewport's update path")
 void tui_viewport_set_focused(TuiViewport *vp, int focused);
 

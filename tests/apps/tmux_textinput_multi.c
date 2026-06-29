@@ -6,10 +6,10 @@
  * driving test tears down with `tmux kill-session`.
  */
 
-#include <bloom-boba/component.h>
-#include <bloom-boba/components/textinput.h>
-#include <bloom-boba/msg.h>
-#include <bloom-boba/runtime.h>
+#include <boba/component.h>
+#include <boba/components/textinput.h>
+#include <boba/msg.h>
+#include <boba/runtime.h>
 
 /* App uses the legacy convenience setter to focus the textinput at startup. */
 _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")

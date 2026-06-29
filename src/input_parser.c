@@ -1,6 +1,6 @@
-/* input_parser.c - Terminal input parsing for bloom-boba TUI library */
+/* input_parser.c - Terminal input parsing for boba TUI library */
 
-#include <bloom-boba/input_parser.h>
+#include <boba/input_parser.h>
 #include <stdlib.h>
 #include <string.h>
 

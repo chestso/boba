@@ -15,8 +15,8 @@
  * etc.)
  */
 
-#ifndef BLOOM_BOBA_ANSI_SEQUENCES_H
-#define BLOOM_BOBA_ANSI_SEQUENCES_H
+#ifndef BOBA_ANSI_SEQUENCES_H
+#define BOBA_ANSI_SEQUENCES_H
 
 #include <stddef.h>
 
@@ -253,4 +253,4 @@ size_t ansi_format_osc52(char *buf, size_t size, const char *text,
  * trailing null. */
 #define ANSI_OSC52_BUFSIZE(text_len) (7 + 4 * (((text_len) + 2) / 3) + 2 + 1)
 
-#endif /* BLOOM_BOBA_ANSI_SEQUENCES_H */
+#endif /* BOBA_ANSI_SEQUENCES_H */

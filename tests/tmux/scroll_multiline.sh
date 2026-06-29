@@ -9,7 +9,7 @@ set -eu
 THIS_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$THIS_DIR/lib.sh"
 
-SESSION=bloom_boba_scroll_$$
+SESSION=boba_scroll_$$
 BIN="$TMUX_BIN_DIR/tmux_textinput_multi"
 
 trap 'tmux_kill "$SESSION"' EXIT

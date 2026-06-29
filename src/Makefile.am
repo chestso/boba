@@ -1,8 +1,8 @@
-# src/Makefile.am - Build bloom-boba static library
+# src/Makefile.am - Build boba static library
 
-lib_LIBRARIES = libbloom-boba.a
+lib_LIBRARIES = libboba.a
 
-libbloom_boba_a_SOURCES = \
+libboba_a_SOURCES = \
     msg.c \
     cmd.c \
     input_parser.c \
@@ -17,6 +17,6 @@ libbloom_boba_a_SOURCES = \
     components/viewport.c \
     components/statusbar.c
 
-libbloom_boba_a_CPPFLAGS = \
+libboba_a_CPPFLAGS = \
     -I$(top_srcdir)/include \
     -I$(top_srcdir)/src

@@ -1,12 +1,12 @@
-/* cmd.h - Command types for bloom-boba TUI library
+/* cmd.h - Command types for boba TUI library
  *
  * Commands represent side effects in the Elm Architecture. The Update function
  * can return commands that will be executed asynchronously, producing new
  * messages.
  */
 
-#ifndef BLOOM_BOBA_CMD_H
-#define BLOOM_BOBA_CMD_H
+#ifndef BOBA_CMD_H
+#define BOBA_CMD_H
 
 #include "msg.h"
 #include <stddef.h>
@@ -107,4 +107,4 @@ void tui_cmd_free(TuiCmd *cmd);
 /* Check if command is the none/null command */
 int tui_cmd_is_none(TuiCmd *cmd);
 
-#endif /* BLOOM_BOBA_CMD_H */
+#endif /* BOBA_CMD_H */

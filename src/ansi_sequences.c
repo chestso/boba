@@ -1,7 +1,7 @@
 /* ansi_sequences.c - Helper functions for parameterized ANSI sequences */
 
 #include "base64.h"
-#include <bloom-boba/ansi_sequences.h>
+#include <boba/ansi_sequences.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -79,14 +79,14 @@ size_t ansi_format_osc52(char *buf, size_t size, const char *text,
     static const char suffix[] = ST;
     static const size_t suffix_len = sizeof(suffix) - 1;
 
-    size_t b64_len = BLOOM_BOBA_BASE64_ENCODED_LEN(text_len);
+    size_t b64_len = BOBA_BASE64_ENCODED_LEN(text_len);
     size_t needed = prefix_len + b64_len + suffix_len;
 
     if (size < needed)
         return 0;
 
     memcpy(buf, prefix, prefix_len);
-    size_t written = bloom_boba_base64_encode((const unsigned char *)text,
+    size_t written = boba_base64_encode((const unsigned char *)text,
                                               text_len, buf + prefix_len,
                                               size - prefix_len);
     if (written != b64_len)

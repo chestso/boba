@@ -1,6 +1,6 @@
 /* Dynamic buffer implementation */
 
-#include <bloom-boba/dynamic_buffer.h>
+#include <boba/dynamic_buffer.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

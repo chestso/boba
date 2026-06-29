@@ -5,10 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <bloom-boba/cmd.h>
-#include <bloom-boba/components/textinput.h>
-#include <bloom-boba/dynamic_buffer.h>
-#include <bloom-boba/msg.h>
+#include <boba/cmd.h>
+#include <boba/components/textinput.h>
+#include <boba/dynamic_buffer.h>
+#include <boba/msg.h>
 
 /* Tests deliberately exercise the legacy imperative APIs (set_focus,
  * set_prompt_color) to verify backward-compat behavior. */

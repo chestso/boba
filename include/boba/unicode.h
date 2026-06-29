@@ -1,11 +1,11 @@
 /* unicode.h - UTF-8 and Unicode utility functions
  *
  * Pure utility functions for UTF-8 encoding/decoding and Unicode
- * character width calculation. No bloom-boba type dependencies.
+ * character width calculation. No boba type dependencies.
  */
 
-#ifndef BLOOM_BOBA_UNICODE_H
-#define BLOOM_BOBA_UNICODE_H
+#ifndef BOBA_UNICODE_H
+#define BOBA_UNICODE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -47,4 +47,4 @@ int tui_utf8_display_width(const char *str);
 /* Calculate display width of a UTF-8 string, skipping ANSI escape sequences. */
 size_t tui_utf8_display_width_ansi(const char *text, size_t len);
 
-#endif /* BLOOM_BOBA_UNICODE_H */
+#endif /* BOBA_UNICODE_H */

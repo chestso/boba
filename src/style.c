@@ -1,13 +1,13 @@
 /* style.c - Color, style, and layout primitives implementation
  *
- * The bloom-boba analogue to Charm's Lipgloss v2. See style.h for the
+ * The boba analogue to Charm's Lipgloss v2. See style.h for the
  * full public API.
  */
 
-#include <bloom-boba/ansi_sequences.h>
-#include <bloom-boba/dynamic_buffer.h>
-#include <bloom-boba/style.h>
-#include <bloom-boba/unicode.h>
+#include <boba/ansi_sequences.h>
+#include <boba/dynamic_buffer.h>
+#include <boba/style.h>
+#include <boba/unicode.h>
 
 #include <ctype.h>
 #include <stdio.h>
@@ -908,7 +908,7 @@ char *tui_style_render(const TuiStyle *style, const char *content)
  * border.Top, n))` — a tiled glyph wrapped in an inline-styled string.
  * Style.Render with borders is for full 4-sided boxes; horizontal lines
  * are a separate idiom. This helper is the C analogue of that idiom,
- * with bloom-boba's title-in-edge extension folded in (lipgloss has no
+ * with boba's title-in-edge extension folded in (lipgloss has no
  * built-in title API as of v2.0.3).
  * ===================================================================== */
 

@@ -1,7 +1,7 @@
 /* runtime.c - Runtime and event loop implementation */
 
-#include <bloom-boba/ansi_sequences.h>
-#include <bloom-boba/runtime.h>
+#include <boba/ansi_sequences.h>
+#include <boba/runtime.h>
 #include <stdlib.h>
 #include <string.h>
 

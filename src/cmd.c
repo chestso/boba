@@ -1,6 +1,6 @@
-/* cmd.c - Command implementation for bloom-boba TUI library */
+/* cmd.c - Command implementation for boba TUI library */
 
-#include <bloom-boba/cmd.h>
+#include <boba/cmd.h>
 #include <stdlib.h>
 #include <string.h>
 

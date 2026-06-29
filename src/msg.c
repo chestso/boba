@@ -1,6 +1,6 @@
-/* msg.c - Message implementation for bloom-boba TUI library */
+/* msg.c - Message implementation for boba TUI library */
 
-#include <bloom-boba/msg.h>
+#include <boba/msg.h>
 #include <stdlib.h>
 #include <string.h>
 

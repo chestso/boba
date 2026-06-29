@@ -1,5 +1,5 @@
 #!/bin/sh
-# git-version.sh - print the bloom-boba version string.
+# git-version.sh - print the boba version string.
 #
 # Usage: git-version.sh [SRCDIR]
 #

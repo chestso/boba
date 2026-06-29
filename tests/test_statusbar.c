@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <bloom-boba/components/statusbar.h>
-#include <bloom-boba/dynamic_buffer.h>
+#include <boba/components/statusbar.h>
+#include <boba/dynamic_buffer.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;

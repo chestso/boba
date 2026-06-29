@@ -1,4 +1,4 @@
-/* statusbar.h - Status bar component for bloom-boba
+/* statusbar.h - Status bar component for boba
  *
  * A lightweight status bar widget supporting:
  * - Mode indicator (left, persistent)
@@ -7,8 +7,8 @@
  * - Single-line rendering with clear-line semantics
  */
 
-#ifndef BLOOM_BOBA_STATUSBAR_H
-#define BLOOM_BOBA_STATUSBAR_H
+#ifndef BOBA_STATUSBAR_H
+#define BOBA_STATUSBAR_H
 
 #include "../component.h"
 #include "../dynamic_buffer.h"
@@ -95,4 +95,4 @@ TuiUpdateResult tui_statusbar_update(TuiStatusBar *sb, TuiMsg msg);
 /* Get component interface for status bar */
 const TuiComponent *tui_statusbar_component(void);
 
-#endif /* BLOOM_BOBA_STATUSBAR_H */
+#endif /* BOBA_STATUSBAR_H */

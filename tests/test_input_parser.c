@@ -6,8 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <bloom-boba/input_parser.h>
-#include <bloom-boba/msg.h>
+#include <boba/input_parser.h>
+#include <boba/msg.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;

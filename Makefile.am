@@ -1,11 +1,11 @@
-# Makefile.am - Top-level automake file for bloom-boba
+# Makefile.am - Top-level automake file for boba
 
 SUBDIRS = src include tests
 
 ACLOCAL_AMFLAGS = -I m4
 
 pkgconfigdir = $(libdir)/pkgconfig
-pkgconfig_DATA = bloom-boba.pc
+pkgconfig_DATA = boba.pc
 
 EXTRA_DIST = \
     autogen.sh \

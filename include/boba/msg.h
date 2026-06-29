@@ -1,11 +1,11 @@
-/* msg.h - Message types for bloom-boba TUI library
+/* msg.h - Message types for boba TUI library
  *
  * Messages represent events in the Elm Architecture. The Update function
  * receives messages and produces new state plus optional commands.
  */
 
-#ifndef BLOOM_BOBA_MSG_H
-#define BLOOM_BOBA_MSG_H
+#ifndef BOBA_MSG_H
+#define BOBA_MSG_H
 
 #include <stdint.h>
 
@@ -211,4 +211,4 @@ int tui_msg_is_char(TuiMsg msg, uint32_t rune);
 /* Check if message has specific modifier */
 int tui_msg_has_mod(TuiMsg msg, int mod);
 
-#endif /* BLOOM_BOBA_MSG_H */
+#endif /* BOBA_MSG_H */

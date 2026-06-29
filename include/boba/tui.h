@@ -1,13 +1,13 @@
-/* tui.h - Main public API for bloom-boba TUI library
+/* tui.h - Main public API for boba TUI library
  *
- * bloom-boba is a C library for building terminal user interfaces using
+ * boba is a C library for building terminal user interfaces using
  * the Elm Architecture pattern (Model-View-Update).
  *
- * Include this header to get access to all bloom-boba functionality.
+ * Include this header to get access to all boba functionality.
  */
 
-#ifndef BLOOM_BOBA_TUI_H
-#define BLOOM_BOBA_TUI_H
+#ifndef BOBA_TUI_H
+#define BOBA_TUI_H
 
 /* Core types and utilities */
 #include "ansi_sequences.h"
@@ -29,4 +29,4 @@
 /* Runtime (optional, for standalone applications) */
 #include "runtime.h"
 
-#endif /* BLOOM_BOBA_TUI_H */
+#endif /* BOBA_TUI_H */

@@ -1,9 +1,9 @@
 /* textinput.c - Multi-line text input component implementation */
 
-#include <bloom-boba/ansi_sequences.h>
-#include <bloom-boba/cmd.h>
-#include <bloom-boba/components/textinput.h>
-#include <bloom-boba/unicode.h>
+#include <boba/ansi_sequences.h>
+#include <boba/cmd.h>
+#include <boba/components/textinput.h>
+#include <boba/unicode.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

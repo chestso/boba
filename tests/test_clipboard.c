@@ -11,10 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <bloom-boba/ansi_sequences.h>
-#include <bloom-boba/cmd.h>
-#include <bloom-boba/component.h>
-#include <bloom-boba/runtime.h>
+#include <boba/ansi_sequences.h>
+#include <boba/cmd.h>
+#include <boba/component.h>
+#include <boba/runtime.h>
 
 /* Tests use tui_runtime_exec() to drive clipboard commands directly,
  * outside the update() loop, since that's the path under test. */

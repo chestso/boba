@@ -8,10 +8,10 @@
  * - Supports wrap mode (long lines wrap) and clip mode (truncate at width)
  */
 
-#include <bloom-boba/ansi_sequences.h>
-#include <bloom-boba/cmd.h>
-#include <bloom-boba/components/viewport.h>
-#include <bloom-boba/unicode.h>
+#include <boba/ansi_sequences.h>
+#include <boba/cmd.h>
+#include <boba/components/viewport.h>
+#include <boba/unicode.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>

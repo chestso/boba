@@ -1,6 +1,6 @@
 /* unicode.c - UTF-8 and Unicode utility functions */
 
-#include <bloom-boba/unicode.h>
+#include <boba/unicode.h>
 
 int tui_utf8_char_len(const char *ptr)
 {

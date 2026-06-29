@@ -5,8 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <bloom-boba/style.h>
-#include <bloom-boba/unicode.h>
+#include <boba/style.h>
+#include <boba/unicode.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;

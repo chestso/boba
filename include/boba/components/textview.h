@@ -1,4 +1,4 @@
-/* textview.h - Scrolling text view component for bloom-boba
+/* textview.h - Scrolling text view component for boba
  *
  * A text display widget supporting:
  * - Append-only text content (like a terminal output)
@@ -7,8 +7,8 @@
  * - ANSI escape sequence passthrough
  */
 
-#ifndef BLOOM_BOBA_TEXTVIEW_H
-#define BLOOM_BOBA_TEXTVIEW_H
+#ifndef BOBA_TEXTVIEW_H
+#define BOBA_TEXTVIEW_H
 
 #include "../component.h"
 #include "../dynamic_buffer.h"
@@ -87,4 +87,4 @@ TuiUpdateResult tui_textview_update(TuiTextView *view, TuiMsg msg);
 /* Get component interface for text view */
 const TuiComponent *tui_textview_component(void);
 
-#endif /* BLOOM_BOBA_TEXTVIEW_H */
+#endif /* BOBA_TEXTVIEW_H */

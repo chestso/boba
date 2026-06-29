@@ -1,7 +1,7 @@
 /* textview.c - Scrolling text view component implementation */
 
-#include <bloom-boba/cmd.h>
-#include <bloom-boba/components/textview.h>
+#include <boba/cmd.h>
+#include <boba/components/textview.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

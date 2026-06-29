@@ -1,4 +1,4 @@
-/* component.h - Component interface for bloom-boba TUI library
+/* component.h - Component interface for boba TUI library
  *
  * Components follow the Elm Architecture pattern:
  * - init: Create initial model state
@@ -7,8 +7,8 @@
  * - free: Cleanup resources
  */
 
-#ifndef BLOOM_BOBA_COMPONENT_H
-#define BLOOM_BOBA_COMPONENT_H
+#ifndef BOBA_COMPONENT_H
+#define BOBA_COMPONENT_H
 
 #include "cmd.h"
 #include "dynamic_buffer.h"
@@ -18,9 +18,9 @@
  * GCC/Clang; expands to nothing under other compilers. The argument
  * is a short message naming the recommended replacement. */
 #if defined(__GNUC__) || defined(__clang__)
-#define BLOOM_BOBA_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#define BOBA_DEPRECATED(msg) __attribute__((deprecated(msg)))
 #else
-#define BLOOM_BOBA_DEPRECATED(msg)
+#define BOBA_DEPRECATED(msg)
 #endif
 
 /* Forward declaration for model base type */
@@ -170,4 +170,4 @@ static inline TuiInitResult tui_init_result_none(TuiModel *model)
     return result;
 }
 
-#endif /* BLOOM_BOBA_COMPONENT_H */
+#endif /* BOBA_COMPONENT_H */

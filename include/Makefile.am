@@ -1,21 +1,21 @@
-# include/Makefile.am - Install bloom-boba public headers
+# include/Makefile.am - Install boba public headers
 
-bloom_bobadir = $(includedir)/bloom-boba
-bloom_boba_HEADERS = \
-    bloom-boba/tui.h \
-    bloom-boba/msg.h \
-    bloom-boba/cmd.h \
-    bloom-boba/component.h \
-    bloom-boba/input_parser.h \
-    bloom-boba/runtime.h \
-    bloom-boba/dynamic_buffer.h \
-    bloom-boba/ansi_sequences.h \
-    bloom-boba/unicode.h \
-    bloom-boba/style.h
+bobadir = $(includedir)/boba
+boba_HEADERS = \
+    boba/tui.h \
+    boba/msg.h \
+    boba/cmd.h \
+    boba/component.h \
+    boba/input_parser.h \
+    boba/runtime.h \
+    boba/dynamic_buffer.h \
+    boba/ansi_sequences.h \
+    boba/unicode.h \
+    boba/style.h
 
-bloom_boba_componentsdir = $(includedir)/bloom-boba/components
-bloom_boba_components_HEADERS = \
-    bloom-boba/components/textinput.h \
-    bloom-boba/components/textview.h \
-    bloom-boba/components/viewport.h \
-    bloom-boba/components/statusbar.h
+boba_componentsdir = $(includedir)/boba/components
+boba_components_HEADERS = \
+    boba/components/textinput.h \
+    boba/components/textview.h \
+    boba/components/viewport.h \
+    boba/components/statusbar.h

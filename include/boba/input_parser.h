@@ -1,11 +1,11 @@
-/* input_parser.h - Terminal input parsing for bloom-boba TUI library
+/* input_parser.h - Terminal input parsing for boba TUI library
  *
  * Parses raw terminal input bytes into TuiMsg structures.
  * Handles ANSI escape sequences, UTF-8, and control characters.
  */
 
-#ifndef BLOOM_BOBA_INPUT_PARSER_H
-#define BLOOM_BOBA_INPUT_PARSER_H
+#ifndef BOBA_INPUT_PARSER_H
+#define BOBA_INPUT_PARSER_H
 
 #include "msg.h"
 #include <stddef.h>
@@ -48,4 +48,4 @@ int tui_input_parser_parse(TuiInputParser *parser, const unsigned char *input,
 int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
                           TuiMsg *msg);
 
-#endif /* BLOOM_BOBA_INPUT_PARSER_H */
+#endif /* BOBA_INPUT_PARSER_H */

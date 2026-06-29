@@ -1,4 +1,4 @@
-/* runtime.h - Runtime and event loop for bloom-boba TUI library
+/* runtime.h - Runtime and event loop for boba TUI library
  *
  * The runtime handles:
  * - Terminal setup/teardown (raw mode, alternate screen)
@@ -11,8 +11,8 @@
  * 2. Lower-level functions — caller owns the event loop and calls process_input/flush
  */
 
-#ifndef BLOOM_BOBA_RUNTIME_H
-#define BLOOM_BOBA_RUNTIME_H
+#ifndef BOBA_RUNTIME_H
+#define BOBA_RUNTIME_H
 
 #include "cmd.h"
 #include "component.h"
@@ -181,7 +181,7 @@ TuiModel *tui_runtime_model(TuiRuntime *runtime);
 int tui_runtime_should_quit(TuiRuntime *runtime);
 
 /* Request runtime to quit */
-BLOOM_BOBA_DEPRECATED("return tui_cmd_quit() from update() instead")
+BOBA_DEPRECATED("return tui_cmd_quit() from update() instead")
 void tui_runtime_quit(TuiRuntime *runtime);
 
 /* Start terminal mode: enter alt screen, enable mouse/keyboard per config */
@@ -200,7 +200,7 @@ void tui_runtime_flush(TuiRuntime *runtime);
  * reaching in to set the window title). For effects driven by message
  * handling, return the Cmd from update() and let the runtime execute
  * it; do not call this from inside update(). */
-BLOOM_BOBA_DEPRECATED(
+BOBA_DEPRECATED(
     "return the command from update() instead of executing imperatively")
 void tui_runtime_exec(TuiRuntime *runtime, TuiCmd *cmd);
 
@@ -236,4 +236,4 @@ int tui_runtime_wakeup_fd(TuiRuntime *runtime);
  * recompute its timeout. */
 void tui_runtime_wakeup(TuiRuntime *runtime);
 
-#endif /* BLOOM_BOBA_RUNTIME_H */
+#endif /* BOBA_RUNTIME_H */

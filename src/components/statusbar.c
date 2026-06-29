@@ -1,8 +1,8 @@
 /* statusbar.c - Status bar component implementation */
 
-#include <bloom-boba/ansi_sequences.h>
-#include <bloom-boba/components/statusbar.h>
-#include <bloom-boba/unicode.h>
+#include <boba/ansi_sequences.h>
+#include <boba/components/statusbar.h>
+#include <boba/unicode.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

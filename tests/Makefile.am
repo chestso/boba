@@ -1,11 +1,11 @@
-# tests/Makefile.am - Build and run bloom-boba unit tests
+# tests/Makefile.am - Build and run boba unit tests
 
 UNIT_TESTS = test_textinput test_viewport test_statusbar test_runtime test_focus test_clipboard test_input_parser test_style
 
 check_PROGRAMS = $(UNIT_TESTS)
 
 AM_CPPFLAGS = -I$(top_srcdir)/include
-LDADD = $(top_builddir)/src/libbloom-boba.a
+LDADD = $(top_builddir)/src/libboba.a
 
 test_textinput_SOURCES = test_textinput.c
 test_viewport_SOURCES = test_viewport.c

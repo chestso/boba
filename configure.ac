@@ -1,8 +1,8 @@
-dnl configure.ac - Autoconf configuration for bloom-boba
+dnl configure.ac - Autoconf configuration for boba
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.69])
-AC_INIT([bloom-boba],
+AC_INIT([boba],
         m4_esyscmd_s([cat version 2>/dev/null || echo "0.0.0-unknown"]),
         [thomasc1971@hotmail.com])
 AC_CONFIG_SRCDIR([src/msg.c])
@@ -17,11 +17,11 @@ dnl Recompute the version at configure time so a rebuild after new commits
 dnl picks up the current version without needing to re-run autoreconf. Falls
 dnl back to PACKAGE_VERSION (set at autoreconf time via m4_esyscmd_s above)
 dnl for tarball builds where build-aux/git-version.sh has nothing to read.
-BLOOM_BOBA_VERSION=`"$srcdir/build-aux/git-version.sh" "$srcdir" 2>/dev/null`
-AS_IF([test -z "$BLOOM_BOBA_VERSION"],
-      [BLOOM_BOBA_VERSION="$PACKAGE_VERSION"])
-AC_SUBST([BLOOM_BOBA_VERSION])
-AC_MSG_NOTICE([bloom-boba version: $BLOOM_BOBA_VERSION])
+BOBA_VERSION=`"$srcdir/build-aux/git-version.sh" "$srcdir" 2>/dev/null`
+AS_IF([test -z "$BOBA_VERSION"],
+      [BOBA_VERSION="$PACKAGE_VERSION"])
+AC_SUBST([BOBA_VERSION])
+AC_MSG_NOTICE([boba version: $BOBA_VERSION])
 
 dnl Check for programs
 user_cflags="$CFLAGS"
@@ -64,7 +64,7 @@ AC_CHECK_HEADERS([stdlib.h string.h])
 dnl Check for typedefs and structures
 AC_TYPE_SIZE_T
 
-AC_DEFINE_UNQUOTED([BLOOM_BOBA_VERSION], ["$BLOOM_BOBA_VERSION"], [Version string])
+AC_DEFINE_UNQUOTED([BOBA_VERSION], ["$BOBA_VERSION"], [Version string])
 
 dnl Output files
 AC_CONFIG_FILES([
@@ -72,7 +72,7 @@ AC_CONFIG_FILES([
     src/Makefile
     include/Makefile
     tests/Makefile
-    bloom-boba.pc
+    boba.pc
 ])
 
 AC_OUTPUT

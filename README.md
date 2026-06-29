@@ -1,6 +1,6 @@
-# bloom-boba
+# boba
 
-A C library for building terminal user interfaces. bloom-boba is the C
+A C library for building terminal user interfaces. boba is the C
 equivalent of Charm's three v2 projects rolled into a single library:
 the [Bubbletea](https://github.com/charmbracelet/bubbletea) runtime,
 the [Lipgloss](https://github.com/charmbracelet/lipgloss) style/layout
@@ -10,23 +10,23 @@ component collection. The shared spine is the
 into idiomatic C.
 
 The Charm ecosystem (now at [charm.land](https://charm.land)) has released a
-[v2 generation](https://charm.land/blog/v2/) with an evolved API. bloom-boba
+[v2 generation](https://charm.land/blog/v2/) with an evolved API. boba
 follows that direction: `view()` returns a `TuiView` that declares cursor
 placement, alt-screen, mouse mode, keyboard enhancements, focus reporting,
 bracketed paste, and window title each frame, and the runtime reconciles
 against tracked terminal state. Focus is message-driven (`TUI_MSG_FOCUS` /
 `TUI_MSG_BLUR`) and a Lipgloss-shaped `TuiStyle` covers colors, text
 attributes, padding/margin, alignment, and borders. A handful of legacy
-imperative setters remain marked `BLOOM_BOBA_DEPRECATED` with their
+imperative setters remain marked `BOBA_DEPRECATED` with their
 declarative replacements documented inline.
 
 ## Why "boba"?
 
 The name pays homage to Bubbletea. Boba are the tapioca pearls in bubble tea.
 
-## What bloom-boba Provides
+## What boba Provides
 
-bloom-boba has three parts:
+boba has three parts:
 
 **Runtime** (`TuiRuntime`) — The event loop that:
 
@@ -50,7 +50,7 @@ alignment, and borders. Composable without mutation.
 
 ## Philosophy
 
-bloom-boba implements the [Elm Architecture](https://guide.elm-lang.org/architecture/),
+boba implements the [Elm Architecture](https://guide.elm-lang.org/architecture/),
 a pattern for building interactive programs that emerged from the Elm programming
 language. The architecture consists of three parts:
 
@@ -78,7 +78,7 @@ This unidirectional flow makes programs predictable and easy to reason about.
 
 ## Adapting for C
 
-Since C lacks garbage collection, sum types, and method chaining, bloom-boba
+Since C lacks garbage collection, sum types, and method chaining, boba
 makes pragmatic choices:
 
 - **Mutable models** — Update modifies the model in place rather than returning a copy
@@ -161,7 +161,7 @@ if (wakeup_fd >= 0 && FD_ISSET(wakeup_fd, &read_fds)) {
 ## Example
 
 ```c
-#include <bloom-boba/tui.h>
+#include <boba/tui.h>
 
 int main(void) {
     /* Initialize component */
@@ -413,7 +413,7 @@ return tui_update_result(tui_cmd_clipboard_copy(text, len));
 
 ## Styles
 
-`TuiStyle` is bloom-boba's Lipgloss equivalent: a value-typed style record
+`TuiStyle` is boba's Lipgloss equivalent: a value-typed style record
 covering colors, text attributes, padding/margin, alignment, and borders.
 Setters take and return a `TuiStyle` so styles compose without mutation:
 
@@ -441,7 +441,7 @@ For single horizontal-line dividers — the lipgloss
 decorative line above or below another component rather than a full
 4-sided box — use `tui_border_render_horizontal()`. It tiles the chosen
 edge across the requested width, applies a `TuiStyle` inline, and
-optionally embeds a title at left/center/right alignment (bloom-boba's
+optionally embeds a title at left/center/right alignment (boba's
 small extension over lipgloss, which has no built-in title-in-border
 API):
 
@@ -460,7 +460,7 @@ how user code is expected to style its own components.
 
 ## Component Composition
 
-bloom-boba follows the same composition pattern as Bubbletea:
+boba follows the same composition pattern as Bubbletea:
 the runtime manages ONE model, and composition happens inside that model.
 
 ### Embedding Child Components
@@ -580,12 +580,12 @@ if (msg.type == TUI_MSG_KEY_PRESS && msg.data.key.key == TUI_KEY_TAB) {
 
 The parser produces Shift+Tab as `{TUI_KEY_TAB, mods: TUI_MOD_SHIFT}` (xterm `CSI Z` and the kitty keyboard protocol), and Ctrl+Space as `{rune: ' ', mods: TUI_MOD_CTRL}`.
 
-## How bloom-boba Adapts the Elm Architecture
+## How boba Adapts the Elm Architecture
 
 ### Software Scrolling
 
 Terminals offer ANSI scroll regions (DECSTBM) for hardware-assisted scrolling, but
-bloom-boba's viewport redraws content with absolute cursor positioning instead. This
+boba's viewport redraws content with absolute cursor positioning instead. This
 follows Bubbletea's approach. ANSI scroll regions behave inconsistently across
 terminal emulators — cursor positioning at region boundaries causes visual glitches,
 and the host terminal controls what happens in the scrollback buffer. Software
@@ -594,7 +594,7 @@ clipping, and scroll position are just arithmetic on an in-memory line buffer.
 
 ### Commands and TuiView
 
-In Elm, commands are opaque values the runtime interprets. bloom-boba splits
+In Elm, commands are opaque values the runtime interprets. boba splits
 "things that happen" into two channels: discrete one-shot effects flow as
 `TuiCmd` values returned from `update()` (`TUI_CMD_QUIT`, `TUI_CMD_LINE_SUBMIT`,
 `TUI_CMD_CLIPBOARD_COPY`, etc.) and the runtime switches over the tag, while
@@ -610,10 +610,10 @@ arbitrary effects without the runtime needing to know about them in advance.
 
 Elm's `subscriptions : Model -> Sub Msg` lets a program declaratively describe
 ongoing event sources that change based on model state — subscribe to a WebSocket
-only when connected, start a timer only in a certain mode. bloom-boba covers the
+only when connected, start a timer only in a certain mode. boba covers the
 same use cases through runtime config callbacks:
 
-| Elm subscription               | bloom-boba equivalent                                            |
+| Elm subscription               | boba equivalent                                            |
 | ------------------------------ | ---------------------------------------------------------------- |
 | `Time.every 1000 Tick`         | `on_tick` + `get_tick_timeout_ms`                                |
 | Window resize                  | Automatic `TUI_MSG_WINDOW_SIZE` + `on_resize`                    |
@@ -684,7 +684,7 @@ make install        # install library + headers + pkg-config file
 
 Useful targets, all run from `build/`:
 
-- `make` — build `libbloom-boba.a`
+- `make` — build `libboba.a`
 - `make check` — run the test suite (folds in tmux end-to-end tests when tmux is detected)
 - `make install` — install to `--prefix`
 - `make format` — clang-format on C sources, shfmt on shell, prettier on Markdown
@@ -692,11 +692,11 @@ Useful targets, all run from `build/`:
 
 Release build: omit `--enable-debug` and pass `CFLAGS="-O2 -DNDEBUG"` to `configure`.
 
-Output: `build/src/libbloom-boba.a` (static library). After `make install`, use
+Output: `build/src/libboba.a` (static library). After `make install`, use
 pkg-config to get the correct flags:
 
 ```bash
-gcc -o myapp myapp.c $(pkg-config --cflags --libs bloom-boba)
+gcc -o myapp myapp.c $(pkg-config --cflags --libs boba)
 ```
 
 ## Testing
@@ -709,7 +709,7 @@ cd build && make check
 
 ### Unit tests
 
-Fast, hermetic state-based tests under `tests/`. Each test binary links `libbloom-boba.a`, constructs a component directly, drives it with messages, and asserts on internal state.
+Fast, hermetic state-based tests under `tests/`. Each test binary links `libboba.a`, constructs a component directly, drives it with messages, and asserts on internal state.
 
 ### Terminal end-to-end tests
 

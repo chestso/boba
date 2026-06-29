@@ -1,14 +1,14 @@
 /* style.h - Color, style, and layout primitives (Lipgloss-equivalent)
  *
- * bloom-boba folds Charm's three v2 libraries — Bubbletea (runtime),
+ * boba folds Charm's three v2 libraries — Bubbletea (runtime),
  * Bubbles (components), and Lipgloss (style/layout) — into one C
  * library. This header is the Lipgloss half: TuiColor for color values,
  * TuiStyle for declarative styled text rendering, and a small set of
  * layout primitives (Place / Join / Border).
  */
 
-#ifndef BLOOM_BOBA_STYLE_H
-#define BLOOM_BOBA_STYLE_H
+#ifndef BOBA_STYLE_H
+#define BOBA_STYLE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -251,4 +251,4 @@ char *tui_join_horizontal(int valign, const char *const *blocks,
  * empty input. */
 char *tui_join_vertical(int halign, const char *const *blocks, int n_blocks);
 
-#endif /* BLOOM_BOBA_STYLE_H */
+#endif /* BOBA_STYLE_H */

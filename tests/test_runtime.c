@@ -16,11 +16,11 @@
 #include <unistd.h>
 #endif
 
-#include <bloom-boba/cmd.h>
-#include <bloom-boba/component.h>
-#include <bloom-boba/dynamic_buffer.h>
-#include <bloom-boba/msg.h>
-#include <bloom-boba/runtime.h>
+#include <boba/cmd.h>
+#include <boba/component.h>
+#include <boba/dynamic_buffer.h>
+#include <boba/msg.h>
+#include <boba/runtime.h>
 
 /* test_runtime_quit deliberately exercises the deprecated imperative
  * tui_runtime_quit() to verify the legacy entry point still works. */
@@ -933,7 +933,7 @@ static void test_post_wakes_event_loop(void)
  * TuiView / flush tests
  * ======================================================================== */
 
-#include <bloom-boba/ansi_sequences.h>
+#include <boba/ansi_sequences.h>
 
 /* Component whose view() returns a configurable TuiView. */
 static TuiView s_view_to_return = { 0 };
