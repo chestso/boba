@@ -14,6 +14,8 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#include <windows.h>
 #endif
 
 #include <boba/cmd.h>
@@ -21,6 +23,12 @@
 #include <boba/dynamic_buffer.h>
 #include <boba/msg.h>
 #include <boba/runtime.h>
+
+#ifdef _WIN32
+#define DEVNULL "NUL"
+#else
+#define DEVNULL "/dev/null"
+#endif
 
 /* test_runtime_quit deliberately exercises the deprecated imperative
  * tui_runtime_quit() to verify the legacy entry point still works. */
@@ -172,7 +180,7 @@ static void test_config_stores_callbacks(void)
 static void test_start_idempotent(void)
 {
     /* Use /dev/null to avoid writing ANSI sequences to terminal */
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
@@ -200,7 +208,7 @@ static void test_start_idempotent(void)
 /* Test that tui_runtime_stop is idempotent */
 static void test_stop_idempotent(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
@@ -231,7 +239,7 @@ static void test_stop_idempotent(void)
 /* Test that start+stop cycle can be repeated */
 static void test_start_stop_cycle(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
@@ -313,7 +321,7 @@ static void test_default_config_raw_mode(void)
 /* Test that WINDOW_SIZE message is delivered to component */
 static void test_window_size_message(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -366,7 +374,7 @@ static void test_started_initially_zero(void)
  * Requires a TTY (stdin must be a terminal for raw mode). */
 static void test_runtime_run_immediate_quit(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = {
@@ -540,7 +548,7 @@ static void test_wakeup_fd_null(void)
 /* Test post + drain delivers message through update */
 static void test_post_and_drain(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -571,7 +579,7 @@ static void test_post_and_drain(void)
 /* Test schedule + drain executes command */
 static void test_schedule_and_drain(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -649,7 +657,7 @@ static void test_schedule_null(void)
 /* Test multiple posts are drained in order */
 static void test_post_ordering(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -680,7 +688,7 @@ static void test_post_ordering(void)
 /* Test reentrancy: posting a message from within update handler */
 static void test_post_reentrancy(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -711,7 +719,7 @@ static void test_post_reentrancy(void)
 /* Test that commands execute before messages in a single drain */
 static void test_commands_before_messages(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -746,7 +754,7 @@ static void test_commands_before_messages(void)
 /* Test that queue grows beyond initial capacity */
 static void test_queue_growth(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -774,7 +782,7 @@ static void test_queue_growth(void)
 /* Test that scheduled quit command works through drain */
 static void test_schedule_quit(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -812,7 +820,7 @@ static void test_free_with_pending_commands(void)
 /* Test double drain — second drain should be a no-op */
 static void test_double_drain(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { .output = devnull };
@@ -888,7 +896,7 @@ static void tick_post_callback(void *data)
 
 static void test_post_wakes_event_loop(void)
 {
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     /* Replace stdin with a pipe so it doesn't EOF under make check */
@@ -966,6 +974,7 @@ static void reset_view_stub(void)
     s_view_to_return = empty;
 }
 
+#ifndef _WIN32
 static void test_flush_emits_cursor_when_visible(void)
 {
     char outbuf[1024];
@@ -1107,6 +1116,7 @@ static void test_flush_mouse_mode_transition(void)
     tui_runtime_free(rt);
     fclose(fp);
 }
+#endif /* _WIN32 */
 
 /* ======================================================================== */
 
@@ -1149,12 +1159,14 @@ int main(void)
     RUN_TEST(test_post_wakes_event_loop);
 #endif
 
-    /* TuiView / flush tests */
+    /* TuiView / flush tests (require fmemopen — POSIX only) */
+#ifndef _WIN32
     RUN_TEST(test_flush_emits_cursor_when_visible);
     RUN_TEST(test_flush_keeps_cursor_hidden_when_view_abstains);
     RUN_TEST(test_flush_alt_screen_transition);
     RUN_TEST(test_flush_window_title);
     RUN_TEST(test_flush_mouse_mode_transition);
+#endif
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

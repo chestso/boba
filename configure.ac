@@ -13,6 +13,8 @@ AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE([1.14 foreign subdir-objects -Wall -Werror])
 AM_SILENT_RULES([yes])
 
+AC_CANONICAL_HOST
+
 dnl Recompute the version at configure time so a rebuild after new commits
 dnl picks up the current version without needing to re-run autoreconf. Falls
 dnl back to PACKAGE_VERSION (set at autoreconf time via m4_esyscmd_s above)
@@ -22,6 +24,13 @@ AS_IF([test -z "$BOBA_VERSION"],
       [BOBA_VERSION="$PACKAGE_VERSION"])
 AC_SUBST([BOBA_VERSION])
 AC_MSG_NOTICE([boba version: $BOBA_VERSION])
+
+dnl Detect target platform
+case "$host_os" in
+  mingw*|msys*) host_windows=yes ;;
+  *)            host_windows=no ;;
+esac
+AM_CONDITIONAL([HOST_WINDOWS], [test "x$host_windows" = "xyes"])
 
 dnl Check for programs
 user_cflags="$CFLAGS"
@@ -53,9 +62,17 @@ elif test "x$enable_debug" = "xyes"; then
   CFLAGS="-O0 -g3"
   AC_MSG_NOTICE([Debug mode: CFLAGS set to -O0 -g3])
 elif test "x$user_cflags" = "x"; then
-  CFLAGS="-O1 -g3 -fno-omit-frame-pointer -fno-common -fsanitize=address,undefined -fno-sanitize-recover=undefined"
-  LDFLAGS="-fsanitize=address,undefined $LDFLAGS"
-  AC_MSG_NOTICE([ASan+UBSan mode (default): CFLAGS=$CFLAGS])
+  dnl ASan/UBSan is not available on Windows/MinGW. Fall back to
+  dnl unsanitized debug when building natively on Windows (MinGW
+  dnl does not ship libasan/libubsan).
+  if test "x$host_windows" = "xyes"; then
+    CFLAGS="-O1 -g3 -fno-omit-frame-pointer -fno-common"
+    AC_MSG_NOTICE([Debug mode (no ASan on Windows): CFLAGS=$CFLAGS])
+  else
+    CFLAGS="-O1 -g3 -fno-omit-frame-pointer -fno-common -fsanitize=address,undefined -fno-sanitize-recover=undefined"
+    LDFLAGS="-fsanitize=address,undefined $LDFLAGS"
+    AC_MSG_NOTICE([ASan+UBSan mode (default): CFLAGS=$CFLAGS])
+  fi
 fi
 
 dnl Check for header files

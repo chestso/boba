@@ -11,6 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define DEVNULL "NUL"
+#else
+#define DEVNULL "/dev/null"
+#endif
+
 #include <boba/ansi_sequences.h>
 #include <boba/cmd.h>
 #include <boba/component.h>
@@ -141,7 +147,7 @@ static void test_runtime_dispatches_to_handler(void)
 
     /* Build runtime with a clipboard_handler installed. raw_mode/output set
      * to harmless defaults so we never touch the terminal. */
-    FILE *devnull = fopen("/dev/null", "w");
+    FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
 
     TuiRuntimeConfig cfg = { 0 };
