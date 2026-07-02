@@ -95,6 +95,16 @@ typedef struct TuiTextInput
     int snap_valid; /* Whether snapshot should be committed */
 
     int echo_mode; /* 0 = normal, 1 = masked (show * per codepoint) */
+    int soft_wrap; /* 0 = horizontal scroll (default), 1 = soft-wrap long lines */
+
+    /* Styled-text highlight hook. If set, render_text_range calls this
+     * instead of emitting raw text bytes. The callback returns a malloc'd
+     * styled string (ANSI escape sequences + text); textinput appends it
+     * to the output buffer and frees it. Pass NULL to restore plain text.
+     * Note: selection reverse-video and echo mask are skipped when a
+     * highlight callback is set — the callback owns all styling. */
+    char *(*highlight_fn)(const char *text, size_t len, void *userdata);
+    void *highlight_userdata;
 } TuiTextInput;
 
 /* Configuration for creating text input */
@@ -222,6 +232,21 @@ void tui_textinput_set_continuation_prompt(TuiTextInput *input,
 
 /* Set echo mode: 0 = normal, 1 = masked (show * per codepoint) */
 void tui_textinput_set_echo_mode(TuiTextInput *input, int mode);
+
+/* Set soft wrap mode: 0 = horizontal scroll (default), 1 = soft-wrap
+ * long lines to the next visual row instead of clipping. */
+void tui_textinput_set_soft_wrap(TuiTextInput *input, int enable);
+
+/* Set a styled-text highlight callback. When set, the callback is invoked
+ * during view() for each text segment, returning a malloc'd styled string
+ * (ANSI escapes + text) that replaces the raw text in the rendered output.
+ * textinput frees the returned string after appending it.
+ * Pass NULL to restore plain-text rendering. */
+void tui_textinput_set_text_renderer(TuiTextInput *input,
+                                     char *(*fn)(const char *text,
+                                                 size_t len,
+                                                 void *userdata),
+                                     void *userdata);
 
 /* Get echo mode */
 int tui_textinput_get_echo_mode(const TuiTextInput *input);

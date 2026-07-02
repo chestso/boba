@@ -29,6 +29,50 @@ void ansi_format_scroll_region(char *buf, size_t size, int top, int bottom)
     snprintf(buf, size, CSI "%d;%d" DECSTBM_FINAL, top, bottom);
 }
 
+void ansi_format_cursor_up(char *buf, size_t size, int n)
+{
+    if (!buf || size < 16)
+        return;
+    if (n <= 0) {
+        buf[0] = '\0';
+        return;
+    }
+    snprintf(buf, size, CSI "%dA", n);
+}
+
+void ansi_format_cursor_down(char *buf, size_t size, int n)
+{
+    if (!buf || size < 16)
+        return;
+    if (n <= 0) {
+        buf[0] = '\0';
+        return;
+    }
+    snprintf(buf, size, CSI "%dB", n);
+}
+
+void ansi_format_cursor_fwd(char *buf, size_t size, int n)
+{
+    if (!buf || size < 16)
+        return;
+    if (n <= 0) {
+        buf[0] = '\0';
+        return;
+    }
+    snprintf(buf, size, CSI "%dC", n);
+}
+
+void ansi_format_cursor_back(char *buf, size_t size, int n)
+{
+    if (!buf || size < 16)
+        return;
+    if (n <= 0) {
+        buf[0] = '\0';
+        return;
+    }
+    snprintf(buf, size, CSI "%dD", n);
+}
+
 void ansi_format_fg_color_256(char *buf, size_t size, int color)
 {
     if (!buf || size < 16)

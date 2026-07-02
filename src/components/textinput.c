@@ -121,8 +121,10 @@ static void recalculate_cursor_position(TuiTextInput *input)
     }
     input->cursor_col = col;
 
-    /* Adjust horizontal scroll so cursor stays visible (single- and multi-line) */
-    handle_overflow(input);
+    /* Adjust horizontal scroll so cursor stays visible (single- and multi-line).
+     * Skip when soft_wrap is on — wrapping replaces scrolling. */
+    if (!input->soft_wrap)
+        handle_overflow(input);
 }
 
 /* Ensure text buffer has enough capacity */
@@ -1158,6 +1160,21 @@ static void render_continuation_prompt(const TuiTextInput *input,
 static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
                               size_t byte_start, size_t byte_end)
 {
+    /* When a highlight callback is set, delegate the entire text range
+     * to the callback. It returns a malloc'd styled string that we
+     * append and free. Selection/echo handling is skipped — the callback
+     * owns all styling. */
+    if (input->highlight_fn && byte_end > byte_start) {
+        char *styled = input->highlight_fn(input->text + byte_start,
+                                           byte_end - byte_start,
+                                           input->highlight_userdata);
+        if (styled) {
+            dynamic_buffer_append_str(out, styled);
+            free(styled);
+        }
+        return;
+    }
+
     size_t sel_start = 0, sel_end = 0;
     int has_sel = selection_range(input, &sel_start, &sel_end);
 
@@ -1338,6 +1355,10 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
         /* Cursor placement is handled by the runtime via cursor(). */
     } else {
         /* Multi-line mode: relative positioning (legacy) */
+        /* Clear current line, then render prompt + text per line */
+        dynamic_buffer_append_str(out, "\r");
+        dynamic_buffer_append_str(out, EL_TO_END);
+
         /* Output prompt if set and shown */
         if (input->show_prompt && input->prompt && input->prompt_len > 0) {
             if (input->prompt_color[0] != '\0')
@@ -1361,6 +1382,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                     if (i < input->text_len) {
                         /* Found a real newline — emit row break + continuation */
                         dynamic_buffer_append_str(out, "\r\n");
+                        dynamic_buffer_append_str(out, EL_TO_END);
                         if (input->show_prompt && input->prompt &&
                             input->prompt_len > 0) {
                             render_continuation_prompt(input, out);
@@ -1468,6 +1490,45 @@ int tui_textinput_line_count(const TuiTextInput *input)
             count++;
     }
     return count;
+}
+
+/* Count visual rows for a single logical line (soft-wrap aware).
+ * When soft_wrap is off, always 1. When on, ceil(codepoints / content_width). */
+static int line_visual_rows(const TuiTextInput *input, size_t line_start,
+                            size_t line_end, int line_index)
+{
+    if (!input || !input->soft_wrap || input->terminal_width <= 0)
+        return 1;
+
+    int prompt_w = line_prompt_width(input, line_index);
+    int content_w = input->terminal_width - prompt_w;
+    if (content_w <= 0)
+        return 1;
+
+    int cps = tui_utf8_codepoint_count(input->text + line_start,
+                                       line_end - line_start);
+    if (cps == 0)
+        return 1;
+    return (cps + content_w - 1) / content_w; /* ceil division */
+}
+
+/* Count total visual rows across all logical lines (soft-wrap aware). */
+static int total_visual_rows(const TuiTextInput *input)
+{
+    if (!input || input->text_len == 0)
+        return 1;
+
+    int total = 0;
+    size_t line_start = 0;
+    int line_idx = 0;
+    for (size_t i = 0; i <= input->text_len; i++) {
+        if (i == input->text_len || input->text[i] == '\n') {
+            total += line_visual_rows(input, line_start, i, line_idx);
+            line_start = i + 1;
+            line_idx++;
+        }
+    }
+    return total ? total : 1;
 }
 
 /* Set maximum history size */
@@ -1603,10 +1664,30 @@ void tui_textinput_set_echo_mode(TuiTextInput *input, int mode)
         input->echo_mode = mode;
 }
 
+/* Set soft wrap mode */
+void tui_textinput_set_soft_wrap(TuiTextInput *input, int enable)
+{
+    if (input)
+        input->soft_wrap = enable ? 1 : 0;
+}
+
 /* Get echo mode */
 int tui_textinput_get_echo_mode(const TuiTextInput *input)
 {
     return input ? input->echo_mode : 0;
+}
+
+/* Set styled-text highlight callback */
+void tui_textinput_set_text_renderer(TuiTextInput *input,
+                                     char *(*fn)(const char *text,
+                                                 size_t len,
+                                                 void *userdata),
+                                     void *userdata)
+{
+    if (input) {
+        input->highlight_fn = fn;
+        input->highlight_userdata = userdata;
+    }
 }
 
 void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color)
@@ -1653,7 +1734,10 @@ int tui_textinput_get_height(const TuiTextInput *input)
 {
     if (!input)
         return 1;
-    return input->multiline ? tui_textinput_line_count(input) : 1;
+    if (!input->multiline)
+        return input->soft_wrap ? total_visual_rows(input) : 1;
+    return input->soft_wrap ? total_visual_rows(input)
+                            : tui_textinput_line_count(input);
 }
 
 /* Report cursor position for the runtime. Mirrors the arithmetic the old
@@ -1662,20 +1746,66 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
 {
     if (!input || !input->focused)
         return tui_cursor_hidden();
-    if (input->terminal_row <= 0)
-        return tui_cursor_hidden();
+
+    int base_row = input->terminal_row > 0 ? input->terminal_row : 1;
+
+    /* Soft-wrap mode: compute visual row/col across wrapped lines */
+    if (input->soft_wrap && input->terminal_width > 0) {
+        int prompt_w = (input->show_prompt && input->prompt)
+                           ? input->prompt_len
+                           : 0;
+        int content_w = input->terminal_width - prompt_w;
+        if (content_w <= 0)
+            content_w = 1;
+
+        /* Walk through logical lines, counting visual rows */
+        int visual_row = 0;
+        size_t line_start = 0;
+        int line_idx = 0;
+        for (size_t i = 0; i <= input->text_len; i++) {
+            if (i == input->text_len || input->text[i] == '\n') {
+                int line_prompt_w = line_prompt_width(input, line_idx);
+                int line_content_w = input->terminal_width - line_prompt_w;
+                if (line_content_w <= 0)
+                    line_content_w = 1;
+
+                int line_cps = tui_utf8_codepoint_count(
+                    input->text + line_start, i - line_start);
+
+                if (line_idx == (int)input->cursor_row) {
+                    /* Found cursor's logical line */
+                    int cursor_cp = tui_utf8_cp_index(
+                        input->text + line_start,
+                        input->cursor_byte - line_start);
+                    int wrap_row = cursor_cp / line_content_w;
+                    int wrap_col = cursor_cp % line_content_w;
+                    int row = base_row + visual_row + wrap_row;
+                    int col = line_prompt_w + wrap_col + 1;
+                    return tui_cursor_at(row, col);
+                }
+
+                visual_row += (line_cps == 0)
+                                  ? 1
+                                  : (line_cps + line_content_w - 1) /
+                                        line_content_w;
+                line_start = i + 1;
+                line_idx++;
+            }
+        }
+        return tui_cursor_at(base_row, prompt_w + 1);
+    }
 
     if (!input->multiline) {
         int prompt_width =
             (input->show_prompt && input->prompt) ? input->prompt_len : 0;
         int cursor_cp = tui_utf8_cp_index(input->text, input->cursor_byte);
         int col = prompt_width + (cursor_cp - input->offset) + 1;
-        return tui_cursor_at(input->terminal_row, col);
+        return tui_cursor_at(base_row, col);
     }
 
     int prompt_width = line_prompt_width(input, (int)input->cursor_row);
     int col = (int)input->cursor_col - input->offset + prompt_width + 1;
-    int row = input->terminal_row + (int)input->cursor_row;
+    int row = base_row + (int)input->cursor_row;
     return tui_cursor_at(row, col);
 }
 

@@ -106,6 +106,8 @@ struct TuiRuntime
 
     /* Tracked terminal state — diffed against TuiView each flush. */
     int in_alt_screen;
+    int inline_lines_rendered; /* lines drawn last frame in inline mode */
+    int in_inline_mode;        /* 1 if last flush was inline mode */
     TuiMouseMode cur_mouse_mode;
     TuiKeyboardEnhancements cur_kbd_enhancements;
     int cur_report_focus;
@@ -113,6 +115,11 @@ struct TuiRuntime
 #ifndef _WIN32
     struct termios orig_termios; /* Saved terminal settings */
     int raw_mode_active;         /* Raw mode currently enabled */
+#else
+    DWORD orig_input_mode;  /* Saved console input mode (real console) */
+    DWORD orig_output_mode; /* Saved console output mode */
+    int is_pty;             /* 1 = ConPTY/pipe, 0 = real console */
+    HANDLE wakeup_event;    /* Event object for waking WaitForMultipleObjects */
 #endif
 
     /* Message queue (for tui_runtime_post) */

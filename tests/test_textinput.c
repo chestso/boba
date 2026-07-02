@@ -879,13 +879,18 @@ static void test_cursor_pos_blurred(void)
 
 static void test_cursor_pos_relative_abstains(void)
 {
-    /* No terminal_row set → relative mode → abstain */
+    /* No terminal_row set → inline mode → cursor is visible with
+     * row 1 as relative reference. The runtime converts this to
+     * relative cursor movement in inline flush. */
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
     send_string(input, "hello");
 
     TuiCursor c = tui_textinput_cursor_pos(input);
-    assert(c.visible == 0);
+    assert(c.visible == 1);
+    assert(c.row == 1); /* relative reference row */
+    /* col = 0 prompt + 5 chars + 1 (1-indexed) = 6 */
+    assert(c.col == 6);
 
     tui_textinput_free(input);
 }
@@ -946,6 +951,160 @@ static void test_view_no_longer_emits_trailing_cup(void)
     tui_textinput_free(input);
 }
 
+/* --- Styled-text highlight callback tests --- */
+
+static char *mock_highlight(const char *text, size_t len, void *ud)
+{
+    (void)ud;
+    char *out = malloc(len + 9);
+    memcpy(out, "\033[1m", 4);
+    memcpy(out + 4, text, len);
+    memcpy(out + 4 + len, "\033[0m", 4);
+    out[8 + len] = '\0';
+    return out;
+}
+
+static void test_textinput_text_renderer_called(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_text_renderer(input, mock_highlight, NULL);
+    send_string(input, "hello");
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *rendered = dynamic_buffer_data(buf);
+    assert(strstr(rendered, "\033[1m") != NULL);
+    assert(strstr(rendered, "hello") != NULL);
+    assert(strstr(rendered, "\033[0m") != NULL);
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+static void test_textinput_no_renderer_plain_text(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    send_string(input, "hello");
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *rendered = dynamic_buffer_data(buf);
+    assert(strstr(rendered, "hello") != NULL);
+    /* No SGR color/bold sequences in the text (only erase/cursor ok) */
+    assert(strstr(rendered, "\033[1m") == NULL);
+    assert(strstr(rendered, "\033[0m") == NULL);
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* --- Inline cursor positioning tests --- */
+
+static void test_textinput_inline_cursor_visible(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_row(input, 5);
+    send_string(input, "hello");
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.row >= 5);
+    tui_textinput_free(input);
+}
+
+static void test_textinput_inline_cursor_column(void)
+{
+    TuiTextInputConfig cfg = { .prompt = ">>> " };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_row(input, 1);
+    send_string(input, "hi");
+    /* cursor after "hi" = col 7 (4 prompt + 2 text + 1 for 1-indexed) */
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.col == 7);
+    tui_textinput_free(input);
+}
+
+/* --- Soft wrapping tests --- */
+
+static void test_soft_wrap_height(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghijklmno"); /* 15 chars, width 10 → 2 visual rows */
+    assert(tui_textinput_get_height(input) == 2);
+    tui_textinput_free(input);
+}
+
+static void test_soft_wrap_height_short(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "hello"); /* 5 chars fits in 10 → 1 row */
+    assert(tui_textinput_get_height(input) == 1);
+    tui_textinput_free(input);
+}
+
+static void test_soft_wrap_height_exact(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghij"); /* exactly 10 → 1 row */
+    assert(tui_textinput_get_height(input) == 1);
+    tui_textinput_free(input);
+}
+
+static void test_soft_wrap_height_multiline(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "hello");
+    TuiUpdateResult r = tui_textinput_update(input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_string(input, "world!");
+    assert(tui_textinput_get_height(input) == 2);
+    tui_textinput_free(input);
+}
+
+static void test_soft_wrap_height_multiline_wrap(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghijklmno");
+    TuiUpdateResult r = tui_textinput_update(input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_string(input, "xy");
+    assert(tui_textinput_get_height(input) == 3);
+    tui_textinput_free(input);
+}
+
+static void test_soft_wrap_cursor_row(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghijklmno"); /* 15 chars → 2 visual rows */
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.row == 2);
+    assert(c.col == 6);
+    tui_textinput_free(input);
+}
+
+static void test_soft_wrap_disabled_default(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(input, 10);
+    send_string(input, "abcdefghijklmno");
+    assert(tui_textinput_get_height(input) == 1);
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -1003,6 +1162,18 @@ int main(void)
     RUN_TEST(test_cursor_pos_relative_abstains);
     RUN_TEST(test_cursor_pos_multiline);
     RUN_TEST(test_view_no_longer_emits_trailing_cup);
+
+    RUN_TEST(test_textinput_text_renderer_called);
+    RUN_TEST(test_textinput_no_renderer_plain_text);
+    RUN_TEST(test_textinput_inline_cursor_visible);
+    RUN_TEST(test_textinput_inline_cursor_column);
+    RUN_TEST(test_soft_wrap_height);
+    RUN_TEST(test_soft_wrap_height_short);
+    RUN_TEST(test_soft_wrap_height_exact);
+    RUN_TEST(test_soft_wrap_height_multiline);
+    RUN_TEST(test_soft_wrap_height_multiline_wrap);
+    RUN_TEST(test_soft_wrap_cursor_row);
+    RUN_TEST(test_soft_wrap_disabled_default);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

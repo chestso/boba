@@ -184,6 +184,42 @@ void ansi_format_cursor_pos(char *buf, size_t size, int row, int col);
  */
 void ansi_format_scroll_region(char *buf, size_t size, int top, int bottom);
 
+/* Format cursor up sequence (CUU - Cursor Up)
+ * Parameters:
+ *   buf: Output buffer (must be at least 16 bytes)
+ *   size: Size of output buffer
+ *   n: Number of lines to move up (0 = no-op, writes empty string)
+ * Result: "\033[<n>A" or "" if n <= 0
+ */
+void ansi_format_cursor_up(char *buf, size_t size, int n);
+
+/* Format cursor down sequence (CUD - Cursor Down)
+ * Parameters:
+ *   buf: Output buffer (must be at least 16 bytes)
+ *   size: Size of output buffer
+ *   n: Number of lines to move down (0 = no-op, writes empty string)
+ * Result: "\033[<n>B" or "" if n <= 0
+ */
+void ansi_format_cursor_down(char *buf, size_t size, int n);
+
+/* Format cursor forward sequence (CUF - Cursor Forward)
+ * Parameters:
+ *   buf: Output buffer (must be at least 16 bytes)
+ *   size: Size of output buffer
+ *   n: Number of columns to move right (0 = no-op, writes empty string)
+ * Result: "\033[<n>C" or "" if n <= 0
+ */
+void ansi_format_cursor_fwd(char *buf, size_t size, int n);
+
+/* Format cursor back sequence (CUB - Cursor Back)
+ * Parameters:
+ *   buf: Output buffer (must be at least 16 bytes)
+ *   size: Size of output buffer
+ *   n: Number of columns to move left (0 = no-op, writes empty string)
+ * Result: "\033[<n>D" or "" if n <= 0
+ */
+void ansi_format_cursor_back(char *buf, size_t size, int n);
+
 /* Format 256-color foreground sequence (SGR 38;5)
  * Parameters:
  *   buf: Output buffer (must be at least 16 bytes)

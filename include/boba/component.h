@@ -71,6 +71,18 @@ typedef enum
     TUI_KBD_KITTY = 1 << 0, /* Kitty keyboard protocol */
 } TuiKeyboardEnhancements;
 
+/* Render mode — declares how the runtime should paint each frame.
+ *
+ * TUI_RENDER_ALT_SCREEN: full-screen, alternate buffer (the classic
+ *   TUI mode — runtime enters \033[?1049h, repaints from 1,1 each frame).
+ * TUI_RENDER_INLINE: inline in the primary buffer — no alt screen,
+ *   cursor-up + erase + repaint each frame (like Python's pyrepl). */
+typedef enum
+{
+    TUI_RENDER_ALT_SCREEN = 0, /* default: full-screen, alt buffer */
+    TUI_RENDER_INLINE,         /* inline in primary buffer */
+} TuiRenderMode;
+
 /* Per-frame view: rendered content plus terminal-mode declarations.
  *
  * Bubbletea v2 alignment: components return a TuiView from their
@@ -86,7 +98,8 @@ typedef struct TuiView
     DynamicBuffer *layer;
 
     /* Terminal-mode declarations. */
-    int alt_screen;                           /* 1 = use alternate screen */
+    int alt_screen;                           /* 1 = use alternate screen (legacy) */
+    TuiRenderMode render_mode;                /* how to paint each frame (default: ALT_SCREEN) */
     TuiMouseMode mouse_mode;                  /* mouse tracking */
     TuiKeyboardEnhancements kbd_enhancements; /* keyboard protocol */
     int report_focus;                         /* 1 = enable focus events */

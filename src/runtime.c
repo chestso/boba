@@ -12,6 +12,9 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <unistd.h>
+#else
+#include <io.h>
+#include <windows.h>
 #endif
 
 #define STDIN_READ_BUF_SIZE 256
@@ -95,6 +98,77 @@ static void runtime_atexit_cleanup(void)
     }
 #endif
 }
+
+/* --- Windows helpers --- */
+#ifdef _WIN32
+static int runtime_enable_raw_mode_win(TuiRuntime *rt)
+{
+    HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+
+    if (GetConsoleMode(h_in, &mode)) {
+        /* Real console — save and set VT input mode */
+        rt->is_pty = 0;
+        rt->orig_input_mode = mode;
+        mode &= ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT |
+                  ENABLE_PROCESSED_INPUT);
+        mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+        SetConsoleMode(h_in, mode);
+
+        /* Enable VT processing on output */
+        HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD out_mode;
+        if (GetConsoleMode(h_out, &out_mode)) {
+            rt->orig_output_mode = out_mode;
+            out_mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(h_out, out_mode);
+        }
+    } else {
+        /* ConPTY/pipe — no console mode to set, bytes arrive raw */
+        rt->is_pty = 1;
+    }
+    return 0;
+}
+
+static void runtime_disable_raw_mode_win(TuiRuntime *rt)
+{
+    if (!rt->is_pty) {
+        HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
+        SetConsoleMode(h_in, rt->orig_input_mode);
+        HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        SetConsoleMode(h_out, rt->orig_output_mode);
+    }
+}
+
+static void runtime_update_size_win(TuiRuntime *rt)
+{
+    /* Try GetConsoleScreenBufferInfo first (real console) */
+    HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(h_out, &csbi)) {
+        rt->term_width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        rt->term_height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    } else {
+        /* ConPTY/pipe — use environment variables */
+        const char *cols = getenv("COLUMNS");
+        const char *lines = getenv("LINES");
+        if (cols)
+            rt->term_width = atoi(cols);
+        if (lines)
+            rt->term_height = atoi(lines);
+        if (rt->term_width <= 0)
+            rt->term_width = 80;
+        if (rt->term_height <= 0)
+            rt->term_height = 24;
+    }
+}
+
+static void runtime_wakeup_win(TuiRuntime *rt)
+{
+    if (rt->wakeup_event)
+        SetEvent(rt->wakeup_event);
+}
+#endif
 
 /* Forward declaration */
 static int execute_cmd(TuiRuntime *runtime, TuiCmd *cmd);
@@ -380,7 +454,14 @@ void tui_runtime_start(TuiRuntime *runtime)
 {
     if (!runtime || runtime->started)
         return;
-    runtime_write(runtime, DECSC); /* Save cursor for stop() to restore */
+    /* In inline mode, don't save cursor — stop() moves past content
+     * and writes a newline; start() just begins from current position.
+     * Reset inline_lines_rendered so the first flush doesn't cursor-up
+     * into the old content (which is now above us in the scrollback). */
+    if (!runtime->in_inline_mode)
+        runtime_write(runtime, DECSC);
+    else
+        runtime->inline_lines_rendered = 0;
     fflush(runtime->output);
     runtime->started = 1;
 }
@@ -393,6 +474,23 @@ void tui_runtime_stop(TuiRuntime *runtime)
 
     runtime_write(runtime, SGR_RESET);
     runtime_write(runtime, ANSI_SHOW_CURSOR);
+
+    if (runtime->in_inline_mode) {
+        /* Inline mode: write \r\n to end the current input line, then
+         * disable bracketed paste. Output printed after stop() will
+         * appear on fresh lines below. Do NOT do DECRC — we want the
+         * cursor to stay here, not jump back to where start() saved it. */
+        runtime_write(runtime, "\r\n");
+        if (runtime->cur_bracketed_paste) {
+            runtime_write(runtime, ANSI_DISABLE_BRACKETED_PASTE);
+            runtime->cur_bracketed_paste = 0;
+        }
+        runtime->inline_lines_rendered = 0;
+        runtime->in_inline_mode = 0;
+        fflush(runtime->output);
+        runtime->started = 0;
+        return;
+    }
 
     if (runtime->cur_kbd_enhancements & TUI_KBD_KITTY) {
         runtime_write(runtime, ANSI_DISABLE_KITTY_KBD);
@@ -440,6 +538,71 @@ void tui_runtime_flush(TuiRuntime *runtime)
 
     /* 1. Hide cursor while painting to prevent flicker. */
     fputs(ANSI_HIDE_CURSOR, fp);
+
+    if (v.render_mode == TUI_RENDER_INLINE) {
+        runtime->in_inline_mode = 1;
+
+        /* Inline mode: no alt screen, no mouse, no kbd enhancements.
+         * Only reconcile bracketed paste. */
+        if (v.bracketed_paste != runtime->cur_bracketed_paste) {
+            fputs(v.bracketed_paste ? ANSI_ENABLE_BRACKETED_PASTE
+                                    : ANSI_DISABLE_BRACKETED_PASTE,
+                  fp);
+            runtime->cur_bracketed_paste = v.bracketed_paste;
+        }
+
+        /* Move cursor up to where the previous frame started, then erase
+         * to end of screen so stale content is cleared before repaint. */
+        if (runtime->inline_lines_rendered > 0) {
+            char up_buf[16];
+            ansi_format_cursor_up(up_buf, sizeof(up_buf),
+                                  runtime->inline_lines_rendered);
+            fputs(up_buf, fp);
+        }
+        fputs(ED_TO_END, fp);
+
+        /* Write content. */
+        fwrite(dynamic_buffer_data(content), 1, dynamic_buffer_len(content), fp);
+
+        /* Count newlines in the content for next frame's cursor-up. */
+        const char *data = dynamic_buffer_data(content);
+        size_t len = dynamic_buffer_len(content);
+        int line_count = 0;
+        for (size_t i = 0; i < len; i++) {
+            if (data[i] == '\n')
+                line_count++;
+        }
+        runtime->inline_lines_rendered = line_count;
+
+        /* Cursor placement — relative positioning in inline mode.
+         * After writing content, cursor is at end of last line.
+         * Move up to the cursor's row, then carriage return + forward
+         * to the cursor's column. */
+        if (v.cursor.visible) {
+            int cursor_row_in_content = v.cursor.row - 1; /* 0-indexed within content */
+            int lines_after_cursor = line_count - cursor_row_in_content;
+            if (lines_after_cursor > 0) {
+                char up_buf[16];
+                ansi_format_cursor_up(up_buf, sizeof(up_buf),
+                                      lines_after_cursor);
+                fputs(up_buf, fp);
+            }
+            /* Move to column: \r + cursor forward */
+            fputs("\r", fp);
+            if (v.cursor.col > 1) {
+                char fwd_buf[16];
+                ansi_format_cursor_fwd(fwd_buf, sizeof(fwd_buf),
+                                       v.cursor.col - 1);
+                fputs(fwd_buf, fp);
+            }
+            fputs(ANSI_SHOW_CURSOR, fp);
+        }
+
+        fflush(fp);
+        return;
+    }
+
+    /* --- Alt-screen mode (default) --- */
 
     /* 2. Reconcile mode toggles before content. */
     if (v.alt_screen != runtime->in_alt_screen) {
@@ -509,6 +672,9 @@ static void runtime_wakeup(TuiRuntime *rt)
             ;
         /* EAGAIN is fine — pipe already has data, select will fire */
     }
+#else
+    if (rt->wakeup_event)
+        SetEvent(rt->wakeup_event);
 #endif
 }
 
@@ -811,8 +977,88 @@ int tui_runtime_run(TuiRuntime *runtime)
 
     return 0;
 #else
-    /* Windows: not yet implemented */
-    return -1;
+    /* Windows event loop using WaitForMultipleObjects */
+    runtime_update_size_win(runtime);
+    TuiMsg size_msg = { .type = TUI_MSG_WINDOW_SIZE,
+                        .data.size = { .width = runtime->term_width,
+                                       .height = runtime->term_height } };
+    tui_runtime_send(runtime, size_msg);
+    if (runtime->config.on_resize)
+        runtime->config.on_resize(runtime->term_width,
+                                  runtime->term_height,
+                                  runtime->config.event_data);
+
+    /* Enable raw mode if configured */
+    if (runtime->config.raw_mode)
+        runtime_enable_raw_mode_win(runtime);
+
+    /* Create wakeup event */
+    runtime->wakeup_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+    /* Start terminal mode */
+    tui_runtime_start(runtime);
+    tui_runtime_flush(runtime);
+
+    HANDLE h_stdin = GetStdHandle(STD_INPUT_HANDLE);
+
+    while (runtime->running) {
+        HANDLE handles[2];
+        DWORD n_handles = 0;
+        handles[n_handles++] = h_stdin;
+        if (runtime->wakeup_event)
+            handles[n_handles++] = runtime->wakeup_event;
+
+        /* Compute timeout (100ms default) */
+        DWORD timeout_ms = 100;
+        if (runtime->config.get_tick_timeout_ms) {
+            int ms = runtime->config.get_tick_timeout_ms(
+                runtime->config.event_data);
+            if (ms < 0)
+                timeout_ms = INFINITE;
+            else
+                timeout_ms = (DWORD)ms;
+        }
+
+        DWORD wait = WaitForMultipleObjects(n_handles, handles, FALSE,
+                                            timeout_ms);
+
+        if (wait == WAIT_OBJECT_0) {
+            /* stdin ready */
+            unsigned char buf[STDIN_READ_BUF_SIZE];
+            DWORD bytes_read = 0;
+            if (ReadFile(h_stdin, buf, sizeof(buf), &bytes_read, NULL) &&
+                bytes_read > 0) {
+                tui_runtime_process_input(runtime, buf, (size_t)bytes_read);
+                if (runtime->config.on_stdin_processed)
+                    runtime->config.on_stdin_processed(
+                        runtime->config.event_data);
+                tui_runtime_flush(runtime);
+            } else if (bytes_read == 0) {
+                /* EOF */
+                break;
+            }
+        } else if (wait == WAIT_OBJECT_0 + 1) {
+            /* Wakeup event */
+            ResetEvent(runtime->wakeup_event);
+            tui_runtime_drain(runtime);
+            tui_runtime_flush(runtime);
+        }
+
+        /* Tick */
+        if (runtime->config.on_tick)
+            runtime->config.on_tick(runtime->config.event_data);
+    }
+
+    /* Teardown */
+    tui_runtime_stop(runtime);
+    runtime_disable_raw_mode_win(runtime);
+
+    if (runtime->wakeup_event) {
+        CloseHandle(runtime->wakeup_event);
+        runtime->wakeup_event = NULL;
+    }
+
+    return 0;
 #endif
 }
 
