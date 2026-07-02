@@ -24,6 +24,8 @@
 
 #ifndef _WIN32
 #include <termios.h>
+#else
+#include <windows.h>
 #endif
 
 /* Forward declaration */
