@@ -77,6 +77,15 @@ TuiMsg tui_msg_interrupt(void)
     return msg;
 }
 
+/* Create an EOF message (Ctrl+D) */
+TuiMsg tui_msg_eof(void)
+{
+    TuiMsg msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = TUI_MSG_EOF;
+    return msg;
+}
+
 /* Create a custom message */
 TuiMsg tui_msg_custom(int type, void *data)
 {

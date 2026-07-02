@@ -185,6 +185,9 @@ TuiMsg tui_msg_blur(void);
 /* Create an interrupt message (Ctrl+C) */
 TuiMsg tui_msg_interrupt(void);
 
+/* Create an EOF message (Ctrl+D) */
+TuiMsg tui_msg_eof(void);
+
 /* Create a custom message */
 TuiMsg tui_msg_custom(int type, void *data);
 
