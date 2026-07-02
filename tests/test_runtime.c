@@ -1458,6 +1458,106 @@ static void test_runtime_inline_lines_starts_zero(void)
     fclose(fp);
 }
 
+/* --- tui_runtime_finish_inline tests --- */
+
+/* finish_inline from last row: cursor already on last line, should
+ * just write \r\n (no cursor-down needed) */
+static void test_finish_inline_moves_past_content_from_last_row(void)
+{
+    char outbuf[4096];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    /* Render 3 lines, cursor on last row (row 2) */
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(rt->inline_lines_rendered == 3);
+    assert(rt->inline_cursor_row == 2);
+
+    size_t pos = ftell(fp);
+    tui_runtime_finish_inline(rt);
+    fflush(fp);
+
+    /* Should write \r\n (no cursor-down since already on last row) */
+    assert(strstr(outbuf + pos, "\r\n") != NULL);
+    /* Should NOT emit cursor-down */
+    assert(strstr(outbuf + pos, "\x1b[1B") == NULL);
+    assert(strstr(outbuf + pos, "\x1b[2B") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* finish_inline from first row: cursor on row 0 of 3, should
+ * cursor-down 2 then write \r\n */
+static void test_finish_inline_moves_past_content_from_first_row(void)
+{
+    char outbuf[4096];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    /* Simulate cursor on row 0 (user pressed Up) */
+    rt->inline_cursor_row = 0;
+    size_t pos = ftell(fp);
+    tui_runtime_finish_inline(rt);
+    fflush(fp);
+
+    /* Should cursor-down 2 (from row 0 to row 2) then \r\n */
+    assert(strstr(outbuf + pos, "\x1b[2B") != NULL);
+    assert(strstr(outbuf + pos, "\r\n") != NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* finish_inline resets tracking to 0 so next flush doesn't cursor-up */
+static void test_finish_inline_resets_tracking(void)
+{
+    char outbuf[4096];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(rt->inline_lines_rendered == 3);
+    assert(rt->inline_cursor_row == 2);
+
+    tui_runtime_finish_inline(rt);
+
+    /* Both should be reset to 0 */
+    assert(rt->inline_lines_rendered == 0);
+    assert(rt->inline_cursor_row == 0);
+
+    /* Next flush should NOT cursor-up */
+    size_t pos = ftell(fp);
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(strstr(outbuf + pos, "\x1b[1A") == NULL);
+    assert(strstr(outbuf + pos, "\x1b[2A") == NULL);
+    assert(strstr(outbuf + pos, "\x1b[3A") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
 static void test_stop_inline_moves_cursor_down(void)
 {
     char outbuf[2048];
@@ -1712,6 +1812,9 @@ int main(void)
     RUN_TEST(test_flush_inline_cursor_up_from_non_last_row);
     RUN_TEST(test_flush_inline_cursor_up_from_middle_row);
     RUN_TEST(test_flush_inline_erases_stale_lines_on_shrink);
+    RUN_TEST(test_finish_inline_moves_past_content_from_last_row);
+    RUN_TEST(test_finish_inline_moves_past_content_from_first_row);
+    RUN_TEST(test_finish_inline_resets_tracking);
     RUN_TEST(test_stop_inline_moves_cursor_down);
     RUN_TEST(test_stop_inline_no_exit_alt_screen);
     RUN_TEST(test_stop_inline_no_decrc);

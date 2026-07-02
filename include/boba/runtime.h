@@ -198,6 +198,12 @@ void tui_runtime_start(TuiRuntime *runtime);
 /* Stop terminal mode: reverse of start */
 void tui_runtime_stop(TuiRuntime *runtime);
 
+/* Finish inline mode: move cursor past all rendered content and write
+ * \r\n so application output appears below the input. Resets
+ * inline_lines_rendered and inline_cursor_row to 0 so the next flush
+ * renders on a fresh line. Called before writing output directly. */
+void tui_runtime_finish_inline(TuiRuntime *runtime);
+
 /* Render view and write to output (with cursor hide/show) */
 void tui_runtime_flush(TuiRuntime *runtime);
 

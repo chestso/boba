@@ -514,6 +514,37 @@ void tui_runtime_stop(TuiRuntime *runtime)
     runtime->started = 0;
 }
 
+/* Finish inline mode: move cursor past all rendered content so
+ * application output appears below the input. The cursor may be on
+ * any row (e.g. the user moved it up); we cursor-down to the last
+ * rendered row, then write \r\n to start a fresh line for output.
+ * Resets tracking so the next flush renders on a fresh line. */
+void tui_runtime_finish_inline(TuiRuntime *runtime)
+{
+    if (!runtime || !runtime->in_inline_mode)
+        return;
+
+    FILE *fp = runtime->output;
+
+    /* Move from current cursor row to the last rendered row */
+    int last_row = runtime->inline_lines_rendered - 1;
+    int down = last_row - runtime->inline_cursor_row;
+    if (down > 0) {
+        char down_buf[16];
+        ansi_format_cursor_down(down_buf, sizeof(down_buf), down);
+        fputs(down_buf, fp);
+    }
+
+    /* End the input line and start a fresh line for output */
+    fputs("\r\n", fp);
+
+    /* Reset so the next flush doesn't cursor-up into old content */
+    runtime->inline_lines_rendered = 0;
+    runtime->inline_cursor_row = 0;
+
+    fflush(fp);
+}
+
 /* Render view, reconcile terminal mode against the View's declarations,
  * and write the resulting bytes.
  *
