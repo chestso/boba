@@ -68,6 +68,15 @@ TuiMsg tui_msg_blur(void)
     return msg;
 }
 
+/* Create an interrupt message (Ctrl+C) */
+TuiMsg tui_msg_interrupt(void)
+{
+    TuiMsg msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = TUI_MSG_INTERRUPT;
+    return msg;
+}
+
 /* Create a custom message */
 TuiMsg tui_msg_custom(int type, void *data)
 {

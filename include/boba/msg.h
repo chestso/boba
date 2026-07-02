@@ -20,6 +20,7 @@ typedef enum
     TUI_MSG_BLUR,               /* Component lost focus */
     TUI_MSG_LINE_SUBMIT,        /* Line submitted (Enter pressed in single-line mode) */
     TUI_MSG_EOF,                /* End of input (Ctrl+D with empty input) */
+    TUI_MSG_INTERRUPT,          /* Ctrl+C — interrupt current operation */
     TUI_MSG_PASTE_START,        /* Bracketed paste begins (no payload) */
     TUI_MSG_PASTE,              /* Bracketed paste payload */
     TUI_MSG_PASTE_END,          /* Bracketed paste ends (no payload) */
@@ -180,6 +181,9 @@ TuiMsg tui_msg_focus(void);
 
 /* Create a blur message */
 TuiMsg tui_msg_blur(void);
+
+/* Create an interrupt message (Ctrl+C) */
+TuiMsg tui_msg_interrupt(void);
 
 /* Create a custom message */
 TuiMsg tui_msg_custom(int type, void *data);

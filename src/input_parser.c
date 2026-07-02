@@ -405,6 +405,9 @@ int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
             case 0x00: /* Ctrl+Space (NUL) */
                 *msg = tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL);
                 return 1;
+            case 0x03: /* Ctrl+C (ETX) — interrupt */
+                *msg = tui_msg_interrupt();
+                return 1;
             case 0x0D: /* CR */
                 *msg = tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_NONE);
                 return 1;
