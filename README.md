@@ -35,6 +35,7 @@ boba has three parts:
 - Executes returned commands
 - Calls `view()` to get a `TuiView` (content + terminal-mode declarations)
 - Reconciles the requested terminal state and writes the next frame
+- Supports two rendering modes: **alt-screen** (traditional full-screen TUI) and **inline** (renders in the primary buffer like Python's pyrepl — no alt screen, cursor-up + erase + repaint per frame)
 - Repeats
 
 **Style** (`TuiStyle`) — A Lipgloss-shaped, value-typed style record covering
@@ -43,7 +44,7 @@ alignment, and borders. Composable without mutation.
 
 **Components** — Reusable UI building blocks:
 
-- `textinput` — Text input with history, completion, Unicode support, multi-line editing, focus-aware styling
+- `textinput` — Text input with history, completion, Unicode support, multi-line editing, soft-wrap, syntax-highlighting callback, focus-aware styling
 - `viewport` — Scrollable content area with software scrolling and tmux-style copy-mode
 - `statusbar` — Status bar with mode indicator and notifications
 - `textview` — Simple text display (for basic use cases)
@@ -107,6 +108,11 @@ The runtime handles SIGWINCH (resize), SIGINT, stdin polling, and optional exter
 polling via `TuiRuntimeConfig` callbacks (`on_tick`, `on_resize`, `get_external_fd`,
 `on_external_ready`, `on_stdin_processed`, `get_tick_timeout_ms`).
 
+On Windows, the event loop uses `WaitForMultipleObjects` with a `CreateEvent` wakeup
+mechanism. It auto-detects ConPTY pipe handles vs real console handles: under ConPTY
+(e.g. portty), raw bytes pass through and VT sequences work natively; on a real
+console, `SetConsoleMode` enables virtual-terminal processing.
+
 **Lower-level** — caller owns the event loop, drives the runtime manually:
 
 ```c
@@ -114,6 +120,26 @@ tui_runtime_start(rt);                        /* Enter raw mode */
 tui_runtime_process_input(rt, buf, len);      /* Feed raw bytes */
 tui_runtime_flush(rt);                        /* Render + write */
 tui_runtime_stop(rt);                         /* Restore terminal */
+```
+
+### Inline Rendering Mode
+
+Components can render in the primary terminal buffer instead of the alternate
+screen by setting `v.render_mode = TUI_RENDER_INLINE` on the `TuiView`. This is
+useful for REPL-style applications (like Python's pyrepl) where output should
+flow into the terminal's own scrollback.
+
+The runtime tracks how many visual lines were rendered and where the cursor was
+placed, so each frame can cursor-up to the first line and repaint in place.
+`tui_runtime_finish_inline()` moves the cursor past all rendered content and
+writes `\r\n`, letting the application print output below the input before the
+next flush renders a fresh prompt:
+
+```c
+/* Before printing eval results: */
+tui_runtime_finish_inline(rt);
+printf("result: %s\n", value);
+/* The next flush renders the new prompt below the output */
 ```
 
 ### Message and Command Scheduling
@@ -202,7 +228,8 @@ desired terminal state for the frame:
 ```c
 typedef struct TuiView {
   DynamicBuffer *layer;                     /* Rendered content (== out) */
-  int alt_screen;                            /* 1 = alternate screen */
+  int alt_screen;                            /* 1 = alternate screen (legacy) */
+  TuiRenderMode render_mode;                 /* ALT_SCREEN (default) or INLINE */
   TuiMouseMode mouse_mode;                   /* NONE / CELL_MOTION / ALL_MOTION */
   TuiKeyboardEnhancements kbd_enhancements;  /* Kitty keyboard protocol bitmask */
   int report_focus;                          /* 1 = enable focus events */
@@ -211,6 +238,11 @@ typedef struct TuiView {
   TuiCursor cursor;                          /* visible=0 = hidden */
 } TuiView;
 ```
+
+`TuiRenderMode` is an enum: `TUI_RENDER_ALT_SCREEN` (0, default — full-screen
+TUI in the alternate buffer) or `TUI_RENDER_INLINE` (renders in the primary
+buffer with cursor-up repaint). The `alt_screen` field is kept for backward
+compatibility; new code should use `render_mode`.
 
 The runtime diffs each frame's `TuiView` against the terminal state it tracks
 and emits only the bytes needed to reach the requested state — no imperative
@@ -248,7 +280,8 @@ Messages represent events flowing into the update function:
 | `TUI_MSG_FOCUS` / `TUI_MSG_BLUR`                              | Focus state — dispatched by parents to children        |
 | `TUI_MSG_PASTE_START` / `TUI_MSG_PASTE` / `TUI_MSG_PASTE_END` | Bracketed paste (opt in via `TuiView.bracketed_paste`) |
 | `TUI_MSG_LINE_SUBMIT`                                         | Line submitted from text input                         |
-| `TUI_MSG_EOF`                                                 | End of input (Ctrl+D on empty line)                    |
+| `TUI_MSG_EOF`                                                 | End of input (Ctrl+D)                                  |
+| `TUI_MSG_INTERRUPT`                                           | Interrupt (Ctrl+C)                                     |
 | `TUI_MSG_CUSTOM_BASE`                                         | Base value for application-defined messages            |
 
 ### Command Types
@@ -293,6 +326,9 @@ Features:
 - **Echo mode** - Password masking (shows `*` per codepoint)
 - **Focus-aware styling** - Separate focused / blurred `TuiStyle` for the prompt (Bubbles parity)
 - **Continuation prompt** - Custom prompt for lines after the first in multi-line mode
+- **Soft-wrap mode** - Long lines wrap to the next visual row instead of horizontal scrolling (`tui_textinput_set_soft_wrap`)
+- **Syntax-highlighting callback** - Host applications can inject per-token styling via `tui_textinput_set_text_renderer`; the callback returns a malloc'd ANSI-escaped string that replaces raw text in the rendered output
+- **Ctrl+D deletes char** - The textinput handles Ctrl+D as `delete-char` (never decides to quit; the component receives `TUI_MSG_EOF` and decides)
 
 For decorative horizontal lines above or below the input, parents
 compose `tui_border_render_horizontal()` (see [Styles](#styles)) — the
@@ -643,6 +679,8 @@ The input parser (`TuiInputParser`) converts raw terminal bytes into typed messa
 - Kitty keyboard protocol (`CSI keycode;modifiers u`)
 - UTF-8 multi-byte sequences
 - Control characters with modifier detection
+- `Ctrl+C` (0x03) → `TUI_MSG_INTERRUPT` — semantic interrupt event
+- `Ctrl+D` (0x04) → `TUI_MSG_EOF` — semantic end-of-file event
 
 ## Building
 
