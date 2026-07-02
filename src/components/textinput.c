@@ -926,12 +926,11 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     /* Ctrl+B: Move back one character */
                     cursor_left(input);
                 } else if (key.rune == 'd' || key.rune == 'D') {
-                    /* Ctrl+D: EOF/quit on empty input, delete char otherwise */
-                    if (input->text_len == 0) {
-                        return tui_update_result(tui_cmd_quit());
-                    } else {
-                        delete_at(input);
-                    }
+                    /* Ctrl+D: delete character under cursor.
+                     * EOF-on-empty is handled by the component via
+                     * TUI_MSG_EOF, not here. The textinput never
+                     * decides to quit. */
+                    delete_at(input);
                 } else if (key.rune == 'e' || key.rune == 'E') {
                     /* Ctrl+E: Move to end of line */
                     cursor_end(input);
