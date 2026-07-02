@@ -926,8 +926,8 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     /* Ctrl+B: Move back one character */
                     cursor_left(input);
                 } else if (key.rune == 'd' || key.rune == 'D') {
-                    /* Ctrl+D: EOF on empty line, delete char otherwise */
-                    if (input->text_len == 0 && !input->multiline) {
+                    /* Ctrl+D: EOF/quit on empty input, delete char otherwise */
+                    if (input->text_len == 0) {
                         return tui_update_result(tui_cmd_quit());
                     } else {
                         delete_at(input);

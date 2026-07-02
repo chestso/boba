@@ -1022,6 +1022,48 @@ static void test_textinput_inline_cursor_column(void)
 
 /* --- Newline insertion tests --- */
 
+/* Ctrl+D on empty input returns quit command */
+static void test_ctrl_d_empty_returns_quit(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    TuiUpdateResult r = tui_textinput_update(input,
+                                             tui_msg_key(TUI_KEY_NONE, 'd', TUI_MOD_CTRL));
+    assert(r.cmd != NULL);
+    assert(r.cmd->type == TUI_CMD_QUIT);
+    tui_cmd_free(r.cmd);
+    tui_textinput_free(input);
+}
+
+/* Ctrl+D on non-empty input deletes char under cursor */
+static void test_ctrl_d_nonempty_deletes_char(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    send_string(input, "hello");
+    /* Move cursor to middle (between 'l' and 'l') */
+    tui_textinput_set_cursor(input, 3);
+    TuiUpdateResult r = tui_textinput_update(input,
+                                             tui_msg_key(TUI_KEY_NONE, 'd', TUI_MOD_CTRL));
+    assert(r.cmd == NULL || r.cmd->type != TUI_CMD_QUIT);
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    /* "hello" with cursor at 3 → delete 'l' at pos 3 → "helo" */
+    assert(strcmp(tui_textinput_text(input), "helo") == 0);
+    tui_textinput_free(input);
+}
+
+/* Ctrl+D on empty multiline input also returns quit */
+static void test_ctrl_d_empty_multiline_returns_quit(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    TuiUpdateResult r = tui_textinput_update(input,
+                                             tui_msg_key(TUI_KEY_NONE, 'd', TUI_MOD_CTRL));
+    assert(r.cmd != NULL);
+    assert(r.cmd->type == TUI_CMD_QUIT);
+    tui_cmd_free(r.cmd);
+    tui_textinput_free(input);
+}
+
 /* tui_msg_char('\n') sends a char message with rune 0x0A which is < 0x20,
  * so the textinput should NOT insert it — control characters are ignored
  * except Tab. Use TUI_KEY_ENTER + TUI_MOD_SHIFT for newline insertion. */
@@ -1249,6 +1291,9 @@ int main(void)
     RUN_TEST(test_shift_enter_inserts_newline);
     RUN_TEST(test_multiline_relative_emits_clear_prefix);
     RUN_TEST(test_multiline_relative_clears_between_lines);
+    RUN_TEST(test_ctrl_d_empty_returns_quit);
+    RUN_TEST(test_ctrl_d_nonempty_deletes_char);
+    RUN_TEST(test_ctrl_d_empty_multiline_returns_quit);
     RUN_TEST(test_soft_wrap_height);
     RUN_TEST(test_soft_wrap_height_short);
     RUN_TEST(test_soft_wrap_height_exact);
