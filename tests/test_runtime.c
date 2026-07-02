@@ -1364,6 +1364,106 @@ static void test_stop_inline_no_exit_alt_screen(void)
     fclose(fp);
 }
 
+/* Inline stop() must NOT emit DECRC (ESC 8) — that would restore the
+ * cursor to the pre-inline position, erasing any output printed after
+ * stop(). Instead, stop writes \r\n to move past the input. */
+static void test_stop_inline_no_decrc(void)
+{
+    char outbuf[2048];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp, .raw_mode = 0 };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    reset_view_stub();
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    tui_runtime_start(rt);
+    tui_runtime_flush(rt);
+    size_t pos = ftell(fp);
+    tui_runtime_stop(rt);
+    fflush(fp);
+
+    /* DECRC = ESC 8 = "\0338" — must not appear after the flush */
+    assert(strstr(outbuf + pos, "\0338") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* Inline start() must NOT emit DECSC (ESC 7) — there's no DECRC to
+ * match it in stop(). Start should be a no-op for inline mode. */
+static void test_start_inline_no_decsc(void)
+{
+    char outbuf[2048];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp, .raw_mode = 0 };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    /* First flush sets in_inline_mode = 1 */
+    reset_view_stub();
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    tui_runtime_flush(rt);
+    tui_runtime_stop(rt);
+
+    /* Now start again — should NOT emit DECSC */
+    size_t pos = ftell(fp);
+    tui_runtime_start(rt);
+    fflush(fp);
+
+    /* DECSC = ESC 7 = "\0337" — must not appear */
+    assert(strstr(outbuf + pos, "\0337") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* After stop+start cycle in inline mode, inline_lines_rendered must be 0
+ * so the next flush doesn't cursor-up into the old input/output. */
+static void test_start_resets_inline_lines_rendered(void)
+{
+    char outbuf[2048];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp, .raw_mode = 0 };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    reset_view_stub();
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    tui_runtime_start(rt);
+    tui_runtime_flush(rt);
+    rt->inline_lines_rendered = 3; /* simulate 3 lines rendered */
+    tui_runtime_stop(rt);
+
+    /* After stop, inline_lines_rendered should be 0 */
+    assert(rt->inline_lines_rendered == 0);
+
+    /* Start again — should still be 0 */
+    tui_runtime_start(rt);
+    assert(rt->inline_lines_rendered == 0);
+
+    /* Next flush should NOT cursor-up (inline_lines_rendered == 0) */
+    size_t pos = ftell(fp);
+    reset_view_stub();
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(strstr(outbuf + pos, "\x1b[3A") == NULL);
+    assert(strstr(outbuf + pos, "\x1b[1A") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
 static void test_inline_resize_triggers_repaint(void)
 {
     char outbuf[4096];
@@ -1461,6 +1561,9 @@ int main(void)
     RUN_TEST(test_flush_inline_counts_lines);
     RUN_TEST(test_stop_inline_moves_cursor_down);
     RUN_TEST(test_stop_inline_no_exit_alt_screen);
+    RUN_TEST(test_stop_inline_no_decrc);
+    RUN_TEST(test_start_inline_no_decsc);
+    RUN_TEST(test_start_resets_inline_lines_rendered);
     RUN_TEST(test_inline_resize_triggers_repaint);
 #endif
 

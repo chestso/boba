@@ -1020,6 +1020,84 @@ static void test_textinput_inline_cursor_column(void)
     tui_textinput_free(input);
 }
 
+/* --- Newline insertion tests --- */
+
+/* tui_msg_char('\n') sends a char message with rune 0x0A which is < 0x20,
+ * so the textinput should NOT insert it — control characters are ignored
+ * except Tab. Use TUI_KEY_ENTER + TUI_MOD_SHIFT for newline insertion. */
+static void test_msg_char_newline_is_noop(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    send_string(input, "hello");
+    /* Try to insert \n via char message — should be a no-op */
+    TuiUpdateResult r = tui_textinput_update(input, tui_msg_char('\n', 0));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    /* Text should still be "hello" with no newline */
+    assert(strcmp(tui_textinput_text(input), "hello") == 0);
+    assert(tui_textinput_line_count(input) == 1);
+    tui_textinput_free(input);
+}
+
+/* Shift+Enter in multiline mode inserts a real newline */
+static void test_shift_enter_inserts_newline(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    send_string(input, "hello");
+    TuiUpdateResult r = tui_textinput_update(input,
+                                             tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_string(input, "world");
+    /* Text should be "hello\nworld" */
+    assert(strcmp(tui_textinput_text(input), "hello\nworld") == 0);
+    assert(tui_textinput_line_count(input) == 2);
+    tui_textinput_free(input);
+}
+
+/* --- Multi-line relative rendering prefix tests --- */
+
+/* In relative mode (terminal_row == 0), view() must emit \r + EL_TO_END
+ * at the start so each frame replaces the previous content instead of
+ * appending to it. Without this, stale text accumulates on the line. */
+static void test_multiline_relative_emits_clear_prefix(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    send_string(input, "hello");
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+    /* The first bytes should be \r followed by EL_TO_END (CSI K) */
+    assert(data[0] == '\r');
+    assert(strstr(data, "\033[K") != NULL);
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* In relative mode with multi-line content, each line after the first
+ * should also get \r\n + EL_TO_END so wrapped lines don't accumulate */
+static void test_multiline_relative_clears_between_lines(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    send_string(input, "hello");
+    TuiUpdateResult r = tui_textinput_update(input,
+                                             tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_string(input, "world");
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+    /* Should contain \r\n between lines, with EL_TO_END after */
+    assert(strstr(data, "\r\n\033[K") != NULL);
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
 /* --- Soft wrapping tests --- */
 
 static void test_soft_wrap_height(void)
@@ -1167,6 +1245,10 @@ int main(void)
     RUN_TEST(test_textinput_no_renderer_plain_text);
     RUN_TEST(test_textinput_inline_cursor_visible);
     RUN_TEST(test_textinput_inline_cursor_column);
+    RUN_TEST(test_msg_char_newline_is_noop);
+    RUN_TEST(test_shift_enter_inserts_newline);
+    RUN_TEST(test_multiline_relative_emits_clear_prefix);
+    RUN_TEST(test_multiline_relative_clears_between_lines);
     RUN_TEST(test_soft_wrap_height);
     RUN_TEST(test_soft_wrap_height_short);
     RUN_TEST(test_soft_wrap_height_exact);
