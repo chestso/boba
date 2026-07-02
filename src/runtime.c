@@ -551,20 +551,26 @@ void tui_runtime_flush(TuiRuntime *runtime)
             runtime->cur_bracketed_paste = v.bracketed_paste;
         }
 
-        /* Move cursor up to where the previous frame started, then erase
-         * to end of screen so stale content is cleared before repaint. */
-        if (runtime->inline_lines_rendered > 0) {
+        /* Save previous state before overwriting */
+        int prev_lines = runtime->inline_lines_rendered;
+        int prev_cursor_row = runtime->inline_cursor_row;
+
+        /* Move cursor up to where the previous frame's content started.
+         * The cursor was placed at prev_cursor_row (0-indexed) after
+         * the last flush. Go up prev_cursor_row lines to reach row 0. */
+        if (prev_cursor_row > 0) {
             char up_buf[16];
             ansi_format_cursor_up(up_buf, sizeof(up_buf),
-                                  runtime->inline_lines_rendered);
+                                  prev_cursor_row);
             fputs(up_buf, fp);
         }
-        fputs(ED_TO_END, fp);
 
         /* Write content. */
         fwrite(dynamic_buffer_data(content), 1, dynamic_buffer_len(content), fp);
 
-        /* Count newlines in the content for next frame's cursor-up. */
+        /* Count visual lines rendered for next frame's cursor-up.
+         * Each \n produces a line break, plus the initial line = \n count + 1.
+         * But if content is empty, it's 1 line (the prompt only). */
         const char *data = dynamic_buffer_data(content);
         size_t len = dynamic_buffer_len(content);
         int line_count = 0;
@@ -572,21 +578,41 @@ void tui_runtime_flush(TuiRuntime *runtime)
             if (data[i] == '\n')
                 line_count++;
         }
+        /* Visual rows = newlines + 1 (the first line has no preceding \n) */
+        if (len > 0)
+            line_count++;
         runtime->inline_lines_rendered = line_count;
 
+        /* Erase stale lines below the new content if the previous frame
+         * had more lines than the current one. prev_lines was saved
+         * before we overwrote inline_lines_rendered above. */
+        if (prev_lines > line_count) {
+            int stale = prev_lines - line_count;
+            for (int i = 0; i < stale; i++) {
+                fputs("\r\n" EL_TO_END, fp);
+            }
+            /* Move back up to the last content line */
+            char up_buf[16];
+            ansi_format_cursor_up(up_buf, sizeof(up_buf), stale);
+            fputs(up_buf, fp);
+        }
+
         /* Cursor placement — relative positioning in inline mode.
-         * After writing content, cursor is at end of last line.
-         * Move up to the cursor's row, then carriage return + forward
-         * to the cursor's column. */
+         * After writing content, cursor is at end of last line (row N-1
+         * where N = line_count). Move up to the cursor's row, then
+         * carriage return + forward to the cursor's column.
+         * Save the cursor row for next frame's cursor-up. */
         if (v.cursor.visible) {
-            int cursor_row_in_content = v.cursor.row - 1; /* 0-indexed within content */
-            int lines_after_cursor = line_count - cursor_row_in_content;
-            if (lines_after_cursor > 0) {
+            int cursor_row_in_content = v.cursor.row - 1; /* 0-indexed */
+            int last_row = line_count - 1;                /* 0-indexed last row */
+            int lines_to_move_up = last_row - cursor_row_in_content;
+            if (lines_to_move_up > 0) {
                 char up_buf[16];
                 ansi_format_cursor_up(up_buf, sizeof(up_buf),
-                                      lines_after_cursor);
+                                      lines_to_move_up);
                 fputs(up_buf, fp);
             }
+            runtime->inline_cursor_row = cursor_row_in_content;
             /* Move to column: \r + cursor forward */
             fputs("\r", fp);
             if (v.cursor.col > 1) {
@@ -596,6 +622,9 @@ void tui_runtime_flush(TuiRuntime *runtime)
                 fputs(fwd_buf, fp);
             }
             fputs(ANSI_SHOW_CURSOR, fp);
+        } else {
+            /* Cursor hidden — stays at end of last line */
+            runtime->inline_cursor_row = line_count - 1;
         }
 
         fflush(fp);

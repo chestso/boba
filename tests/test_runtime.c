@@ -1209,18 +1209,19 @@ static void test_flush_inline_cursor_up_on_second_flush(void)
     reset_view_stub();
     s_view_to_return.render_mode = TUI_RENDER_INLINE;
     tui_runtime_flush(rt);
-    /* Simulate 2 lines rendered by setting the counter */
+    /* Simulate 2 lines rendered with cursor on last line (row 1) */
     rt->inline_lines_rendered = 2;
+    rt->inline_cursor_row = 1; /* 0-indexed, cursor on last line */
     fflush(fp);
     size_t pos1 = ftell(fp);
 
-    /* Frame 2: should cursor up 2 lines before repaint */
+    /* Frame 2: should cursor up 1 line (from row 1 to row 0) */
     reset_view_stub();
     s_view_to_return.render_mode = TUI_RENDER_INLINE;
     tui_runtime_flush(rt);
     fflush(fp);
 
-    assert(strstr(outbuf + pos1, "\x1b[2A") != NULL);
+    assert(strstr(outbuf + pos1, "\x1b[1A") != NULL);
 
     tui_runtime_free(rt);
     fclose(fp);
@@ -1245,13 +1246,15 @@ static void test_flush_inline_emits_erase(void)
     fflush(fp);
     size_t pos1 = ftell(fp);
 
-    /* Frame 2: should emit ED (erase to end of screen) */
+    /* Frame 2: should NOT emit ED_TO_END (we rely on per-line EL_TO_END
+     * from the textinput view instead, to preserve content above) */
     reset_view_stub();
     s_view_to_return.render_mode = TUI_RENDER_INLINE;
     tui_runtime_flush(rt);
     fflush(fp);
 
-    assert(strstr(outbuf + pos1, "\x1b[J") != NULL);
+    /* ED (CSI J) should NOT appear — it erases content above the input */
+    assert(strstr(outbuf + pos1, "\x1b[J") == NULL);
 
     tui_runtime_free(rt);
     fclose(fp);
@@ -1292,6 +1295,150 @@ static void test_flush_inline_counts_lines(void)
     assert(rt->inline_lines_rendered == 0 || rt->inline_lines_rendered == 1);
 
     tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* --- Multi-line content view stub --- */
+
+static TuiView multiline_view(const TuiModel *model, DynamicBuffer *out)
+{
+    (void)model;
+    dynamic_buffer_append_str(out, "line1\nline2\nline3");
+    TuiView v = tui_view_default(out);
+    v.render_mode = TUI_RENDER_INLINE;
+    return v;
+}
+
+static TuiComponent multiline_component = {
+    .init = view_stub_init,
+    .update = noop_update,
+    .view = multiline_view,
+    .free = test_free,
+};
+
+/* #2: line_count = newlines + 1 (visual rows) */
+static void test_flush_inline_counts_visual_lines(void)
+{
+    char outbuf[4096];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    /* "line1\nline2\nline3" has 2 newlines → 3 visual lines */
+    assert(rt->inline_lines_rendered == 3);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* #1: cursor-up from non-last row uses inline_cursor_row, not N-1 */
+static void test_flush_inline_cursor_up_from_non_last_row(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(rt->inline_lines_rendered == 3);
+    assert(rt->inline_cursor_row == 2);
+
+    /* Simulate cursor on row 0 (user pressed Up) */
+    rt->inline_cursor_row = 0;
+    size_t pos1 = ftell(fp);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    /* Should NOT emit any cursor-up (already on row 0) */
+    assert(strstr(outbuf + pos1, "\x1b[1A") == NULL);
+    assert(strstr(outbuf + pos1, "\x1b[2A") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* #1b: cursor-up from middle row (1 of 3) should be 1, not 2 */
+static void test_flush_inline_cursor_up_from_middle_row(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+    rt->inline_cursor_row = 1;
+    size_t pos1 = ftell(fp);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    assert(strstr(outbuf + pos1, "\x1b[1A") != NULL);
+    assert(strstr(outbuf + pos1, "\x1b[2A") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* #4: stale lines erased when content shrinks */
+static void test_flush_inline_erases_stale_lines_on_shrink(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    /* Frame 1: 3 lines */
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(rt->inline_lines_rendered == 3);
+
+    /* Simulate shrink: set prev state, then flush with empty content */
+    rt->inline_lines_rendered = 3;
+    rt->inline_cursor_row = 2;
+    size_t pos1 = ftell(fp);
+
+    /* Use view_stub (empty content → 0 lines) */
+    TuiRuntime *rt2 = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    rt2->inline_lines_rendered = 3;
+    rt2->inline_cursor_row = 2;
+    reset_view_stub();
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    tui_runtime_flush(rt2);
+    fflush(fp);
+
+    /* Should emit \r\n + EL_TO_END for 3 stale lines */
+    const char *p = outbuf + pos1;
+    int count = 0;
+    while ((p = strstr(p, "\r\n\x1b[K")) != NULL) {
+        count++;
+        p += 3;
+    }
+    assert(count >= 2);
+
+    tui_runtime_free(rt);
+    tui_runtime_free(rt2);
     fclose(fp);
 }
 
@@ -1442,6 +1589,7 @@ static void test_start_resets_inline_lines_rendered(void)
     tui_runtime_start(rt);
     tui_runtime_flush(rt);
     rt->inline_lines_rendered = 3; /* simulate 3 lines rendered */
+    rt->inline_cursor_row = 2;     /* cursor on last line */
     tui_runtime_stop(rt);
 
     /* After stop, inline_lines_rendered should be 0 */
@@ -1480,6 +1628,7 @@ static void test_inline_resize_triggers_repaint(void)
     s_view_to_return.render_mode = TUI_RENDER_INLINE;
     tui_runtime_flush(rt);
     rt->inline_lines_rendered = 2;
+    rt->inline_cursor_row = 1; /* cursor was on last line */
     fflush(fp);
     size_t pos1 = ftell(fp);
 
@@ -1489,8 +1638,8 @@ static void test_inline_resize_triggers_repaint(void)
     tui_runtime_flush(rt);
     fflush(fp);
 
-    /* The second flush should emit cursor-up (2 lines) to repaint */
-    assert(strstr(outbuf + pos1, "\x1b[2A") != NULL);
+    /* The second flush should emit cursor-up (1 line, N-1=1) to repaint */
+    assert(strstr(outbuf + pos1, "\x1b[1A") != NULL);
 
     tui_runtime_free(rt);
     fclose(fp);
@@ -1559,6 +1708,10 @@ int main(void)
     RUN_TEST(test_flush_inline_cursor_up_on_second_flush);
     RUN_TEST(test_flush_inline_emits_erase);
     RUN_TEST(test_flush_inline_counts_lines);
+    RUN_TEST(test_flush_inline_counts_visual_lines);
+    RUN_TEST(test_flush_inline_cursor_up_from_non_last_row);
+    RUN_TEST(test_flush_inline_cursor_up_from_middle_row);
+    RUN_TEST(test_flush_inline_erases_stale_lines_on_shrink);
     RUN_TEST(test_stop_inline_moves_cursor_down);
     RUN_TEST(test_stop_inline_no_exit_alt_screen);
     RUN_TEST(test_stop_inline_no_decrc);

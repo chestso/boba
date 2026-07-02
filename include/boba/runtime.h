@@ -107,6 +107,7 @@ struct TuiRuntime
     /* Tracked terminal state — diffed against TuiView each flush. */
     int in_alt_screen;
     int inline_lines_rendered; /* lines drawn last frame in inline mode */
+    int inline_cursor_row;     /* 0-indexed row where cursor was placed */
     int in_inline_mode;        /* 1 if last flush was inline mode */
     TuiMouseMode cur_mouse_mode;
     TuiKeyboardEnhancements cur_kbd_enhancements;
