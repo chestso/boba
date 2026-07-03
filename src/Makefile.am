@@ -13,9 +13,7 @@ libboba_a_SOURCES = \
     base64.c \
     style.c \
     components/textinput.c \
-    components/textview.c \
-    components/viewport.c \
-    components/statusbar.c
+    components/viewport.c
 
 libboba_a_CPPFLAGS = \
     -I$(top_srcdir)/include \

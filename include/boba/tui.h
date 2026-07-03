@@ -23,9 +23,6 @@
 /* Input parsing */
 #include "input_parser.h"
 
-/* Components */
-#include "components/statusbar.h"
-
 /* Runtime (optional, for standalone applications) */
 #include "runtime.h"
 

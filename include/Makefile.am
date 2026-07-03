@@ -16,6 +16,4 @@ boba_HEADERS = \
 boba_componentsdir = $(includedir)/boba/components
 boba_components_HEADERS = \
     boba/components/textinput.h \
-    boba/components/textview.h \
-    boba/components/viewport.h \
-    boba/components/statusbar.h
+    boba/components/viewport.h

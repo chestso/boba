@@ -46,8 +46,6 @@ alignment, and borders. Composable without mutation.
 
 - `textinput` — Text input with history, completion, Unicode support, multi-line editing, soft-wrap, syntax-highlighting callback, focus-aware styling
 - `viewport` — Scrollable content area with software scrolling and tmux-style copy-mode
-- `statusbar` — Status bar with mode indicator and notifications
-- `textview` — Simple text display (for basic use cases)
 
 ## Philosophy
 
@@ -386,42 +384,6 @@ tui_viewport_component()->update((TuiModel *)vp, tui_msg_focus());
 if (tui_viewport_contains(vp, mouse_row, mouse_col)) {
     /* forward the mouse event to the viewport */
 }
-```
-
-### textview
-
-A simple text buffer for basic text display. Use `viewport` instead for scrollable content with software scrolling, ANSI sequence support, and advanced features like line wrapping and memory management.
-
-Features:
-
-- **Basic text storage** - Simple buffer for accumulating text content
-- **Auto-scroll** - Option to automatically reset scroll position on new content
-- **Direct output** - Write directly to terminal for live output scenarios
-- **Minimal overhead** - Lightweight alternative for simple display needs
-
-```c
-TuiTextView *view = tui_textview_create(10);
-tui_textview_append_str(view, "Simple text output\n");
-tui_textview_write_direct(view, "Live output", 11);
-```
-
-### statusbar
-
-A single-line status bar with a mode indicator on the left and notification text on the right.
-
-Features:
-
-- **Mode indicator** - Persistent left-aligned text (e.g., current mode or state)
-- **Notifications** - Transient right-aligned text
-- **Absolute cursor positioning** - Positioned at a specific terminal row
-- **UTF-8 aware** - Correct display width calculation for alignment
-
-```c
-TuiStatusBar *sb = tui_statusbar_create();
-tui_statusbar_set_terminal_width(sb, 80);
-tui_statusbar_set_terminal_row(sb, 24);
-tui_statusbar_set_mode(sb, "NORMAL");
-tui_statusbar_set_notification(sb, "Connected");
 ```
 
 ## Clipboard
