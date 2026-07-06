@@ -15,6 +15,8 @@
 #else
 #include <io.h>
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #endif
 
 #define STDIN_READ_BUF_SIZE 256
@@ -1055,6 +1057,11 @@ int tui_runtime_run(TuiRuntime *runtime)
     /* Create wakeup event */
     runtime->wakeup_event = CreateEvent(NULL, TRUE, FALSE, NULL);
 
+    /* Create socket event for WSAEventSelect (lazy: only used if
+     * get_external_fd provides a socket). */
+    runtime->socket_event = WSACreateEvent();
+    runtime->last_ext_fd = -1;
+
     /* Start terminal mode */
     tui_runtime_start(runtime);
     tui_runtime_flush(runtime);
@@ -1062,11 +1069,53 @@ int tui_runtime_run(TuiRuntime *runtime)
     HANDLE h_stdin = GetStdHandle(STD_INPUT_HANDLE);
 
     while (runtime->running) {
-        HANDLE handles[2];
+        HANDLE handles[3];
         DWORD n_handles = 0;
-        handles[n_handles++] = h_stdin;
-        if (runtime->wakeup_event)
-            handles[n_handles++] = runtime->wakeup_event;
+        DWORD idx_stdin, idx_wakeup, idx_socket;
+        handles[n_handles] = h_stdin;
+        idx_stdin = n_handles++;
+
+        if (runtime->wakeup_event) {
+            handles[n_handles] = runtime->wakeup_event;
+            idx_wakeup = n_handles++;
+        } else {
+            idx_wakeup = (DWORD)-1;
+        }
+
+        /* Get external FD and bind it to the socket event if it changed.
+         * WSAEventSelect associates the socket with our event handle so
+         * WaitForMultipleObjects wakes the instant data arrives — no
+         * polling, no tick dependency. FD_READ | FD_CLOSE covers both
+         * data arrival and disconnect. */
+        int ext_fd = -1;
+        if (runtime->config.get_external_fd)
+            ext_fd = runtime->config.get_external_fd(
+                runtime->config.event_data);
+
+        if (ext_fd >= 0 && ext_fd != runtime->last_ext_fd) {
+            WSAEventSelect((SOCKET)ext_fd, runtime->socket_event,
+                           FD_READ | FD_CLOSE);
+            runtime->last_ext_fd = ext_fd;
+
+            /* Data may have arrived between connect and this first
+             * binding. WSAEventSelect may signal the event for
+             * already-pending data — check and drain it now so the
+             * first WaitForMultipleObjects doesn't miss it. */
+            if (WaitForSingleObject(runtime->socket_event, 0) ==
+                WAIT_OBJECT_0) {
+                WSAResetEvent(runtime->socket_event);
+                if (runtime->config.on_external_ready)
+                    runtime->config.on_external_ready(
+                        runtime->config.event_data);
+            }
+        }
+
+        if (ext_fd >= 0) {
+            handles[n_handles] = runtime->socket_event;
+            idx_socket = n_handles++;
+        } else {
+            idx_socket = (DWORD)-1;
+        }
 
         /* Compute timeout (100ms default) */
         DWORD timeout_ms = 100;
@@ -1082,7 +1131,7 @@ int tui_runtime_run(TuiRuntime *runtime)
         DWORD wait = WaitForMultipleObjects(n_handles, handles, FALSE,
                                             timeout_ms);
 
-        if (wait == WAIT_OBJECT_0) {
+        if (wait == WAIT_OBJECT_0 + idx_stdin) {
             /* stdin ready */
             unsigned char buf[STDIN_READ_BUF_SIZE];
             DWORD bytes_read = 0;
@@ -1097,11 +1146,19 @@ int tui_runtime_run(TuiRuntime *runtime)
                 /* EOF */
                 break;
             }
-        } else if (wait == WAIT_OBJECT_0 + 1) {
+        } else if (idx_wakeup != (DWORD)-1 &&
+                   wait == WAIT_OBJECT_0 + idx_wakeup) {
             /* Wakeup event */
             ResetEvent(runtime->wakeup_event);
             tui_runtime_drain(runtime);
             tui_runtime_flush(runtime);
+        } else if (idx_socket != (DWORD)-1 &&
+                   wait == WAIT_OBJECT_0 + idx_socket) {
+            /* Socket data ready — re-arm event and notify caller */
+            WSAResetEvent(runtime->socket_event);
+            if (runtime->config.on_external_ready)
+                runtime->config.on_external_ready(
+                    runtime->config.event_data);
         }
 
         /* Tick */
@@ -1117,6 +1174,13 @@ int tui_runtime_run(TuiRuntime *runtime)
         CloseHandle(runtime->wakeup_event);
         runtime->wakeup_event = NULL;
     }
+
+    if (runtime->socket_event) {
+        WSACloseEvent(runtime->socket_event);
+        runtime->socket_event = NULL;
+    }
+
+    runtime->last_ext_fd = -1;
 
     return 0;
 #endif

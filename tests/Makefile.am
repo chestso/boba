@@ -5,7 +5,7 @@ UNIT_TESTS = test_ansi test_textinput test_viewport test_runtime test_focus test
 check_PROGRAMS = $(UNIT_TESTS)
 
 AM_CPPFLAGS = -I$(top_srcdir)/include
-LDADD = $(top_builddir)/src/libboba.a
+LDADD = $(top_builddir)/src/libboba.a $(SOCKET_LIBS)
 
 test_ansi_SOURCES = test_ansi.c
 test_textinput_SOURCES = test_textinput.c

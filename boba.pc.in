@@ -7,4 +7,4 @@ Name: boba
 Description: Terminal UI library using the Elm Architecture
 Version: @PACKAGE_VERSION@
 Cflags: -I${includedir}
-Libs: -L${libdir} -lboba
+Libs: -L${libdir} -lboba @SOCKET_LIBS@

@@ -26,6 +26,7 @@
 #include <termios.h>
 #else
 #include <windows.h>
+#include <winsock2.h>
 #endif
 
 /* Forward declaration */
@@ -123,6 +124,8 @@ struct TuiRuntime
     DWORD orig_output_mode; /* Saved console output mode */
     int is_pty;             /* 1 = ConPTY/pipe, 0 = real console */
     HANDLE wakeup_event;    /* Event object for waking WaitForMultipleObjects */
+    HANDLE socket_event;    /* WSA event for external FD (socket) */
+    int last_ext_fd;        /* Last FD bound to socket_event (-1 = none) */
 #endif
 
     /* Message queue (for tui_runtime_post) */

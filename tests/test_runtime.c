@@ -16,6 +16,7 @@
 #include <unistd.h>
 #else
 #include <windows.h>
+#include <winsock2.h>
 #endif
 
 #include <boba/cmd.h>

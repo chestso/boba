@@ -81,6 +81,17 @@ AC_CHECK_HEADERS([stdlib.h string.h])
 dnl Check for typedefs and structures
 AC_TYPE_SIZE_T
 
+dnl Platform-specific socket libraries (for select() on Windows)
+case "$host_os" in
+    mingw*|msys*)
+        SOCKET_LIBS="-lws2_32"
+        ;;
+    *)
+        SOCKET_LIBS=""
+        ;;
+esac
+AC_SUBST([SOCKET_LIBS])
+
 AC_DEFINE_UNQUOTED([BOBA_VERSION], ["$BOBA_VERSION"], [Version string])
 
 dnl Output files
