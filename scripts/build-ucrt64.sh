@@ -70,6 +70,8 @@ if [ -n "${ACLOCAL_PATH:-}" ]; then
 	fi
 fi
 
+rm -f config.status config.log config.h stamp-h1
+
 echo "==> ./autogen.sh"
 ./autogen.sh
 

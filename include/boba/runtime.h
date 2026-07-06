@@ -25,8 +25,8 @@
 #ifndef _WIN32
 #include <termios.h>
 #else
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 #endif
 
 /* Forward declaration */

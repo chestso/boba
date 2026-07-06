@@ -15,8 +15,8 @@
 #ifndef _WIN32
 #include <unistd.h>
 #else
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 #endif
 
 #include <boba/cmd.h>
