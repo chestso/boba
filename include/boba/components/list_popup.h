@@ -50,6 +50,15 @@ typedef struct TuiListPopup
 
     /* Filter prefix for title display (owned, may be NULL) */
     char *filter_prefix;
+
+    /* Colors (all default to NONE = inherit terminal defaults).
+     * Set via tui_list_popup_set_colors() using CharmTone values. */
+    TuiColor border_color;
+    TuiColor title_color;
+    TuiColor selected_bg;
+    TuiColor selected_fg;
+    TuiColor selected_marker_color;
+    TuiColor item_color;
 } TuiListPopup;
 
 /* Create a new popup. Returns NULL on failure. */
@@ -97,6 +106,14 @@ void tui_list_popup_set_size(TuiListPopup *popup, int width, int max_visible);
 void tui_list_popup_set_terminal_size(TuiListPopup *popup, int w, int h);
 void tui_list_popup_set_title(TuiListPopup *popup, const char *title);
 void tui_list_popup_set_filter(TuiListPopup *popup, const char *prefix);
+
+/* Set colors for popup elements. Pass TUI_COLOR_NONE for any element
+ * to use terminal defaults. All arguments are copied (no allocation). */
+void tui_list_popup_set_colors(TuiListPopup *popup, TuiColor border_color,
+                               TuiColor title_color, TuiColor selected_bg,
+                               TuiColor selected_fg,
+                               TuiColor selected_marker_color,
+                               TuiColor item_color);
 
 /* Render popup to output buffer. Produces no output if not visible. */
 void tui_list_popup_view(const TuiListPopup *popup, DynamicBuffer *out);

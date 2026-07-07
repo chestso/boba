@@ -337,7 +337,41 @@ void tui_list_popup_set_filter(TuiListPopup *p, const char *prefix)
     p->filter_prefix = prefix ? strdup(prefix) : NULL;
 }
 
-/* ===== rendering ===== */
+void tui_list_popup_set_colors(TuiListPopup *p, TuiColor border_color,
+                               TuiColor title_color, TuiColor selected_bg,
+                               TuiColor selected_fg,
+                               TuiColor selected_marker_color,
+                               TuiColor item_color)
+{
+    if (!p)
+        return;
+    p->border_color = border_color;
+    p->title_color = title_color;
+    p->selected_bg = selected_bg;
+    p->selected_fg = selected_fg;
+    p->selected_marker_color = selected_marker_color;
+    p->item_color = item_color;
+}
+
+/* Helper: emit fg color SGR if color is not NONE */
+static void emit_fg(DynamicBuffer *out, TuiColor c)
+{
+    if (c.type == TUI_COLOR_NONE)
+        return;
+    char buf[32];
+    if (tui_color_format_fg(c, buf, sizeof(buf)) > 0)
+        dynamic_buffer_append_str(out, buf);
+}
+
+/* Helper: emit bg color SGR if color is not NONE */
+static void emit_bg(DynamicBuffer *out, TuiColor c)
+{
+    if (c.type == TUI_COLOR_NONE)
+        return;
+    char buf[32];
+    if (tui_color_format_bg(c, buf, sizeof(buf)) > 0)
+        dynamic_buffer_append_str(out, buf);
+}
 
 void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
 {
@@ -362,9 +396,18 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
         title = title_buf;
     }
 
+    /* Render top border with border color + title color */
+    TuiStyle border_style = tui_style_new();
+    if (p->border_color.type != TUI_COLOR_NONE)
+        border_style = tui_style_border_foreground(border_style,
+                                                   p->border_color);
+    TuiStyle title_style = tui_style_new();
+    if (p->title_color.type != TUI_COLOR_NONE)
+        title_style = tui_style_foreground(title_style, p->title_color);
+
     char *top_border = tui_border_render_horizontal(
-        &TUI_BORDER_ROUNDED, 1, width, NULL, title, TUI_BORDER_TITLE_LEFT,
-        1, 1);
+        &TUI_BORDER_ROUNDED, 1, width, &border_style, title,
+        TUI_BORDER_TITLE_LEFT, 1, 1);
     if (top_border) {
         dynamic_buffer_append_str(out, top_border);
         dynamic_buffer_append_str(out, EL_TO_END);
@@ -381,18 +424,37 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
 
         int is_selected = (idx == p->selected);
 
-        /* Left border */
+        /* Left border — colored if border_color set */
+        if (p->border_color.type != TUI_COLOR_NONE)
+            emit_fg(out, p->border_color);
         dynamic_buffer_append_str(out, TUI_BORDER_ROUNDED.left);
+        if (p->border_color.type != TUI_COLOR_NONE)
+            dynamic_buffer_append_str(out, SGR_RESET);
 
-        /* Marker + content */
-        if (is_selected)
-            dynamic_buffer_append_str(out, SGR_REVERSE);
+        /* Selected row: set bg + fg */
+        if (is_selected) {
+            emit_bg(out, p->selected_bg);
+            emit_fg(out, p->selected_fg);
+        } else {
+            emit_fg(out, p->item_color);
+        }
 
         /* 2-char marker prefix */
-        if (is_selected)
+        if (is_selected) {
+            if (p->selected_marker_color.type != TUI_COLOR_NONE) {
+                dynamic_buffer_append_str(out, SGR_RESET);
+                emit_fg(out, p->selected_marker_color);
+                emit_bg(out, p->selected_bg);
+            }
             dynamic_buffer_append_str(out, "> ");
-        else
+            if (p->selected_marker_color.type != TUI_COLOR_NONE) {
+                dynamic_buffer_append_str(out, SGR_RESET);
+                emit_fg(out, p->selected_fg);
+                emit_bg(out, p->selected_bg);
+            }
+        } else {
             dynamic_buffer_append_str(out, "  ");
+        }
 
         /* Item text, padded to inner_width - 2 (marker) - padding */
         int text_max = inner_width - 2 - BORDER_PADDING;
@@ -407,7 +469,6 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
             int col = 0;
             for (size_t i = 0; item[i] && col < text_max; i++) {
                 if ((unsigned char)item[i] == 0x1b && item[i + 1] == '[') {
-                    /* Pass through ANSI escape */
                     dynamic_buffer_append(out, &item[i], 1);
                     size_t j = i + 1;
                     while (item[j] && !((unsigned char)item[j] >= 'A' &&
@@ -430,28 +491,39 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
                     i += clen - 1;
                 }
             }
+            /* Pad remaining */
+            for (; col < text_max; col++)
+                dynamic_buffer_append_str(out, " ");
         } else {
             dynamic_buffer_append_str(out, item);
-            /* Pad remaining columns */
             for (int p2 = item_w; p2 < text_max; p2++)
                 dynamic_buffer_append_str(out, " ");
         }
 
-        if (is_selected)
-            dynamic_buffer_append_str(out, SGR_RESET);
+        /* Reset text colors, keep bg for selected through right border */
+        dynamic_buffer_append_str(out, SGR_RESET);
 
-        /* Right padding + right border */
+        /* Right padding — for selected, extend bg */
+        if (is_selected)
+            emit_bg(out, p->selected_bg);
         for (int p2 = 0; p2 < BORDER_PADDING; p2++)
             dynamic_buffer_append_str(out, " ");
+        dynamic_buffer_append_str(out, SGR_RESET);
+
+        /* Right border — colored if border_color set */
+        if (p->border_color.type != TUI_COLOR_NONE)
+            emit_fg(out, p->border_color);
         dynamic_buffer_append_str(out, TUI_BORDER_ROUNDED.right);
+        if (p->border_color.type != TUI_COLOR_NONE)
+            dynamic_buffer_append_str(out, SGR_RESET);
         dynamic_buffer_append_str(out, EL_TO_END);
         dynamic_buffer_append_str(out, "\r\n");
     }
 
     /* Bottom border */
     char *bottom_border = tui_border_render_horizontal(
-        &TUI_BORDER_ROUNDED, 0, width, NULL, NULL, TUI_BORDER_TITLE_LEFT,
-        0, 0);
+        &TUI_BORDER_ROUNDED, 0, width, &border_style, NULL,
+        TUI_BORDER_TITLE_LEFT, 0, 0);
     if (bottom_border) {
         dynamic_buffer_append_str(out, bottom_border);
         dynamic_buffer_append_str(out, EL_TO_END);

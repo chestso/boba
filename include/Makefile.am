@@ -11,7 +11,8 @@ boba_HEADERS = \
     boba/dynamic_buffer.h \
     boba/ansi_sequences.h \
     boba/unicode.h \
-    boba/style.h
+    boba/style.h \
+    boba/charmtones.h
 
 boba_componentsdir = $(includedir)/boba/components
 boba_components_HEADERS = \
