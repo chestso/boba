@@ -111,6 +111,16 @@ mechanism. It auto-detects ConPTY pipe handles vs real console handles: under Co
 (e.g. portty), raw bytes pass through and VT sequences work natively; on a real
 console, `SetConsoleMode` enables virtual-terminal processing.
 
+A background reader thread handles stdin. `ReadFile` on a console input handle
+blocks until key events arrive, even though `WaitForMultipleObjects` signals the
+handle for non-key events (focus changes, mode changes, resize). Blocking
+`ReadFile` in the main loop starves other wait handles — notably the socket
+event from `WSAEventSelect`, so server data goes unread until the user presses a
+key. The reader thread does the blocking `ReadFile` in a separate thread and
+signals a manual-reset event when bytes are available; the main loop waits on
+that event alongside the socket and wakeup events, so external FDs are serviced
+immediately regardless of stdin state.
+
 **Lower-level** — caller owns the event loop, drives the runtime manually:
 
 ```c

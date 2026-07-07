@@ -103,6 +103,56 @@ static void runtime_atexit_cleanup(void)
 
 /* --- Windows helpers --- */
 #ifdef _WIN32
+
+/* Reader thread for stdin. ReadFile on a console input handle blocks
+ * until key events arrive, even though WaitForMultipleObjects signals
+ * the handle for non-key events (focus, resize, mode changes). This
+ * starves other wait handles (e.g. the socket event). The thread does
+ * blocking ReadFile in the background and signals stdin_event when
+ * data is available. The main loop waits on stdin_event instead.
+ *
+ * Flow: read → lock → copy to buffer → signal stdin_event → unlock →
+ * wait on stdin_consumed (auto-reset) until main loop signals it →
+ * loop. This ensures no data is lost between reads. */
+static DWORD WINAPI stdin_reader_thread(LPVOID param)
+{
+    TuiRuntime *rt = (TuiRuntime *)param;
+    HANDLE h_stdin = GetStdHandle(STD_INPUT_HANDLE);
+    unsigned char buf[256];
+
+    while (1) {
+        DWORD bytes_read = 0;
+        BOOL ok = ReadFile(h_stdin, buf, sizeof(buf), &bytes_read, NULL);
+
+        if (!ok || bytes_read == 0) {
+            EnterCriticalSection(&rt->stdin_lock);
+            rt->stdin_eof = 1;
+            SetEvent(rt->stdin_event);
+            LeaveCriticalSection(&rt->stdin_lock);
+            break;
+        }
+
+        EnterCriticalSection(&rt->stdin_lock);
+        size_t to_copy = bytes_read;
+        if (to_copy > sizeof(rt->stdin_buf))
+            to_copy = sizeof(rt->stdin_buf);
+        memcpy(rt->stdin_buf, buf, to_copy);
+        rt->stdin_buf_len = to_copy;
+        SetEvent(rt->stdin_event);
+        LeaveCriticalSection(&rt->stdin_lock);
+
+        /* Wait for main loop to consume before reading more.
+         * Also watch stdin_done for clean shutdown. */
+        HANDLE wait_handles[2] = { rt->stdin_consumed, rt->stdin_done };
+        DWORD wr = WaitForMultipleObjects(2, wait_handles, FALSE,
+                                          INFINITE);
+        if (wr == WAIT_OBJECT_0 + 1)
+            break; /* stdin_done — exit thread */
+        /* WAIT_OBJECT_0 = consumed, loop back to read */
+    }
+    return 0;
+}
+
 static int runtime_enable_raw_mode_win(TuiRuntime *rt)
 {
     HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
@@ -1039,7 +1089,17 @@ int tui_runtime_run(TuiRuntime *runtime)
 
     return 0;
 #else
-    /* Windows event loop using WaitForMultipleObjects */
+    /* Windows event loop using WaitForMultipleObjects.
+     *
+     * A background reader thread handles stdin. ReadFile on a console
+     * input handle blocks until key events arrive, even though the
+     * handle is signaled by WaitForMultipleObjects for non-key events
+     * (focus changes, mode changes, resize). Blocking ReadFile in the
+     * main loop starves other wait handles — notably the socket event,
+     * so server data goes unread until the user presses a key. The
+     * reader thread does the blocking read and signals a manual-reset
+     * event when bytes are available; the main loop waits on that
+     * event alongside the socket and wakeup events. */
     runtime_update_size_win(runtime);
     TuiMsg size_msg = { .type = TUI_MSG_WINDOW_SIZE,
                         .data.size = { .width = runtime->term_width,
@@ -1054,25 +1114,31 @@ int tui_runtime_run(TuiRuntime *runtime)
     if (runtime->config.raw_mode)
         runtime_enable_raw_mode_win(runtime);
 
-    /* Create wakeup event */
+    /* Create events */
     runtime->wakeup_event = CreateEvent(NULL, TRUE, FALSE, NULL);
-
-    /* Create socket event for WSAEventSelect (lazy: only used if
-     * get_external_fd provides a socket). */
     runtime->socket_event = WSACreateEvent();
     runtime->last_ext_fd = -1;
+    runtime->stdin_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    runtime->stdin_consumed = CreateEvent(NULL, FALSE, FALSE, NULL);
+    runtime->stdin_done = CreateEvent(NULL, TRUE, FALSE, NULL);
+    InitializeCriticalSection(&runtime->stdin_lock);
+    runtime->stdin_buf_len = 0;
+    runtime->stdin_eof = 0;
 
     /* Start terminal mode */
     tui_runtime_start(runtime);
     tui_runtime_flush(runtime);
 
-    HANDLE h_stdin = GetStdHandle(STD_INPUT_HANDLE);
+    /* Launch stdin reader thread */
+    runtime->stdin_thread = CreateThread(NULL, 0, stdin_reader_thread,
+                                         runtime, 0, NULL);
 
     while (runtime->running) {
         HANDLE handles[3];
         DWORD n_handles = 0;
         DWORD idx_stdin, idx_wakeup, idx_socket;
-        handles[n_handles] = h_stdin;
+
+        handles[n_handles] = runtime->stdin_event;
         idx_stdin = n_handles++;
 
         if (runtime->wakeup_event) {
@@ -1082,11 +1148,7 @@ int tui_runtime_run(TuiRuntime *runtime)
             idx_wakeup = (DWORD)-1;
         }
 
-        /* Get external FD and bind it to the socket event if it changed.
-         * WSAEventSelect associates the socket with our event handle so
-         * WaitForMultipleObjects wakes the instant data arrives — no
-         * polling, no tick dependency. FD_READ | FD_CLOSE covers both
-         * data arrival and disconnect. */
+        /* Get external FD and bind it to the socket event if it changed. */
         int ext_fd = -1;
         if (runtime->config.get_external_fd)
             ext_fd = runtime->config.get_external_fd(
@@ -1098,12 +1160,12 @@ int tui_runtime_run(TuiRuntime *runtime)
             runtime->last_ext_fd = ext_fd;
 
             /* Data may have arrived between connect and this first
-             * binding. WSAEventSelect may signal the event for
-             * already-pending data — check and drain it now so the
-             * first WaitForMultipleObjects doesn't miss it. */
+             * binding. Drain any already-pending data. */
             if (WaitForSingleObject(runtime->socket_event, 0) ==
                 WAIT_OBJECT_0) {
-                WSAResetEvent(runtime->socket_event);
+                WSANETWORKEVENTS ne;
+                WSAEnumNetworkEvents((SOCKET)ext_fd, runtime->socket_event,
+                                     &ne);
                 if (runtime->config.on_external_ready)
                     runtime->config.on_external_ready(
                         runtime->config.event_data);
@@ -1132,20 +1194,29 @@ int tui_runtime_run(TuiRuntime *runtime)
                                             timeout_ms);
 
         if (wait == WAIT_OBJECT_0 + idx_stdin) {
-            /* stdin ready */
-            unsigned char buf[STDIN_READ_BUF_SIZE];
-            DWORD bytes_read = 0;
-            if (ReadFile(h_stdin, buf, sizeof(buf), &bytes_read, NULL) &&
-                bytes_read > 0) {
-                tui_runtime_process_input(runtime, buf, (size_t)bytes_read);
+            /* Stdin data available from reader thread */
+            EnterCriticalSection(&runtime->stdin_lock);
+            ResetEvent(runtime->stdin_event);
+            if (runtime->stdin_eof) {
+                LeaveCriticalSection(&runtime->stdin_lock);
+                break;
+            }
+            size_t bytes = runtime->stdin_buf_len;
+            unsigned char buf[256];
+            if (bytes > 0)
+                memcpy(buf, runtime->stdin_buf, bytes);
+            runtime->stdin_buf_len = 0;
+            LeaveCriticalSection(&runtime->stdin_lock);
+
+            if (bytes > 0) {
+                tui_runtime_process_input(runtime, buf, bytes);
                 if (runtime->config.on_stdin_processed)
                     runtime->config.on_stdin_processed(
                         runtime->config.event_data);
                 tui_runtime_flush(runtime);
-            } else if (bytes_read == 0) {
-                /* EOF */
-                break;
             }
+            /* Tell reader thread we consumed the data — it can read more */
+            SetEvent(runtime->stdin_consumed);
         } else if (idx_wakeup != (DWORD)-1 &&
                    wait == WAIT_OBJECT_0 + idx_wakeup) {
             /* Wakeup event */
@@ -1154,8 +1225,13 @@ int tui_runtime_run(TuiRuntime *runtime)
             tui_runtime_flush(runtime);
         } else if (idx_socket != (DWORD)-1 &&
                    wait == WAIT_OBJECT_0 + idx_socket) {
-            /* Socket data ready — re-arm event and notify caller */
-            WSAResetEvent(runtime->socket_event);
+            /* Socket data ready — re-arm event and notify caller.
+             * WSAEnumNetworkEvents clears the internal network event
+             * record and re-arms the event object. Using WSAResetEvent
+             * alone would leave the internal record uncleared, causing
+             * subsequent data arrivals to NOT re-trigger the event. */
+            WSANETWORKEVENTS ne;
+            WSAEnumNetworkEvents((SOCKET)ext_fd, runtime->socket_event, &ne);
             if (runtime->config.on_external_ready)
                 runtime->config.on_external_ready(
                     runtime->config.event_data);
@@ -1166,7 +1242,14 @@ int tui_runtime_run(TuiRuntime *runtime)
             runtime->config.on_tick(runtime->config.event_data);
     }
 
-    /* Teardown */
+    /* Teardown: stop reader thread */
+    SetEvent(runtime->stdin_done);
+    if (runtime->stdin_thread) {
+        WaitForSingleObject(runtime->stdin_thread, 2000);
+        CloseHandle(runtime->stdin_thread);
+        runtime->stdin_thread = NULL;
+    }
+
     tui_runtime_stop(runtime);
     runtime_disable_raw_mode_win(runtime);
 
@@ -1179,6 +1262,23 @@ int tui_runtime_run(TuiRuntime *runtime)
         WSACloseEvent(runtime->socket_event);
         runtime->socket_event = NULL;
     }
+
+    if (runtime->stdin_event) {
+        CloseHandle(runtime->stdin_event);
+        runtime->stdin_event = NULL;
+    }
+
+    if (runtime->stdin_consumed) {
+        CloseHandle(runtime->stdin_consumed);
+        runtime->stdin_consumed = NULL;
+    }
+
+    if (runtime->stdin_done) {
+        CloseHandle(runtime->stdin_done);
+        runtime->stdin_done = NULL;
+    }
+
+    DeleteCriticalSection(&runtime->stdin_lock);
 
     runtime->last_ext_fd = -1;
 

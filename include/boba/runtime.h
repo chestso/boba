@@ -126,6 +126,19 @@ struct TuiRuntime
     HANDLE wakeup_event;    /* Event object for waking WaitForMultipleObjects */
     HANDLE socket_event;    /* WSA event for external FD (socket) */
     int last_ext_fd;        /* Last FD bound to socket_event (-1 = none) */
+    /* Stdin reader thread: ReadFile on a console handle blocks for
+     * non-key events (focus, resize) even when WaitForMultipleObjects
+     * signals it. A background thread does the blocking read and
+     * signals stdin_event when actual bytes arrive, so the main loop
+     * can wait on stdin_event alongside socket_event without starving. */
+    HANDLE stdin_thread;
+    HANDLE stdin_event;    /* Manual-reset, signaled when data is ready */
+    HANDLE stdin_consumed; /* Auto-reset, signaled by main loop after consuming */
+    HANDLE stdin_done;     /* Manual-reset, signaled to stop the thread */
+    CRITICAL_SECTION stdin_lock;
+    unsigned char stdin_buf[256]; /* Buffered data from reader thread */
+    size_t stdin_buf_len;         /* Valid bytes in stdin_buf */
+    int stdin_eof;                /* Set when ReadFile returns 0 bytes */
 #endif
 
     /* Message queue (for tui_runtime_post) */
