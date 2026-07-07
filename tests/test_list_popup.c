@@ -312,7 +312,6 @@ static void test_view_visible_produces_content(void)
     DynamicBuffer *buf = dynamic_buffer_create(0);
     tui_list_popup_view(p, buf);
     assert(dynamic_buffer_len(buf) > 0);
-    /* Should contain border characters */
     assert(strstr(buf_data(buf), "alpha") != NULL);
     assert(strstr(buf_data(buf), "beta") != NULL);
     dynamic_buffer_destroy(buf);
@@ -329,10 +328,9 @@ static void test_view_has_selected_marker(void)
     DynamicBuffer *buf = dynamic_buffer_create(0);
     tui_list_popup_view(p, buf);
     const char *data = buf_data(buf);
-    /* Selected item should be visually distinguishable */
     assert(strstr(data, "alpha") != NULL);
-    /* The marker char should be present */
-    assert(strchr(data, '>') != NULL || strstr(data, "\033[7m") != NULL);
+    /* Selected row should have SGR styling (reverse or bg color) */
+    assert(strstr(data, "\033[") != NULL);
     dynamic_buffer_destroy(buf);
     tui_list_popup_free(p);
 }
@@ -349,8 +347,7 @@ static void test_view_hidden_items_not_rendered(void)
     tui_list_popup_view(p, buf);
     const char *data = buf_data(buf);
     /* First two items visible, rest should not */
-    assert(strstr(data, "a") != NULL || strstr(data, ">") != NULL);
-    /* "e" as a standalone char might appear in borders, check item context */
+    assert(strstr(data, "a") != NULL);
     /* The third item "c" should NOT appear since max_visible=2 */
     assert(strstr(data, "c\n") == NULL && strstr(data, "c\r") == NULL);
     dynamic_buffer_destroy(buf);

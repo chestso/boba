@@ -16,6 +16,7 @@
 #define DEFAULT_MAX_VISIBLE   8
 #define MIN_POPUP_WIDTH       20
 #define BORDER_PADDING        1 /* space between border and content */
+#define BAR_WIDTH             1 /* left accent bar width */
 
 /* ===== internal helpers ===== */
 
@@ -71,8 +72,8 @@ static int compute_visible_rows(const TuiListPopup *p)
 
     int max_vis = p->max_visible > 0 ? p->max_visible : DEFAULT_MAX_VISIBLE;
     int term_h = p->terminal_height > 0 ? p->terminal_height : 24;
-    /* Leave room for textinput (at least 1 line) + border (2 rows) */
-    int available = term_h - 3;
+    /* Leave room for textinput (at least 1 line) + title (1 row) */
+    int available = term_h - 2;
     if (available < 1)
         available = 1;
 
@@ -88,12 +89,12 @@ static int compute_popup_width(const TuiListPopup *p)
         return p->width;
 
     int content_w = max_item_display_width(p);
-    /* +2 for marker prefix ("▶ " or "  "), +2 for border sides */
-    int w = content_w + 2 + 2 * BORDER_PADDING + 2;
+    /* +1 for bar, +1 for indent after bar */
+    int w = content_w + BAR_WIDTH + 1;
 
     /* Title can make it wider */
     if (p->title) {
-        int title_w = (int)strlen(p->title) + 4; /* "─ " + title + " ─" */
+        int title_w = (int)strlen(p->title) + 8; /* "title: " + filter + count */
         if (title_w > w)
             w = title_w;
     }
@@ -380,39 +381,31 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
 
     int width = compute_popup_width(p);
     int vis_rows = compute_visible_rows(p);
-    int inner_width = width - 2; /* minus border sides */
+    int content_width = width - BAR_WIDTH; /* space for text after bar */
 
-    /* Top border with optional title */
-    char title_buf[256];
-    const char *title = NULL;
+    /* Title line */
     if (p->title) {
-        if (p->filter_prefix) {
+        char title_buf[256];
+        if (p->filter_prefix)
             snprintf(title_buf, sizeof(title_buf), "%s: \"%s\" (%d)",
                      p->title, p->filter_prefix, p->item_count);
-        } else {
+        else
             snprintf(title_buf, sizeof(title_buf), "%s (%d)", p->title,
                      p->item_count);
-        }
-        title = title_buf;
-    }
 
-    /* Render top border with border color + title color */
-    TuiStyle border_style = tui_style_new();
-    if (p->border_color.type != TUI_COLOR_NONE)
-        border_style = tui_style_border_foreground(border_style,
-                                                   p->border_color);
-    TuiStyle title_style = tui_style_new();
-    if (p->title_color.type != TUI_COLOR_NONE)
-        title_style = tui_style_foreground(title_style, p->title_color);
+        /* Title bg spans full width */
+        emit_bg(out, p->selected_bg);
+        emit_fg(out, p->title_color);
+        dynamic_buffer_append_str(out, title_buf);
 
-    char *top_border = tui_border_render_horizontal(
-        &TUI_BORDER_ROUNDED, 1, width, &border_style, title,
-        TUI_BORDER_TITLE_LEFT, 1, 1);
-    if (top_border) {
-        dynamic_buffer_append_str(out, top_border);
+        /* Pad to full width */
+        int title_w = (int)str_display_width(title_buf);
+        for (int i = title_w; i < width; i++)
+            dynamic_buffer_append_str(out, " ");
+
+        dynamic_buffer_append_str(out, SGR_RESET);
         dynamic_buffer_append_str(out, EL_TO_END);
         dynamic_buffer_append_str(out, "\r\n");
-        free(top_border);
     }
 
     /* Item rows */
@@ -424,48 +417,36 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
 
         int is_selected = (idx == p->selected);
 
-        /* Left border — colored if border_color set */
-        if (p->border_color.type != TUI_COLOR_NONE)
+        /* Left accent bar — colored, 1 column wide */
+        if (is_selected) {
+            emit_fg(out, p->selected_marker_color);
+            emit_bg(out, p->selected_bg);
+        } else {
             emit_fg(out, p->border_color);
-        dynamic_buffer_append_str(out, TUI_BORDER_ROUNDED.left);
-        if (p->border_color.type != TUI_COLOR_NONE)
-            dynamic_buffer_append_str(out, SGR_RESET);
+            emit_bg(out, p->selected_bg);
+        }
+        dynamic_buffer_append_str(out, "\xe2\x96\x8c"); /* ▌ left-half block */
 
-        /* Selected row: set bg + fg */
+        /* Row content */
         if (is_selected) {
             emit_bg(out, p->selected_bg);
             emit_fg(out, p->selected_fg);
         } else {
+            emit_bg(out, p->selected_bg);
             emit_fg(out, p->item_color);
         }
 
-        /* 2-char marker prefix */
-        if (is_selected) {
-            if (p->selected_marker_color.type != TUI_COLOR_NONE) {
-                dynamic_buffer_append_str(out, SGR_RESET);
-                emit_fg(out, p->selected_marker_color);
-                emit_bg(out, p->selected_bg);
-            }
-            dynamic_buffer_append_str(out, "> ");
-            if (p->selected_marker_color.type != TUI_COLOR_NONE) {
-                dynamic_buffer_append_str(out, SGR_RESET);
-                emit_fg(out, p->selected_fg);
-                emit_bg(out, p->selected_bg);
-            }
-        } else {
-            dynamic_buffer_append_str(out, "  ");
-        }
+        /* 1-space indent after bar */
+        dynamic_buffer_append_str(out, " ");
 
-        /* Item text, padded to inner_width - 2 (marker) - padding */
-        int text_max = inner_width - 2 - BORDER_PADDING;
+        /* Item text, padded to content_width - 1 (indent) */
+        int text_max = content_width - 1;
         if (text_max < 1)
             text_max = 1;
 
         const char *item = p->items[idx];
         int item_w = str_display_width(item);
         if (item_w > text_max) {
-            /* Truncate to text_max display columns */
-            size_t pos = 0;
             int col = 0;
             for (size_t i = 0; item[i] && col < text_max; i++) {
                 if ((unsigned char)item[i] == 0x1b && item[i + 1] == '[') {
@@ -491,43 +472,17 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
                     i += clen - 1;
                 }
             }
-            /* Pad remaining */
             for (; col < text_max; col++)
                 dynamic_buffer_append_str(out, " ");
         } else {
             dynamic_buffer_append_str(out, item);
-            for (int p2 = item_w; p2 < text_max; p2++)
+            for (int i = item_w; i < text_max; i++)
                 dynamic_buffer_append_str(out, " ");
         }
 
-        /* Reset text colors, keep bg for selected through right border */
         dynamic_buffer_append_str(out, SGR_RESET);
-
-        /* Right padding — for selected, extend bg */
-        if (is_selected)
-            emit_bg(out, p->selected_bg);
-        for (int p2 = 0; p2 < BORDER_PADDING; p2++)
-            dynamic_buffer_append_str(out, " ");
-        dynamic_buffer_append_str(out, SGR_RESET);
-
-        /* Right border — colored if border_color set */
-        if (p->border_color.type != TUI_COLOR_NONE)
-            emit_fg(out, p->border_color);
-        dynamic_buffer_append_str(out, TUI_BORDER_ROUNDED.right);
-        if (p->border_color.type != TUI_COLOR_NONE)
-            dynamic_buffer_append_str(out, SGR_RESET);
         dynamic_buffer_append_str(out, EL_TO_END);
         dynamic_buffer_append_str(out, "\r\n");
-    }
-
-    /* Bottom border */
-    char *bottom_border = tui_border_render_horizontal(
-        &TUI_BORDER_ROUNDED, 0, width, &border_style, NULL,
-        TUI_BORDER_TITLE_LEFT, 0, 0);
-    if (bottom_border) {
-        dynamic_buffer_append_str(out, bottom_border);
-        dynamic_buffer_append_str(out, EL_TO_END);
-        free(bottom_border);
     }
 }
 
