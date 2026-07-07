@@ -92,9 +92,16 @@ static int compute_popup_width(const TuiListPopup *p)
     /* +1 for bar, +1 for indent after bar */
     int w = content_w + BAR_WIDTH + 1;
 
-    /* Title can make it wider */
+    /* Title line can make it wider — compute the actual rendered title */
     if (p->title) {
-        int title_w = (int)strlen(p->title) + 8; /* "title: " + filter + count */
+        char title_buf[256];
+        if (p->filter_prefix)
+            snprintf(title_buf, sizeof(title_buf), "%s: \"%s\" (%d)",
+                     p->title, p->filter_prefix, p->item_count);
+        else
+            snprintf(title_buf, sizeof(title_buf), "%s (%d)", p->title,
+                     p->item_count);
+        int title_w = (int)str_display_width(title_buf);
         if (title_w > w)
             w = title_w;
     }
@@ -482,7 +489,11 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
 
         dynamic_buffer_append_str(out, SGR_RESET);
         dynamic_buffer_append_str(out, EL_TO_END);
-        dynamic_buffer_append_str(out, "\r\n");
+        /* No \r\n after the last visible item row — the cursor stays on
+         * the final content line so the runtime's stale-line erasure
+         * correctly clears lines below when the list shrinks. */
+        if (row < vis_rows - 1 && scroll + row + 1 < p->item_count)
+            dynamic_buffer_append_str(out, "\r\n");
     }
 }
 
