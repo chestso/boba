@@ -187,6 +187,13 @@ void tui_textinput_history_add(TuiTextInput *input, const char *line);
 void tui_textinput_insert_completion(TuiTextInput *input, int word_start,
                                      const char *word);
 
+/* Extract the word at the cursor position. Returns a malloc'd string
+ * (the text from word_start to cursor) and sets *word_start to the
+ * byte offset where the word begins. Returns NULL (and sets
+ * *word_start to -1) if the cursor is not within a word (e.g. on
+ * whitespace or in an empty buffer). Caller frees the returned string. */
+char *tui_textinput_word_at_cursor(const TuiTextInput *input, int *word_start);
+
 /* Set characters that form words for tab completion and word movement.
  * When set, only these characters are considered part of a word.
  * Pass NULL to use default behavior (non-whitespace = word). */

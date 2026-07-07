@@ -859,19 +859,10 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         /* Shift+Tab is not bound by textinput; let the parent route it. */
         if (key.mods & TUI_MOD_SHIFT)
             return tui_update_result_none();
-        /* Find word start by scanning backward from cursor for non-word chars */
-        int word_start = (int)input->cursor_byte;
-        while (word_start > 0 &&
-               is_word_char(input, input->text[word_start - 1])) {
-            word_start--;
-        }
-        int prefix_len = (int)input->cursor_byte - word_start;
-        char *prefix = (char *)malloc(prefix_len + 1);
-        if (prefix) {
-            memcpy(prefix, input->text + word_start, prefix_len);
-            prefix[prefix_len] = '\0';
+        int word_start = 0;
+        char *prefix = tui_textinput_word_at_cursor(input, &word_start);
+        if (prefix)
             return tui_update_result(tui_cmd_tab_complete(prefix, word_start));
-        }
         break;
     }
 
@@ -1618,6 +1609,36 @@ void tui_textinput_insert_completion(TuiTextInput *input, int word_start,
     if (old_len < 0)
         old_len = 0;
     replace_word(input, word_start, old_len, word);
+}
+
+char *tui_textinput_word_at_cursor(const TuiTextInput *input, int *word_start)
+{
+    if (word_start)
+        *word_start = -1;
+    if (!input || !word_start)
+        return NULL;
+
+    /* Cursor must be within or at end of a word */
+    if (input->cursor_byte == 0)
+        return NULL;
+
+    /* The character just before cursor must be a word char */
+    if (!is_word_char(input, input->text[input->cursor_byte - 1]))
+        return NULL;
+
+    /* Scan backward to find word start */
+    int start = (int)input->cursor_byte;
+    while (start > 0 && is_word_char(input, input->text[start - 1]))
+        start--;
+
+    int len = (int)input->cursor_byte - start;
+    char *word = (char *)malloc(len + 1);
+    if (!word)
+        return NULL;
+    memcpy(word, input->text + start, len);
+    word[len] = '\0';
+    *word_start = start;
+    return word;
 }
 
 /* Set characters that form words for tab completion and word movement */

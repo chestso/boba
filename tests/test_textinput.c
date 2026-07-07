@@ -433,12 +433,130 @@ static void test_tab_with_shift_is_noop(void)
 
     /* Shift+Tab is not bound by textinput. It must not emit a
      * tab-complete command and must not modify the buffer — that
-     * leaves the parent free to use it for focus cycling. */
-    TuiUpdateResult r = tui_textinput_update(
-        input, tui_msg_key(TUI_KEY_TAB, 0, TUI_MOD_SHIFT));
+     * view is verified by test_tab_with_shift_is_noop below. */
+    TuiUpdateResult r = tui_textinput_update(input, tui_msg_key(TUI_KEY_TAB, 0, TUI_MOD_SHIFT));
     assert(r.cmd == NULL);
-    assert(strcmp(tui_textinput_text(input), "foo") == 0);
     assert(tui_textinput_cursor(input) == cursor_before);
+    assert(strcmp(tui_textinput_text(input), "foo") == 0);
+
+    tui_textinput_free(input);
+}
+
+/* ----- word_at_cursor tests ----- */
+
+static void test_word_at_cursor_simple(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_word_chars(input,
+                                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
+
+    send_string(input, "hello");
+    int word_start = -1;
+    char *word = tui_textinput_word_at_cursor(input, &word_start);
+    assert(word != NULL);
+    assert(strcmp(word, "hello") == 0);
+    assert(word_start == 0);
+    free(word);
+
+    tui_textinput_free(input);
+}
+
+static void test_word_at_cursor_mid_word(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_word_chars(input,
+                                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
+
+    send_string(input, "hello");
+    tui_textinput_set_cursor(input, 2); /* cursor between 'e' and 'l' */
+
+    int word_start = -1;
+    char *word = tui_textinput_word_at_cursor(input, &word_start);
+    assert(word != NULL);
+    /* Returns prefix from word_start to cursor, not the full word */
+    assert(strcmp(word, "he") == 0);
+    assert(word_start == 0);
+    free(word);
+
+    tui_textinput_free(input);
+}
+
+static void test_word_at_cursor_after_space(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_word_chars(input,
+                                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
+
+    send_string(input, "foo bar");
+
+    /* Cursor at end, word is "bar" */
+    int word_start = -1;
+    char *word = tui_textinput_word_at_cursor(input, &word_start);
+    assert(word != NULL);
+    assert(strcmp(word, "bar") == 0);
+    assert(word_start == 4);
+    free(word);
+
+    tui_textinput_free(input);
+}
+
+static void test_word_at_cursor_empty_input(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_word_chars(input,
+                                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
+
+    int word_start = -1;
+    char *word = tui_textinput_word_at_cursor(input, &word_start);
+    assert(word == NULL);
+    assert(word_start == -1);
+
+    tui_textinput_free(input);
+}
+
+static void test_word_at_cursor_not_in_word(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_word_chars(input,
+                                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
+
+    send_string(input, "foo  "); /* two spaces after word */
+    /* cursor is on a space, not in a word */
+    int word_start = -1;
+    char *word = tui_textinput_word_at_cursor(input, &word_start);
+    assert(word == NULL);
+    assert(word_start == -1);
+
+    tui_textinput_free(input);
+}
+
+static void test_word_at_cursor_null_safe(void)
+{
+    int word_start = -1;
+    char *word = tui_textinput_word_at_cursor(NULL, &word_start);
+    assert(word == NULL);
+    assert(word_start == -1);
+}
+
+static void test_word_at_cursor_after_paren(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_word_chars(input,
+                                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
+
+    send_string(input, "(str");
+    int word_start = -1;
+    char *word = tui_textinput_word_at_cursor(input, &word_start);
+    assert(word != NULL);
+    assert(strcmp(word, "str") == 0);
+    assert(word_start == 1);
+    free(word);
 
     tui_textinput_free(input);
 }
@@ -1250,6 +1368,16 @@ int main(void)
     RUN_TEST(test_tab_word_start);
     RUN_TEST(test_tab_with_shift_is_noop);
     RUN_TEST(test_insert_completion);
+
+    /* word_at_cursor */
+    RUN_TEST(test_word_at_cursor_simple);
+    RUN_TEST(test_word_at_cursor_mid_word);
+    RUN_TEST(test_word_at_cursor_after_space);
+    RUN_TEST(test_word_at_cursor_empty_input);
+    RUN_TEST(test_word_at_cursor_not_in_word);
+    RUN_TEST(test_word_at_cursor_null_safe);
+    RUN_TEST(test_word_at_cursor_after_paren);
+
     RUN_TEST(test_view_output);
     RUN_TEST(test_set_cursor);
     RUN_TEST(test_line_count);
