@@ -18,6 +18,31 @@ EXTRA_DIST = \
     COPYING \
     .clang-format
 
+# Keep the version file in sync with the current git state (or BOBA_VERSION
+# from configure).  The recipe always runs but only rewrites the file when
+# the version actually changes, so a subsequent autoreconf picks up the right
+# PACKAGE_VERSION without needing to run autogen.sh first.
+.PHONY: version_force
+version: version_force
+	@v=`"$(srcdir)/build-aux/git-version.sh" "$(srcdir)" 2>/dev/null`; \
+	test -n "$$v" || v="$(BOBA_VERSION)"; \
+	test -n "$$v" || v="unknown"; \
+	printf '%s' "$$v" > "$(srcdir)/version.tmp"; \
+	if cmp -s "$(srcdir)/version.tmp" "$(srcdir)/version" 2>/dev/null; then \
+	  rm -f "$(srcdir)/version.tmp"; \
+	else \
+	  mv "$(srcdir)/version.tmp" "$(srcdir)/version"; \
+	  echo "  GEN      $@ ($$v)"; \
+	fi
+version_force:
+
+all-local: version
+
+# Stamp the version file in the dist tarball so tarball builds produce the
+# correct version without .git.
+dist-hook:
+	printf '%s' '$(BOBA_VERSION)' > "$(distdir)/version"
+
 # Format target — runs clang-format on C/C++, shfmt on shell, prettier on Markdown.
 .PHONY: format
 format:

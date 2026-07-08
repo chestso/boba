@@ -5,6 +5,6 @@ includedir=@includedir@
 
 Name: boba
 Description: Terminal UI library using the Elm Architecture
-Version: @PACKAGE_VERSION@
+Version: @BOBA_VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -lboba @SOCKET_LIBS@
