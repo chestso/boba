@@ -11,6 +11,7 @@ libboba_a_SOURCES = \
     ansi_sequences.c \
     unicode.c \
     base64.c \
+    base64.h \
     style.c \
     components/textinput.c \
     components/viewport.c \
