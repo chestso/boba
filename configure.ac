@@ -25,6 +25,14 @@ AS_IF([test -z "$BOBA_VERSION"],
 AC_SUBST([BOBA_VERSION])
 AC_MSG_NOTICE([boba version: $BOBA_VERSION])
 
+dnl Derive the automake VERSION (and thus the dist tarball name and the
+dnl PACKAGE_VERSION/VERSION macros in config.h) from the version recomputed
+dnl above, not the one baked into configure by autoreconf.  Without this,
+dnl `make dist` after a tag still names the tarball with the autoreconf-time
+dnl version, so shipping a new release requires re-running autogen.sh.
+PACKAGE_VERSION="$BOBA_VERSION"
+VERSION="$BOBA_VERSION"
+
 dnl Detect target platform
 case "$host_os" in
   mingw*|msys*) host_windows=yes ;;
