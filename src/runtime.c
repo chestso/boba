@@ -597,6 +597,58 @@ void tui_runtime_finish_inline(TuiRuntime *runtime)
     fflush(fp);
 }
 
+/* Clear inline frame: erase the rendered frame IN PLACE and leave the
+ * cursor at frame row 0, col 0 — the area the frame occupied becomes
+ * free for direct application output, which overwrites it (so no
+ * stale frame lines are abandoned in the scrollback). Unlike
+ * finish_inline the cursor does NOT move below the frame.
+ *
+ * inline_lines_rendered is deliberately KEPT: the erased rows still
+ * count as previously-rendered lines, so the next flush's stale-line
+ * erase also wipes blank rows left below a shrunk frame. Only
+ * inline_cursor_row resets (the cursor is now on frame row 0). */
+void tui_runtime_clear_inline(TuiRuntime *runtime)
+{
+    if (!runtime || !runtime->in_inline_mode)
+        return;
+
+    FILE *fp = runtime->output;
+    int lines = runtime->inline_lines_rendered;
+    if (lines <= 0) {
+        runtime->inline_cursor_row = 0;
+        return;
+    }
+
+    /* Cursor-up to frame row 0 */
+    if (runtime->inline_cursor_row > 0) {
+        char up_buf[16];
+        ansi_format_cursor_up(up_buf, sizeof(up_buf),
+                              runtime->inline_cursor_row);
+        fputs(up_buf, fp);
+    }
+
+    /* Erase each rendered row, walking down to the last one */
+    for (int i = 0; i < lines; i++) {
+        fputs("\r", fp);
+        fputs(EL_TO_END, fp);
+        if (i < lines - 1)
+            fputs("\r\n", fp);
+    }
+
+    /* Walk back up to frame row 0 so app output overwrites the area
+     * from its top (finish_inline's caller instead prints BELOW the
+     * frame; this one prints over it). */
+    if (lines > 1) {
+        char up_buf[16];
+        ansi_format_cursor_up(up_buf, sizeof(up_buf), lines - 1);
+        fputs(up_buf, fp);
+    }
+
+    runtime->inline_cursor_row = 0;
+
+    fflush(fp);
+}
+
 /* Render view, reconcile terminal mode against the View's declarations,
  * and write the resulting bytes.
  *

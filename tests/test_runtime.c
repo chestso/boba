@@ -1559,6 +1559,144 @@ static void test_finish_inline_resets_tracking(void)
     fclose(fp);
 }
 
+/* --- tui_runtime_clear_inline tests --- */
+
+/* clear_inline erases the frame in place: cursor-up to frame row 0,
+ * EL each rendered row, cursor left at frame row 0 col 0 — the area
+ * is free for direct application output (which overwrites the old
+ * frame). inline_lines_rendered is KEPT so the next flush's stale-
+ * line erase still wipes leftover blank rows below a shrunk frame;
+ * only the cursor row resets. */
+static void test_clear_inline_erases_frame_and_keeps_lines(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+
+    /* 3 rendered lines, cursor on row 1 (middle) */
+    tui_runtime_flush(rt);
+    fflush(fp);
+    rt->inline_cursor_row = 1;
+    size_t pos = ftell(fp);
+
+    tui_runtime_clear_inline(rt);
+    fflush(fp);
+
+    /* Cursor-up 1 first (from row 1 to frame row 0), not 2 */
+    assert(strncmp(outbuf + pos, "\x1b[1A", 4) == 0);
+
+    /* Three EL erases with \r\n between them, then cursor-up 2 back
+     * to frame row 0 (last erase ends on row 2). */
+    const char *p = outbuf + pos;
+    int el_count = 0;
+    while ((p = strstr(p, "\r\x1b[K")) != NULL) {
+        el_count++;
+        p += 3;
+    }
+    assert(el_count == 3);
+    assert(strstr(outbuf + pos, "\x1b[2A") != NULL);
+
+    /* Tracking: lines KEPT, cursor row reset */
+    assert(rt->inline_lines_rendered == 3);
+    assert(rt->inline_cursor_row == 0);
+
+    /* Next flush renders at the cursor (frame row 0) — no cursor-up */
+    tui_runtime_flush(rt);
+    fflush(fp);
+    assert(strstr(outbuf + pos, "\x1b[3A") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* clear_inline keeps prev_lines semantics: after erasing a 3-line
+ * frame and printing 1 line of app output, the next flush of a
+ * 1-line frame still erases the 2 leftover rows below it. */
+static TuiView oneline_view(const TuiModel *model, DynamicBuffer *out)
+{
+    (void)model;
+    dynamic_buffer_append_str(out, "single line frame");
+    TuiView v = tui_view_default(out);
+    v.render_mode = TUI_RENDER_INLINE;
+    return v;
+}
+
+static TuiComponent oneline_component = {
+    .init = view_stub_init,
+    .update = noop_update,
+    .view = oneline_view,
+    .free = test_free,
+};
+
+static void test_clear_inline_stale_erase_still_fires(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+
+    tui_runtime_flush(rt); /* 3 lines */
+    fflush(fp);
+
+    tui_runtime_clear_inline(rt);
+    fputs("printed one line\r\n", fp); /* app output, 1 row */
+    fflush(fp);
+    size_t pos = ftell(fp);
+
+    /* Now a 1-line frame renders below the printed line; tracking
+     * still remembers the erased 3 lines (carried over by the app). */
+    TuiRuntime *rt2 = tui_runtime_create(&oneline_component, NULL, &cfg);
+    rt2->inline_lines_rendered = 3; /* carried from the erased frame */
+    rt2->inline_cursor_row = 0;
+    tui_runtime_flush(rt2);
+    fflush(fp);
+
+    /* 3 > 1 → two stale \r\n+EL rows erased below the new frame */
+    const char *q = outbuf + pos;
+    int stale = 0;
+    while ((q = strstr(q, "\r\n\x1b[K")) != NULL) {
+        stale++;
+        q += 3;
+    }
+    assert(stale == 2);
+
+    tui_runtime_free(rt);
+    tui_runtime_free(rt2);
+    fclose(fp);
+}
+
+/* clear_inline before any inline flush: no-op (nothing to erase),
+ * tracking untouched so a later flush renders from row 0. */
+static void test_clear_inline_before_first_flush_noop(void)
+{
+    char outbuf[2048];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp, .raw_mode = 0 };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+
+    reset_view_stub();
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    size_t pos = ftell(fp);
+    tui_runtime_clear_inline(rt);
+    fflush(fp);
+
+    assert(rt->inline_lines_rendered == 0);
+    assert(ftell(fp) == pos); /* nothing written */
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
 static void test_stop_inline_moves_cursor_down(void)
 {
     char outbuf[2048];
@@ -1816,6 +1954,9 @@ int main(void)
     RUN_TEST(test_finish_inline_moves_past_content_from_last_row);
     RUN_TEST(test_finish_inline_moves_past_content_from_first_row);
     RUN_TEST(test_finish_inline_resets_tracking);
+    RUN_TEST(test_clear_inline_erases_frame_and_keeps_lines);
+    RUN_TEST(test_clear_inline_stale_erase_still_fires);
+    RUN_TEST(test_clear_inline_before_first_flush_noop);
     RUN_TEST(test_stop_inline_moves_cursor_down);
     RUN_TEST(test_stop_inline_no_exit_alt_screen);
     RUN_TEST(test_stop_inline_no_decrc);

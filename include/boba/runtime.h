@@ -222,6 +222,15 @@ void tui_runtime_stop(TuiRuntime *runtime);
  * renders on a fresh line. Called before writing output directly. */
 void tui_runtime_finish_inline(TuiRuntime *runtime);
 
+/* Clear inline frame: erase the rendered frame in place (cursor-up to
+ * frame row 0, EL each rendered row) and leave the cursor at frame
+ * row 0, col 0 — the area the frame occupied is free for direct
+ * application output, which overwrites it instead of abandoning stale
+ * frame lines in the scrollback. inline_lines_rendered is KEPT so the
+ * next flush's stale-line erase still wipes leftover blank rows; only
+ * the cursor row resets. No-op before the first inline flush. */
+void tui_runtime_clear_inline(TuiRuntime *runtime);
+
 /* Render view and write to output (with cursor hide/show) */
 void tui_runtime_flush(TuiRuntime *runtime);
 
