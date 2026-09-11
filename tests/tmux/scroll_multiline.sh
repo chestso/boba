@@ -24,7 +24,7 @@ tmux_wait_for "$SESSION" '^>'
 # than the 40-col pane can fit; the cursor is at codepoint 79 of its line.
 # The sentinel doubles as a sync marker: when 'X' is rendered we know the
 # entire send-keys batch has been processed.
-tmux_send "$SESSION" "$(printf 'a%.0s' $(seq 78))X"
+tmux_send "$SESSION" "$(awk 'BEGIN { for (i = 0; i < 78; i++) printf "a"; }')X"
 tmux_wait_for "$SESSION" 'X'
 
 # 1) Cursor must be inside the 40-col window. Pre-fix it would have been

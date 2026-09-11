@@ -47,11 +47,13 @@ tmux_kill()
 }
 
 # Poll capture-pane until the regex matches or timeout (in ms) elapses.
+# Plain seconds only — BSD date (macOS) has no %N. The +1s slack covers the
+# truncated sub-second part; sleep 0.05 keeps matching latency low.
 tmux_wait_for()
 {
     local session=$1 regex=$2 timeout_ms=${3:-2000}
-    local deadline=$(( $(date +%s%3N) + timeout_ms ))
-    while [ "$(date +%s%3N)" -lt "$deadline" ]; do
+    local deadline=$(( $(date +%s) + ( timeout_ms / 1000 ) + 1 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
         if tmux_capture "$session" | grep -qE -- "$regex"; then
             return 0
         fi
@@ -95,8 +97,10 @@ assert_pane_lacks()
 assert_cursor_x_lt()
 {
     local session=$1 max=$2
-    local x y
-    read -r x y < <(tmux_cursor "$session")
+    local cursor x
+    # POSIX-safe: no process substitution (macOS /bin/sh is POSIX bash 3.2).
+    cursor=$(tmux_cursor "$session")
+    x=${cursor%% *}
     if [ -z "$x" ] || [ "$x" -ge "$max" ]; then
         echo "assert_cursor_x_lt failed: cursor_x=$x not < $max" >&2
         dump_pane "$session"
