@@ -48,8 +48,13 @@ typedef struct TuiListPopup
     /* Title (owned, may be NULL) */
     char *title;
 
-    /* Filter prefix for title display (owned, may be NULL) */
-    char *filter_prefix;
+    /* Filter query (owned, may be NULL). NULL/empty = no filtering.
+     * When set, the popup shows only matching items (filter-as-view:
+     * the item array is untouched; rendering, selection, and scrolling
+     * run over the filtered view). Space/tab-separated tokens with AND
+     * semantics; matching is case-insensitive substring, scan-only
+     * (zero allocations per keystroke). */
+    char *filter;
 
     /* Colors (all default to NONE = inherit terminal defaults).
      * Set via tui_list_popup_set_colors() using CharmTone values. */
@@ -105,7 +110,14 @@ int tui_list_popup_word_start(const TuiListPopup *popup);
 void tui_list_popup_set_size(TuiListPopup *popup, int width, int max_visible);
 void tui_list_popup_set_terminal_size(TuiListPopup *popup, int w, int h);
 void tui_list_popup_set_title(TuiListPopup *popup, const char *title);
-void tui_list_popup_set_filter(TuiListPopup *popup, const char *prefix);
+void tui_list_popup_set_filter(TuiListPopup *popup, const char *query);
+
+/* Filtered-view queries. With no filter set (or an empty one) the
+ * filtered view IS the full list, so these are always safe to call.
+ * tui_list_popup_filtered_text returns a borrowed pointer into the
+ * popup's owned items — valid until the next non-const call. */
+int tui_list_popup_filtered_count(const TuiListPopup *popup);
+const char *tui_list_popup_filtered_text(const TuiListPopup *popup, int index);
 
 /* Set colors for popup elements. Pass TUI_COLOR_NONE for any element
  * to use terminal defaults. All arguments are copied (no allocation). */

@@ -287,6 +287,197 @@ static void test_set_filter(void)
     tui_list_popup_free(p);
 }
 
+/* ---------- filter-as-view ---------- */
+
+/* The filter is a VIEW over the full list: items stay in place
+ * (selected_text indexes the true item, not a copy), the popup
+ * renders/skips only matches, and selection runs over the filtered
+ * view. Zero copies per keystroke — matching is scan-only. */
+
+static void test_filter_matches_are_case_insensitive_substrings(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "Beta", "gamma", "alphabet" };
+    tui_list_popup_set_items(p, items, 4);
+
+    tui_list_popup_set_filter(p, "ALP");
+    assert(tui_list_popup_filtered_count(p) == 2);
+    assert(strcmp(tui_list_popup_filtered_text(p, 0), "alpha") == 0);
+    assert(strcmp(tui_list_popup_filtered_text(p, 1), "alphabet") == 0);
+
+    tui_list_popup_set_filter(p, "zzz");
+    assert(tui_list_popup_filtered_count(p) == 0);
+
+    tui_list_popup_set_filter(p, NULL);
+    assert(tui_list_popup_filtered_count(p) == 4);
+    tui_list_popup_free(p);
+}
+
+static void test_filter_no_filter_sees_all_items(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "a", "b" };
+    tui_list_popup_set_items(p, items, 2);
+    assert(tui_list_popup_filtered_count(p) == 2);
+    assert(strcmp(tui_list_popup_filtered_text(p, 1), "b") == 0);
+    tui_list_popup_free(p);
+}
+
+static void test_filter_selection_resets_to_first_match(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "apple", "banana", "grape" };
+    tui_list_popup_set_items(p, items, 3);
+    tui_list_popup_show(p, 0);
+    tui_list_popup_move_bottom(p); /* selected = 2 (grape) */
+
+    tui_list_popup_set_filter(p, "ap");
+    /* matches: apple, grape — selection snaps to first match */
+    assert(tui_list_popup_selected_text(p) != NULL);
+    assert(strcmp(tui_list_popup_selected_text(p), "apple") == 0);
+    assert(tui_list_popup_selected_index(p) == 0);
+
+    /* Navigation cycles the filtered view (apple -> grape -> apple) */
+    assert(tui_list_popup_move_down(p) == 1);
+    assert(strcmp(tui_list_popup_selected_text(p), "grape") == 0);
+    assert(tui_list_popup_move_down(p) == 1);
+    assert(strcmp(tui_list_popup_selected_text(p), "apple") == 0);
+
+    tui_list_popup_free(p);
+}
+
+static void test_filter_empty_filter_sees_all_items(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta" };
+    tui_list_popup_set_items(p, items, 2);
+    tui_list_popup_set_filter(p, "b");
+    tui_list_popup_set_filter(p, "");
+    assert(tui_list_popup_filtered_count(p) == 2);
+    tui_list_popup_free(p);
+}
+
+static void test_filter_multi_token_is_and_semantics(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "qwen3-coder:latest", "Qwen Vision", "coder" };
+    tui_list_popup_set_items(p, items, 3);
+
+    /* Space-separated tokens, ALL must match (case-insensitive). */
+    tui_list_popup_set_filter(p, "qwen co");
+    assert(tui_list_popup_filtered_count(p) == 1);
+    assert(strcmp(tui_list_popup_filtered_text(p, 0),
+                  "qwen3-coder:latest") == 0);
+
+    /* Tabs separate tokens too. */
+    tui_list_popup_set_filter(p, "vision\tq");
+    assert(tui_list_popup_filtered_count(p) == 1);
+    assert(strcmp(tui_list_popup_filtered_text(p, 0), "Qwen Vision") == 0);
+
+    tui_list_popup_free(p);
+}
+
+static void test_filter_set_items_clears_filter(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta" };
+    tui_list_popup_set_items(p, items, 2);
+    tui_list_popup_set_filter(p, "alp");
+    const char *next[] = { "x", "y", "z" };
+    tui_list_popup_set_items(p, next, 3);
+    /* New list: the old filter must not silently hide items. */
+    assert(tui_list_popup_filtered_count(p) == 3);
+    tui_list_popup_free(p);
+}
+
+static void test_filter_view_renders_only_matches(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta", "alphabet" };
+    tui_list_popup_set_items(p, items, 3);
+    tui_list_popup_set_terminal_size(p, 80, 24);
+    tui_list_popup_show(p, 0);
+    tui_list_popup_set_filter(p, "ph"); /* alpha, alphabet */
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_list_popup_view(p, buf);
+    const char *data = buf_data(buf);
+    assert(strstr(data, "alpha") != NULL);
+    assert(strstr(data, "alphabet") != NULL);
+    assert(strstr(data, "beta") == NULL);
+    /* Title carries the query and match count: models: "ph" (2/3) */
+    assert(strstr(data, "\"ph\"") != NULL);
+    assert(strstr(data, "(2/3)") != NULL);
+    dynamic_buffer_destroy(buf);
+    tui_list_popup_free(p);
+}
+
+static void test_filter_view_empty_result_renders_nothing(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta" };
+    tui_list_popup_set_items(p, items, 2);
+    tui_list_popup_set_terminal_size(p, 80, 24);
+    tui_list_popup_show(p, 0);
+    tui_list_popup_set_filter(p, "zzz");
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_list_popup_view(p, buf);
+    assert(dynamic_buffer_len(buf) == 0);
+    dynamic_buffer_destroy(buf);
+    tui_list_popup_free(p);
+}
+
+static void test_filter_no_match_selection_is_none(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta" };
+    tui_list_popup_set_items(p, items, 2);
+    tui_list_popup_show(p, 0);
+    tui_list_popup_set_filter(p, "zzz");
+    assert(tui_list_popup_selected_index(p) == -1);
+    assert(tui_list_popup_selected_text(p) == NULL);
+
+    /* Reopening the world (filter cleared) restores a selection. */
+    tui_list_popup_set_filter(p, NULL);
+    assert(tui_list_popup_selected_text(p) != NULL);
+    tui_list_popup_free(p);
+}
+
+static void test_filter_500_items_round_trip(void)
+{
+    /* The picker's scale test: 500 items, filter, view, selection
+     * round-trips — selection must always index the true item. */
+    TuiListPopup *p = tui_list_popup_create();
+    char **items = malloc(500 * sizeof(char *));
+    for (int i = 0; i < 500; i++) {
+        items[i] = malloc(32);
+        snprintf(items[i], 32, "model-%03d", i);
+    }
+    tui_list_popup_set_items(p, (const char *const *)items, 500);
+    tui_list_popup_set_terminal_size(p, 80, 24);
+    tui_list_popup_show(p, 0);
+
+    tui_list_popup_set_filter(p, "model-4");
+    assert(tui_list_popup_filtered_count(p) == 100); /* 400-499 */
+    tui_list_popup_move_bottom(p);
+    assert(strcmp(tui_list_popup_selected_text(p), "model-499") == 0);
+    assert(tui_list_popup_move_top(p) == 1);
+    assert(strcmp(tui_list_popup_selected_text(p), "model-400") == 0);
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_list_popup_view(p, buf);
+    assert(strstr(buf_data(buf), "model-400") != NULL);
+    assert(strstr(buf_data(buf), "model-499") == NULL); /* only 8 rows fit */
+    assert(strstr(buf_data(buf), "(100/500)") != NULL);
+    dynamic_buffer_destroy(buf);
+
+    for (int i = 0; i < 500; i++)
+        free(items[i]);
+    free(items);
+    tui_list_popup_free(p);
+}
+
 /* ---------- rendering ---------- */
 
 static void test_view_hidden_when_not_visible(void)
@@ -435,6 +626,16 @@ int main(void)
     RUN_TEST(test_set_terminal_size);
     RUN_TEST(test_set_title);
     RUN_TEST(test_set_filter);
+    RUN_TEST(test_filter_matches_are_case_insensitive_substrings);
+    RUN_TEST(test_filter_no_filter_sees_all_items);
+    RUN_TEST(test_filter_selection_resets_to_first_match);
+    RUN_TEST(test_filter_empty_filter_sees_all_items);
+    RUN_TEST(test_filter_multi_token_is_and_semantics);
+    RUN_TEST(test_filter_set_items_clears_filter);
+    RUN_TEST(test_filter_view_renders_only_matches);
+    RUN_TEST(test_filter_view_empty_result_renders_nothing);
+    RUN_TEST(test_filter_no_match_selection_is_none);
+    RUN_TEST(test_filter_500_items_round_trip);
 
     /* rendering */
     RUN_TEST(test_view_hidden_when_not_visible);
