@@ -62,6 +62,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      # mingw-w64-ucrt-x86_64-make only ships mingw32-make.exe; the MSYS
+      # `make` package is what provides `make` on PATH (see nevermore).
+      # git is needed for autogen.sh's version regeneration.
       - name: Set up MSYS2 UCRT64
         uses: msys2/setup-msys2@v2
         with:
@@ -71,8 +74,6 @@ jobs:
             autoconf
             automake
             libtool
-            # mingw-w64-ucrt-x86_64-make only ships mingw32-make.exe; the MSYS
-            # package is what provides `make` on PATH (see nevermore).
             make
             git
 
