@@ -97,7 +97,10 @@ jobs:
 
   macos:
     name: macOS (arm64)
-    runs-on: macos-latest
+    # macos-15 pinned instead of macos-latest (= macos-26 since July 2026):
+    # the macos-26 image/fleet is newest and most contended, with long
+    # queues; Sequoia's fleet is mature and turns around much faster.
+    runs-on: macos-15
     timeout-minutes: 15
 
     steps:
