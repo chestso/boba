@@ -67,8 +67,14 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: autoconf automake libtool
-          pacboy: toolchain:p
+          install: |-
+            autoconf
+            automake
+            libtool
+            # mingw-w64-ucrt-x86_64-make only ships mingw32-make.exe; the MSYS
+            # package is what provides `make` on PATH (see nevermore).
+            make
+            git
 
       - name: Build + test (unit only; tmux e2e is Unix-only)
         run: ./scripts/build-ucrt64.sh

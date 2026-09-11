@@ -29,15 +29,28 @@ if git -C "$srcdir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 		echo "${base}${dirty}"
 		exit 0
 	fi
-	count=$(git -C "$srcdir" rev-list --count HEAD 2>/dev/null || echo 0)
-	hash=$(git -C "$srcdir" rev-parse --short HEAD 2>/dev/null || echo unknown)
-	echo "0.0.${count}-${hash}${dirty}"
+	rev=$(git -C "$srcdir" rev-list --count HEAD 2>/dev/null || echo 0)
+	sha=$(git -C "$srcdir" rev-parse --short HEAD 2>/dev/null || echo unknown)
+	case "$rev" in
+	'' | *[!0-9]*) rev=0 ;; # guard: a broken git must not yield garbage
+	esac
+	case "$sha" in
+	'' | unknown) sha=unknown ;; # non-empty guaranteed below either way
+	esac
+	echo "0.0.${rev}-${sha}${dirty}"
 	exit 0
 fi
 
-if [ -s "$srcdir/version" ]; then
-	cat "$srcdir/version"
-	exit 0
+if test -f "$srcdir/version"; then
+	# An empty (or whitespace-only) file must not poison AC_INIT:
+	# m4_esyscmd_s on empty output yields an empty version argument
+	# and configure dies with "should be called with package and
+	# version arguments". Fall through to the literal instead.
+	v=$(cat "$srcdir/version")
+	if test -n "$v"; then
+		echo "$v"
+		exit 0
+	fi
 fi
 
 echo "0.0.0-unknown"
