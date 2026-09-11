@@ -637,12 +637,15 @@ the subscriptions function in C idiom:
 
 - **A function of app state, evaluated before every wait.** Like Elm's
   `subscriptions : Model -> Sub Msg` called after every update,
-  `fill_external_fds(out, cap, data)` is called before every wait and returns
-  what the app currently wants: an array of `{fd, TUI_FD_READ | TUI_FD_WRITE}`
-  entries (up to `TUI_EXTERNAL_FD_MAX` = 32). Interest or connection changes
-  need no subscribe/unsubscribe call — just return a different set next time.
-  The runtime reconciles the diff between waits (Unix: poll(2), POLLOUT
-  first-class; Windows: a per-slot WSAEVENT pool + rebind diff).
+  `fill_external_fds(out, cap, data)` is a callback the app defines once at
+  startup; the runtime invokes it before every wait and it returns what the
+  app currently wants: an array of `{fd, TUI_FD_READ | TUI_FD_WRITE}` entries
+  (up to `TUI_EXTERNAL_FD_MAX` = 32). It is the _runtime_ that re-evaluates it
+  each cycle — the app isn't asked to do anything per loop. Interest or
+  connection changes need no subscribe/unsubscribe call — just return a
+  different set next time; the runtime reconciles the diff between waits
+  (Unix: poll(2), POLLOUT first-class; Windows: a per-slot WSAEVENT pool +
+  rebind diff).
 
 - **One dispatch per fd with activity.** `on_external_ready(fd, ready, data)`
   fires once per fd with everything that fired, `ready` masked to the bits the
@@ -652,10 +655,57 @@ the subscriptions function in C idiom:
   perpetually-writable idle fd with WRITE declared busy-loops the runtime.
 
 - **C already has event loop primitives.** Callbacks compose directly with
-  `poll()`, signal handlers, and threads. A declarative `Sub` value layer
-  would need value semantics/ownership for composed subscriptions in C —
-  indirection without expressiveness. The pull-per-wait fill callback IS
-  the subscriptions function, spelled idiomatically.
+  `poll()`, signal handlers, and threads. Keep the distinction clear: the
+  _wait_ is event-driven — a blocking `poll(2)` with no busy-looping (or a
+  blocking `WaitForMultipleObjects` on Windows) sits at the heart of the loop.
+  Only the _subscriptions_ are pull-based: `fill_external_fds` re-declares
+  the wanted set each cycle rather than mutating a registered pool, so state
+  changes flow through the returned array with no subscribe/unsubscribe
+  lifecycle. A declarative `Sub` value layer would need value
+  semantics/ownership for composed subscriptions in C — indirection without
+  expressiveness. The pull-per-wait fill callback IS the subscriptions
+  function, spelled idiomatically.
+
+A minimal example — wait on a socket and a timer, state-driven:
+
+```c
+/* App-defined event data (value is app-owned; free it in update()) */
+typedef struct { int fd; unsigned bits; } FdReady;
+
+/* Model-derived interest: what do we want to wait on? */
+static size_t
+fill_external_fds(TuiExternalFd *out, size_t cap, void *user_data)
+{
+    App *app = user_data;
+    size_t n = 0;
+    if (app->sock >= 0)                          /* only when connected */
+        out[n++] = (TuiExternalFd){ app->sock, TUI_FD_READ };
+    if (app->want_write)                          /* drop WRITE once drained */
+        out[n++] = (TuiExternalFd){ app->sock, TUI_FD_WRITE };
+    return n;
+}
+
+/* Per-fd dispatch; forward into the model as a custom message */
+static void
+on_external_ready(int fd, unsigned ready, void *user_data)
+{
+    App *app = user_data;
+    FdReady *ev = malloc(sizeof *ev);
+    ev->fd = fd;
+    ev->bits = ready & (TUI_FD_READ | TUI_FD_WRITE);
+    tui_runtime_post(app->rt, tui_msg_custom(TUI_MSG_CUSTOM_BASE, ev));
+}
+
+/* Wire up once at startup */
+cfg.fill_external_fds   = fill_external_fds;
+cfg.on_external_ready   = on_external_ready;
+cfg.get_tick_timeout_ms = get_tick_timeout_ms;   /* e.g. 500ms */
+```
+
+The app writes the callbacks once; `tui_runtime_run()` re-invokes
+`fill_external_fds` before every wait, dispatching `on_external_ready` per fd
+that fires. The returned `TuiExternalFd` array is filled in place by the
+callback and consumed by the runtime; nothing is registered or unregistered.
 
 ### Input Parsing
 
