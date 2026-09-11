@@ -28,22 +28,26 @@ jobs:
             autoconf automake libtool make pkg-config \
             tmux
 
-      - name: Build
+      # distcheck is the whole GNU/Linux build+test gate: the packed tarball
+      # is unpacked, configured, built, unit- and tmux-tested, installed
+      # under DESTDIR, uninstalled and distcleaned — so a packaging miss
+      # (EXTRA_DIST etc.) fails every push, not just at release time.
+      - name: Build + test via distcheck
         run: |
           ./autogen.sh
           mkdir build && cd build
           ../configure
-          make -j"$(nproc)"
-
-      - name: Run tests
-        run: make -C build check
+          make distcheck
 
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-logs
-          path: build/tests/*.log
+          path: |
+            build/boba-*/_build/sub/tests/*.log
+            build/boba-*/_build/sub/config.log
+            build/boba-*/config.log
           retention-days: 7
 
   windows:
@@ -141,12 +145,14 @@ jobs:
           sudo apt-get install -y \
             autoconf automake libtool make pkg-config
 
+      # The tarball is already proven by the linux job's distcheck on the
+      # same commit; this just harvests it for the release assets.
       - name: Build dist tarball
         run: |
           ./autogen.sh
           mkdir build && cd build
           ../configure
-          make distcheck
+          make dist
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
