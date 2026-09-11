@@ -146,7 +146,7 @@ jobs:
           ./autogen.sh
           mkdir build && cd build
           ../configure
-          make dist
+          make distcheck
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
