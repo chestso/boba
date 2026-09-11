@@ -102,9 +102,12 @@ tui_runtime_run(rt);  /* Blocks until quit */
 tui_runtime_free(rt);
 ```
 
-The runtime handles SIGWINCH (resize), SIGINT, stdin polling, and optional external FD
-polling via `TuiRuntimeConfig` callbacks (`on_tick`, `on_resize`, `get_external_fd`,
-`on_external_ready`, `on_stdin_processed`, `get_tick_timeout_ms`).
+The runtime handles SIGWINCH (resize), SIGINT, stdin polling, and external-FD
+subscriptions via `TuiRuntimeConfig` callbacks (`on_tick`, `on_resize`,
+`fill_external_fds`, `on_external_ready`, `on_stdin_processed`,
+`get_tick_timeout_ms`): declare up to `TUI_EXTERNAL_FD_MAX` (32) sockets
+per wait with per-fd read/write interest, re-declared before every wait
+(Elm subscriptions in C idiom — no register/unregister lifecycle).
 
 On Windows, the event loop uses `WaitForMultipleObjects` with a `CreateEvent` wakeup
 mechanism. It auto-detects ConPTY pipe handles vs real console handles: under ConPTY
@@ -625,21 +628,34 @@ same use cases through runtime config callbacks:
 | ------------------------------ | ---------------------------------------------------------------- |
 | `Time.every 1000 Tick`         | `on_tick` + `get_tick_timeout_ms`                                |
 | Window resize                  | Automatic `TUI_MSG_WINDOW_SIZE` + `on_resize`                    |
-| Ports / external event sources | `get_external_fd` + `on_external_ready`                          |
+| Ports / external event sources | `fill_external_fds` + `on_external_ready`                        |
 | Post-input hooks               | `on_stdin_processed`                                             |
 | Any external source            | `tui_runtime_post()` from callbacks, threads, or signal handlers |
 
-Two properties of terminal programs make this a good fit:
+External FDs follow the Elm subscriptions model directly — the fill callback is
+the subscriptions function in C idiom:
 
-- **Event sources are static.** A terminal program listens to stdin, signals, and
-  maybe one external FD. These don't change based on model state, so a config struct
-  set once at startup matches the reality better than a function re-evaluated after
-  every update.
+- **A function of app state, evaluated before every wait.** Like Elm's
+  `subscriptions : Model -> Sub Msg` called after every update,
+  `fill_external_fds(out, cap, data)` is called before every wait and returns
+  what the app currently wants: an array of `{fd, TUI_FD_READ | TUI_FD_WRITE}`
+  entries (up to `TUI_EXTERNAL_FD_MAX` = 32). Interest or connection changes
+  need no subscribe/unsubscribe call — just return a different set next time.
+  The runtime reconciles the diff between waits (Unix: poll(2), POLLOUT
+  first-class; Windows: a per-slot WSAEVENT pool + rebind diff).
+
+- **One dispatch per fd with activity.** `on_external_ready(fd, ready, data)`
+  fires once per fd with everything that fired, `ready` masked to the bits the
+  app declared (a failed connect arrives as `READ|WRITE`). Spurious wakeups
+  are allowed — re-check state (`getsockopt(SO_ERROR)` after connect
+  completes, EAGAIN-safe reads/writes). Clear `TUI_FD_WRITE` when drained; a
+  perpetually-writable idle fd with WRITE declared busy-loops the runtime.
 
 - **C already has event loop primitives.** Callbacks compose directly with
-  `select()`/`poll()`, signal handlers, and threads. A declarative subscription
-  layer would need an interpreter that adds indirection without adding
-  expressiveness for these use cases.
+  `poll()`, signal handlers, and threads. A declarative `Sub` value layer
+  would need value semantics/ownership for composed subscriptions in C —
+  indirection without expressiveness. The pull-per-wait fill callback IS
+  the subscriptions function, spelled idiomatically.
 
 ### Input Parsing
 

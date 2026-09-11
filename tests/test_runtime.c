@@ -13,6 +13,12 @@
 #include <string.h>
 
 #ifndef _WIN32
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #else
 #include <winsock2.h>
@@ -133,12 +139,19 @@ static TuiComponent noop_component = {
  * ======================================================================== */
 
 /* Dummy callbacks for config storage tests */
-static int dummy_get_fd(void *data)
+static size_t dummy_fill_fds(TuiExternalFd *out, size_t cap, void *data)
 {
     (void)data;
-    return -1;
+    (void)out;
+    (void)cap;
+    return 0;
 }
-static void dummy_on_ready(void *data) { (void)data; }
+static void dummy_on_ready(int fd, unsigned ready, void *data)
+{
+    (void)fd;
+    (void)ready;
+    (void)data;
+}
 static void dummy_on_tick(void *data) { (void)data; }
 static void dummy_on_resize(int w, int h, void *data)
 {
@@ -155,7 +168,7 @@ static void test_config_stores_callbacks(void)
 
     TuiRuntimeConfig cfg = {
         .output = stdout,
-        .get_external_fd = dummy_get_fd,
+        .fill_external_fds = dummy_fill_fds,
         .on_external_ready = dummy_on_ready,
         .on_tick = dummy_on_tick,
         .on_resize = dummy_on_resize,
@@ -167,7 +180,7 @@ static void test_config_stores_callbacks(void)
     assert(rt != NULL);
 
     /* Verify callbacks are stored in config */
-    assert(rt->config.get_external_fd == dummy_get_fd);
+    assert(rt->config.fill_external_fds == dummy_fill_fds);
     assert(rt->config.on_external_ready == dummy_on_ready);
     assert(rt->config.on_tick == dummy_on_tick);
     assert(rt->config.on_resize == dummy_on_resize);
@@ -293,7 +306,7 @@ static void test_null_callbacks_in_config(void)
 {
     TuiRuntimeConfig cfg = {
         .output = stdout,
-        .get_external_fd = NULL,
+        .fill_external_fds = NULL,
         .on_external_ready = NULL,
         .on_tick = NULL,
         .on_resize = NULL,
@@ -303,7 +316,7 @@ static void test_null_callbacks_in_config(void)
 
     TuiRuntime *rt = tui_runtime_create(&noop_component, NULL, &cfg);
     assert(rt != NULL);
-    assert(rt->config.get_external_fd == NULL);
+    assert(rt->config.fill_external_fds == NULL);
     assert(rt->config.event_data == NULL);
 
     tui_runtime_free(rt);
@@ -925,6 +938,400 @@ static void test_post_wakes_event_loop(void)
 
     WakeupModel *m = (WakeupModel *)tui_runtime_model(rt);
     assert(m->got_wakeup == 1);
+
+    /* Restore stdin */
+    dup2(orig_stdin, STDIN_FILENO);
+    close(orig_stdin);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+
+    s_tick_runtime = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+
+/* ========================================================================
+ * External-FD subscriptions: fill-count contract
+ * ======================================================================== */
+
+/* Fill callback returning 0 entries — the "no external fds" default.
+ * The runtime must tolerate a filler that declares nothing. */
+static size_t fill_zero(TuiExternalFd *out, size_t cap, void *data)
+{
+    (void)out;
+    (void)cap;
+    (void)data;
+    return 0;
+}
+
+/* Fill callback returning exactly 1 entry. */
+static int s_fill_one_fd = 51;
+static size_t fill_one(TuiExternalFd *out, size_t cap, void *data)
+{
+    (void)data;
+    assert(cap >= 1);
+    out[0].fd = s_fill_one_fd;
+    out[0].flags = TUI_FD_READ;
+    return 1;
+}
+
+/* Fill callback returning N (3) entries. */
+static size_t fill_three(TuiExternalFd *out, size_t cap, void *data)
+{
+    (void)data;
+    assert(cap >= 3);
+    out[0].fd = 60;
+    out[0].flags = TUI_FD_READ;
+    out[1].fd = 61;
+    out[1].flags = TUI_FD_WRITE;
+    out[2].fd = 62;
+    out[2].flags = TUI_FD_READ | TUI_FD_WRITE;
+    return 3;
+}
+
+/* Fill callback that returns MORE than cap — the runtime must clamp.
+ * (Defensive contract: consumer bugs shouldn't corrupt the wait set.) */
+static size_t fill_overflow(TuiExternalFd *out, size_t cap, void *data)
+{
+    (void)out;
+    (void)data;
+    return cap + 5;
+}
+
+static void test_fill_zero_in_run(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    int stdin_pipe[2];
+    assert(pipe(stdin_pipe) == 0);
+    int orig_stdin = dup(STDIN_FILENO);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+
+    /* Component quits on the first tick's posted message. */
+    s_tick_post_done = 0;
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .fill_external_fds = fill_zero,
+        .on_external_ready = dummy_on_ready,
+        .on_tick = tick_post_callback,
+    };
+    TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_tick_runtime = rt;
+
+    assert(tui_runtime_run(rt) == 0);
+    WakeupModel *m = (WakeupModel *)tui_runtime_model(rt);
+    assert(m->got_wakeup == 1);
+
+    dup2(orig_stdin, STDIN_FILENO);
+    close(orig_stdin);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+
+    s_tick_runtime = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+
+static void test_fill_overflow_clamps(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    int stdin_pipe[2];
+    if (pipe(stdin_pipe) == 0) {
+        int orig_stdin = dup(STDIN_FILENO);
+        dup2(stdin_pipe[0], STDIN_FILENO);
+
+        s_tick_post_done = 0;
+        TuiRuntimeConfig cfg = {
+            .raw_mode = 0,
+            .output = devnull,
+            .fill_external_fds = fill_overflow,
+            .on_tick = tick_post_callback,
+        };
+        TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
+        assert(rt != NULL);
+        s_tick_runtime = rt;
+
+        /* Run must terminate (no crash, no spin on garbage slots). */
+        assert(tui_runtime_run(rt) == 0);
+
+        dup2(orig_stdin, STDIN_FILENO);
+        close(orig_stdin);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+
+        s_tick_runtime = NULL;
+        tui_runtime_free(rt);
+    }
+    fclose(devnull);
+}
+
+/* Fill returning N entries: three slots survive a full wait cycle.
+ * Fds 60–62 are not open — poll reports POLLNVAL, which the runtime
+ * maps to READ|WRITE and dispatches to the (tolerant) sink. That is
+ * the contract: the runtime never crashes on a consumer's bad fds,
+ * and the sink is spurious-wakeup-safe. */
+static void test_fill_three_in_run(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    int stdin_pipe[2];
+    if (pipe(stdin_pipe) == 0) {
+        int orig_stdin = dup(STDIN_FILENO);
+        dup2(stdin_pipe[0], STDIN_FILENO);
+
+        s_tick_post_done = 0;
+        TuiRuntimeConfig cfg = {
+            .raw_mode = 0,
+            .output = devnull,
+            .fill_external_fds = fill_three,
+            .on_external_ready = dummy_on_ready,
+            .on_tick = tick_post_callback,
+        };
+        TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
+        assert(rt != NULL);
+        s_tick_runtime = rt;
+
+        assert(tui_runtime_run(rt) == 0);
+
+        dup2(orig_stdin, STDIN_FILENO);
+        close(orig_stdin);
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+
+        s_tick_runtime = NULL;
+        tui_runtime_free(rt);
+    }
+    fclose(devnull);
+}
+
+/* ========================================================================
+ * External-FD subscriptions: two-socket integration
+ * (nevermore's whole pattern in miniature)
+ *
+ * Socket A: non-blocking connect() with WRITE declared → sink fires
+ * with WRITE once connect completes → SO_ERROR == 0 → send. Interest
+ * then flips to READ by just returning different flags from the next
+ * fill — proving the per-wait re-declare contract (no re-arm API).
+ *
+ * Socket B: server writes while A is mid-flight, READ declared →
+ * per-fd dispatch on B independently of A's state.
+ * ======================================================================== */
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+typedef struct
+{
+    /* A: client connect socket; B: second client socket. */
+    int a_fd;
+    int b_fd;
+    /* Phase markers, asserted after the run. */
+    int a_write_ready;   /* sink saw WRITE on a_fd */
+    int a_so_error_zero; /* getsockopt(SO_ERROR) == 0 at that moment */
+    int a_sent;          /* payload sent after connect completed */
+    int a_read_back;     /* read the echoed payload back (post-flip) */
+    int b_read;          /* sink saw READ on b_fd and payload drained */
+    int done;            /* all phases complete */
+} TwoSockState;
+
+static TwoSockState s_two = { 0 };
+static int s_two_fill_calls = 0;
+
+/* Server child (forked): accept two connections; for conn A echo one
+ * byte; for conn B send one byte immediately. Then exit. Forked, not
+ * threaded, to keep the test's link footprint untouched. */
+static void two_sock_server_child(int listen_fd)
+{
+    int a = accept(listen_fd, NULL, NULL);
+    if (a < 0)
+        _exit(1);
+    int b = accept(listen_fd, NULL, NULL);
+    if (b < 0) {
+        close(a);
+        _exit(1);
+    }
+    close(listen_fd);
+
+    /* Wait for A's payload, echo it; then send B's hello. */
+    char c;
+    while (recv(a, &c, 1, 0) == 0)
+        ; /* spin-wait is fine: single byte, loopback */
+    send(a, &c, 1, 0);
+    send(b, "!", 1, 0);
+
+    close(a);
+    close(b);
+    _exit(0);
+}
+
+static size_t two_sock_fill(TuiExternalFd *out, size_t cap, void *data)
+{
+    (void)data;
+    s_two_fill_calls++;
+    size_t n = 0;
+    /* A: WRITE until connect completes AND payload sent; then READ
+     * (awaiting the echo). B: READ the whole time. */
+    if (!s_two.a_sent) {
+        if (n < cap) {
+            out[n].fd = s_two.a_fd;
+            out[n].flags = TUI_FD_WRITE;
+            n++;
+        }
+    } else if (!s_two.a_read_back) {
+        if (n < cap) {
+            out[n].fd = s_two.a_fd;
+            out[n].flags = TUI_FD_READ;
+            n++;
+        }
+    }
+    if (!s_two.b_read && n < cap) {
+        out[n].fd = s_two.b_fd;
+        out[n].flags = TUI_FD_READ;
+        n++;
+    }
+    return n;
+}
+
+static void two_sock_ready(int fd, unsigned ready, void *data)
+{
+    (void)data;
+    if (fd == s_two.a_fd && (ready & TUI_FD_WRITE)) {
+        if (s_two.a_write_ready)
+            return; /* spurious wakeup — allowed, ignore */
+        int soerr = -1;
+        socklen_t sl = sizeof(soerr);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
+        s_two.a_so_error_zero = (soerr == 0);
+        s_two.a_write_ready = 1;
+        /* Connect completed: send the payload. */
+        ssize_t n = send(fd, "x", 1, 0);
+        s_two.a_sent = (n == 1);
+    } else if (fd == s_two.a_fd && (ready & TUI_FD_READ)) {
+        if (s_two.a_sent && !s_two.a_read_back) {
+            char c = 0;
+            ssize_t n = recv(fd, &c, 1, 0);
+            s_two.a_read_back = (n == 1 && c == 'x');
+        }
+    } else if (fd == s_two.b_fd && (ready & TUI_FD_READ)) {
+        if (!s_two.b_read) {
+            char c = 0;
+            ssize_t n = recv(fd, &c, 1, 0);
+            s_two.b_read = (n == 1 && c == '!');
+        }
+    }
+
+    /* All phases done: quit via posted message. */
+    if (s_two.a_write_ready && s_two.a_so_error_zero && s_two.a_sent &&
+        s_two.a_read_back && s_two.b_read && !s_two.done) {
+        s_two.done = 1;
+        TuiMsg msg = tui_msg_custom(WAKEUP_MSG_TYPE, NULL);
+        tui_runtime_post(s_tick_runtime, msg);
+    }
+}
+
+/* Watchdog tick: quit only if the two-socket pattern failed to
+ * complete in ~100 ticks (10s) — a deadlock guard, not the exit path
+ * (the exit path is two_sock_ready posting the done message). */
+static int s_two_tick_count = 0;
+static void two_sock_tick(void *data)
+{
+    (void)data;
+    if (++s_two_tick_count > 100) {
+        TuiMsg msg = tui_msg_custom(WAKEUP_MSG_TYPE, NULL);
+        tui_runtime_post(s_tick_runtime, msg);
+    }
+}
+
+static void test_two_socket_subscriptions(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    /* Replace stdin with a pipe so it doesn't EOF under make check */
+    int stdin_pipe[2];
+    assert(pipe(stdin_pipe) == 0);
+    int orig_stdin = dup(STDIN_FILENO);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+
+    /* Loopback listener on an ephemeral port. */
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listen_fd >= 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    assert(listen(listen_fd, 4) == 0);
+    socklen_t alen = sizeof(addr);
+    assert(getsockname(listen_fd, (struct sockaddr *)&addr, &alen) == 0);
+    int port = ntohs(addr.sin_port);
+    (void)port;
+
+    pid_t server_pid = fork();
+    assert(server_pid >= 0);
+    if (server_pid == 0)
+        two_sock_server_child(listen_fd); /* _exit()s */
+
+    /* Two non-blocking client sockets to the same listener. */
+    int a = socket(AF_INET, SOCK_STREAM, 0);
+    int b = socket(AF_INET, SOCK_STREAM, 0);
+    assert(a >= 0 && b >= 0);
+    int fl = fcntl(a, F_GETFL, 0);
+    fcntl(a, F_SETFL, fl | O_NONBLOCK);
+    fl = fcntl(b, F_GETFL, 0);
+    fcntl(b, F_SETFL, fl | O_NONBLOCK);
+
+    int rc = connect(a, (struct sockaddr *)&addr, sizeof(addr));
+    assert(rc < 0 && errno == EINPROGRESS);
+    rc = connect(b, (struct sockaddr *)&addr, sizeof(addr));
+    assert(rc < 0 && (errno == EINPROGRESS || errno == EISCONN));
+
+    memset(&s_two, 0, sizeof(s_two));
+    s_two.a_fd = a;
+    s_two.b_fd = b;
+    s_two_fill_calls = 0;
+
+    s_tick_post_done = 0;
+    s_two_tick_count = 0;
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .fill_external_fds = two_sock_fill,
+        .on_external_ready = two_sock_ready,
+        .on_tick = two_sock_tick, /* deadlock guard only */
+    };
+    TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_tick_runtime = rt;
+
+    int result = tui_runtime_run(rt);
+    assert(result == 0);
+
+    /* The whole pattern held: WRITE on connect completion, SO_ERROR
+     * clean, send, interest flip to READ (no re-arm — the fill just
+     * returned different flags), echo read back, and B dispatched
+     * independently while A was mid-flight. */
+    assert(s_two.a_write_ready);
+    assert(s_two.a_so_error_zero);
+    assert(s_two.a_sent);
+    assert(s_two.a_read_back);
+    assert(s_two.b_read);
+    assert(s_two.done);
+    /* Fill is called before EVERY wait (at least once per phase). */
+    assert(s_two_fill_calls >= 2);
+
+    int status = 0;
+    waitpid(server_pid, &status, 0);
+    close(a);
+    close(b);
 
     /* Restore stdin */
     dup2(orig_stdin, STDIN_FILENO);
@@ -1925,6 +2332,10 @@ int main(void)
 #ifndef _WIN32
     RUN_TEST(test_runtime_run_immediate_quit);
     RUN_TEST(test_post_wakes_event_loop);
+    RUN_TEST(test_fill_zero_in_run);
+    RUN_TEST(test_fill_overflow_clamps);
+    RUN_TEST(test_fill_three_in_run);
+    RUN_TEST(test_two_socket_subscriptions);
 #endif
 
     /* TuiRenderMode tests (cross-platform — no fmemopen needed) */

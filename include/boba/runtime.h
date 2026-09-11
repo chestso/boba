@@ -35,13 +35,56 @@ typedef struct TuiRuntime TuiRuntime;
 /* Callback for commands the runtime doesn't handle natively */
 typedef void (*TuiCmdHandler)(TuiCmd *cmd, void *user_data);
 
-/* Callback: return an external FD to poll alongside stdin (-1 = none) */
-typedef int (*TuiGetExternalFd)(void *user_data);
+/* ---- External FD subscriptions (Elm subscriptions, C idiom) ----
+ *
+ * The app declares its live external fds BEFORE EVERY WAIT via a fill
+ * callback; the runtime reconciles the diff (rebinds what changed).
+ * Interest/connection changes need no register/unregister call — just
+ * return a different set next time. This is Elm's
+ * `subscriptions : Model -> Sub Msg` spelled as a pull callback:
+ * "model, what do you want now". */
 
-/* Callback: external FD is ready for reading */
-typedef void (*TuiOnExternalReady)(void *user_data);
+/* Per-fd interest flags. */
+#define TUI_FD_READ  (1u << 0) /* readable / EOF (a closed peer IS readable) */
+#define TUI_FD_WRITE (1u << 1) /* pending connect finished (writable =   \
+                                * completion signal), or send buffer has \
+                                * room again */
 
-/* Callback: called every tick (select timeout, ~100ms) */
+#ifndef TUI_EXTERNAL_FD_MAX
+#define TUI_EXTERNAL_FD_MAX 32
+#endif
+
+/* One declared external fd + what to wait for on it. */
+typedef struct TuiExternalFd
+{
+    int fd;         /* -1 = no entry (rest of struct ignored) */
+    unsigned flags; /* TUI_FD_READ / TUI_FD_WRITE / both */
+} TuiExternalFd;
+
+/* Fill `out` with the fds to wait on this cycle, at most `cap`.
+ * Return the number filled (<= cap). Called before EVERY wait: the
+ * app re-declares its live set each cycle — connections or interests
+ * that went away simply stop being returned; new ones appear. This is
+ * the subscriptions function (see above). Zero = no external fds.
+ *
+ * Consumer obligations:
+ * - Spurious wakeups are allowed; re-check state (getsockopt(SO_ERROR)
+ *   after connect completes, EAGAIN-safe reads/writes).
+ * - Clear TUI_FD_WRITE when drained: a perpetually-writable idle fd
+ *   with WRITE declared busy-loops the runtime.
+ * - Do not declare the same fd twice across slots (undefined).
+ * - EOF is readable — a closed peer must be dispatched READ. */
+typedef size_t (*TuiFillExternalFds)(TuiExternalFd *out, size_t cap,
+                                     void *user_data);
+
+/* Dispatched once PER fd with activity, carrying everything that fired
+ * on that fd. `ready` contains only bits the app declared for that fd
+ * (a failed connect is dispatched READ|WRITE so the app's write path
+ * learns of it). Runs on the loop thread only; reach update() via
+ * tui_runtime_post from inside. */
+typedef void (*TuiOnExternalReady)(int fd, unsigned ready, void *user_data);
+
+/* Callback: called every tick (wait timeout, ~100ms) */
 typedef void (*TuiOnTick)(void *user_data);
 
 /* Return ms until next tick is needed, or -1 to block indefinitely.
@@ -78,8 +121,8 @@ typedef struct TuiRuntimeConfig
     void *cmd_handler_data;    /* Callback context */
 
     /* Event loop callbacks (used by tui_runtime_run) */
-    TuiGetExternalFd get_external_fd;        /* External FD to poll */
-    TuiOnExternalReady on_external_ready;    /* External FD ready */
+    TuiFillExternalFds fill_external_fds;    /* Declare fds to wait on (per wait) */
+    TuiOnExternalReady on_external_ready;    /* Per-fd: (fd, ready bits) fired */
     TuiOnTick on_tick;                       /* Tick (~100ms timeout) */
     TuiGetTickTimeoutMs get_tick_timeout_ms; /* Dynamic tick timeout */
     TuiOnResize on_resize;                   /* Terminal resized */
@@ -124,8 +167,16 @@ struct TuiRuntime
     DWORD orig_output_mode; /* Saved console output mode */
     int is_pty;             /* 1 = ConPTY/pipe, 0 = real console */
     HANDLE wakeup_event;    /* Event object for waking WaitForMultipleObjects */
-    HANDLE socket_event;    /* WSA event for external FD (socket) */
-    int last_ext_fd;        /* Last FD bound to socket_event (-1 = none) */
+    /* External-FD subscription pool: one WSAEVENT per slot, reused
+     * across waits. Each cycle the fill callback declares up to
+     * TUI_EXTERNAL_FD_MAX (fd, flags) slots; a slot whose (fd, flags)
+     * differs from last cycle is rebound via WSAEventSelect (the
+     * rebind is the reconcile diff). FD_CLOSE is always armed so a
+     * failed connect can't be missed. */
+    HANDLE ext_events[TUI_EXTERNAL_FD_MAX];
+    int ext_fds[TUI_EXTERNAL_FD_MAX];        /* Last fd bound per slot (-1 = unbound) */
+    unsigned ext_flags[TUI_EXTERNAL_FD_MAX]; /* Last flags bound per slot */
+    int ext_count;                           /* Slots bound last cycle (0 = none) */
     /* Stdin reader thread: ReadFile on a console handle blocks for
      * non-key events (focus, resize) even when WaitForMultipleObjects
      * signals it. A background thread does the blocking read and
