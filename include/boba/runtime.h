@@ -282,6 +282,19 @@ void tui_runtime_finish_inline(TuiRuntime *runtime);
  * the cursor row resets. No-op before the first inline flush. */
 void tui_runtime_clear_inline(TuiRuntime *runtime);
 
+/* Transcript write: the ATOMIC inline-print seam — erase the live
+ * frame in place, write whole transcript lines (each ending \r\n)
+ * over the erased area, and re-render the live region below them in
+ * the same call. This is the correct way to print scrollback lines
+ * while an inline frame is live: the erase, the write, and the
+ * repaint share one geometry baseline, so no interleaving (a second
+ * print, an event-loop step between the write and the next flush)
+ * can strand frame rows in the scrollback. Bytes must be line-safe
+ * (every line \r\n-terminated); keep partial lines in the live
+ * region. See also tui_runtime_clear_inline for the erase-only form. */
+void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
+                                  size_t len);
+
 /* Render view and write to output (with cursor hide/show) */
 void tui_runtime_flush(TuiRuntime *runtime);
 

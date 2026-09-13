@@ -649,6 +649,55 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
     fflush(fp);
 }
 
+/* Transcript write: the ATOMIC inline-print seam. Erase the live frame
+ * in place (exactly clear_inline's erase), write the caller's bytes
+ * over the erased area (whole transcript lines, each ending \r\n),
+ * then re-render the live region below them in the same call.
+ *
+ * Why atomic: with clear_inline + fwrite + a later flush as separate
+ * steps, the bytes the app writes move the real cursor by an amount
+ * boba does not track — the window between the write and the next
+ * flush is exactly where a second clear (another step, a tool
+ * boundary) would erase from the wrong screen row and strand frame
+ * rows in the scrollback. Doing erase + write + repaint inside one
+ * call keeps the geometry consistent by construction: the repaint
+ * sees the post-write cursor as its baseline and records it.
+ *
+ * The bytes must be "line-safe" for an inline transcript: every line
+ * ends \r\n (raw mode: the terminal does not translate \n). Callers
+ * needing mid-line continuation keep the partial line in their live
+ * region (it re-renders here) and only ever write whole lines.
+ *
+ * Without an inline frame yet (before the first flush) the erase is a
+ * no-op — the bytes still go out and the next flush renders below
+ * them. */
+void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
+                                  size_t len)
+{
+    if (!runtime || !bytes || len == 0)
+        return;
+
+    /* Erase the current frame in place; the cursor lands at frame
+     * row 0 (or wherever it is with no frame — nothing to erase). */
+    tui_runtime_clear_inline(runtime);
+
+    /* Write the transcript bytes; the cursor ends M rows below where
+     * the frame was (M = the \n count in the bytes, modulo wrapping
+     * and scrolling). Reset BOTH trackers: the next render must not
+     * cursor-up (the old frame is gone from the screen) and must not
+     * stale-erase into the fresh transcript lines. */
+    fwrite(bytes, 1, len, runtime->output);
+    fflush(runtime->output);
+
+    runtime->inline_lines_rendered = 0;
+    runtime->inline_cursor_row = 0;
+
+    /* Re-render the live region below the printed lines NOW, so the
+     * geometry is re-established from the post-write cursor inside
+     * this same call — no window for divergence. */
+    tui_runtime_flush(runtime);
+}
+
 /* Render view, reconcile terminal mode against the View's declarations,
  * and write the resulting bytes.
  *

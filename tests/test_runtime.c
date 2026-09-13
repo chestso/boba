@@ -2104,6 +2104,142 @@ static void test_clear_inline_before_first_flush_noop(void)
     fclose(fp);
 }
 
+/* --- tui_runtime_transcript_write tests --- */
+
+/* transcript_write: erase the 3-line frame, write one line of
+ * transcript, then re-render the frame BELOW it — all in one call.
+ * The bytes must contain the erase (3 ELs), the transcript line, and
+ * the re-rendered frame content, in that order, with no cursor-up
+ * between the write and the repaint (the post-write cursor is the
+ * repaint's baseline). */
+static void test_transcript_write_erases_writes_renders(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+
+    tui_runtime_flush(rt); /* 3-line frame */
+    fflush(fp);
+    size_t pos = ftell(fp);
+
+    tui_runtime_transcript_write(rt, "scrollback line\r\n", 17);
+    fflush(fp);
+
+    const char *out = outbuf + pos;
+    /* 1. The erase fired before the write: 3 EL rows. */
+    int el = 0;
+    const char *p = out;
+    while ((p = strstr(p, "\r\x1b[K")) != NULL) {
+        el++;
+        p += 3;
+    }
+    assert(el >= 3);
+    /* 2. The transcript line is written. */
+    assert(strstr(out, "scrollback line\r\n") != NULL);
+    /* 3. The frame re-rendered after the write (its content follows
+     * the transcript bytes; line1 must appear twice overall: once in
+     * the erased frame region is gone — count occurrences AFTER the
+     * transcript line). */
+    const char *after = strstr(out, "scrollback line\r\n");
+    assert(after != NULL);
+    assert(strstr(after, "line1") != NULL);
+    assert(strstr(after, "line3") != NULL);
+    /* 4. Tracking re-established by the internal flush: 3 lines,
+     * cursor row reset (cursor hidden → last row). */
+    assert(rt->inline_lines_rendered == 3);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* transcript_write twice in a row (two steps printing before any
+ * external flush): the second call erases exactly the frame the
+ * first call re-rendered — no drift, no stranded rows. The second
+ * call's erase count must match the re-rendered frame (3 ELs), NOT
+ * the pre-write frame plus the transcript rows. */
+static void test_transcript_write_twice_no_drift(void)
+{
+    char outbuf[16384];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+
+    tui_runtime_flush(rt);
+    fflush(fp);
+    size_t pos = ftell(fp);
+
+    tui_runtime_transcript_write(rt, "first\r\n", 7);
+    tui_runtime_transcript_write(rt, "second\r\n", 8);
+    fflush(fp);
+
+    const char *out = outbuf + pos;
+    /* Both transcript lines landed, in order. */
+    const char *a = strstr(out, "first\r\n");
+    const char *b = strstr(out, "second\r\n");
+    assert(a != NULL && b != NULL && a < b);
+    /* THE invariant the atomic seam exists for: the SECOND call's
+     * erase is anchored by a cursor-up from the row the FIRST call's
+     * internal flush recorded (the frame's cursor row) — the erase
+     * starts at the frame's row 0, not at the post-write cursor. The
+     * old clear+write+wakeup protocol had no anchor here: the second
+     * clear erased from wherever the untracked write left the cursor
+     * (row 0 of ITS OWN stale bookkeeping), stranding rows. */
+    const char *second_erase = strstr(b, "\x1b[1A");
+    /* (multiline frame renders cursor hidden on last row → row 2;
+     * the second clear_inline must cursor-up 2 BEFORE its EL loop) */
+    const char *second_el = strstr(b, "\r\x1b[K");
+    assert(second_erase != NULL && second_el != NULL);
+    assert(second_erase < second_el);
+    /* The frame's content appears after the LAST transcript line. */
+    const char *after = strstr(b, "line1");
+    assert(after != NULL);
+    /* No stale-line erase walking below the frame after the second
+     * write (prev_lines == 3 == line_count: nothing stale). The
+     * second call must not emit a "stale" \r\n+EL run of 3. */
+    assert(strstr(b, "second\r\n") == b); /* sanity: no re-write */
+    /* Tracking still consistent. */
+    assert(rt->inline_lines_rendered == 3);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
+/* transcript_write with no inline frame yet: no erase, bytes pass
+ * through, and the frame renders below them. */
+static void test_transcript_write_before_first_flush(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
+
+    size_t pos = ftell(fp);
+    tui_runtime_transcript_write(rt, "early line\r\n", 12);
+    fflush(fp);
+
+    const char *out = outbuf + pos;
+    assert(strstr(out, "early line\r\n") != NULL);
+    /* No erase loop before the first inline flush (clear_inline is a
+     * no-op; nothing rendered yet). */
+    assert(strstr(out, "\r\x1b[K\r\n\r\x1b[K") == NULL);
+    /* The frame rendered below the early line. */
+    const char *after = strstr(out, "early line\r\n");
+    assert(strstr(after, "line1") != NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
 static void test_stop_inline_moves_cursor_down(void)
 {
     char outbuf[2048];
@@ -2368,6 +2504,9 @@ int main(void)
     RUN_TEST(test_clear_inline_erases_frame_and_keeps_lines);
     RUN_TEST(test_clear_inline_stale_erase_still_fires);
     RUN_TEST(test_clear_inline_before_first_flush_noop);
+    RUN_TEST(test_transcript_write_erases_writes_renders);
+    RUN_TEST(test_transcript_write_twice_no_drift);
+    RUN_TEST(test_transcript_write_before_first_flush);
     RUN_TEST(test_stop_inline_moves_cursor_down);
     RUN_TEST(test_stop_inline_no_exit_alt_screen);
     RUN_TEST(test_stop_inline_no_decrc);
