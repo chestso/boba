@@ -255,6 +255,7 @@ static void stage_escape(TuiTranscript *t, const char *bytes, size_t len,
         if (esc == 0 && c != 0x1b)
             return;
         dynamic_buffer_append(t->staging, bytes + *i, 1);
+        t->row_open = 1; /* bytes (even zero-width) are on the open row */
         (*i)++;
         if (esc == 0) {
             t->row_esc = 1;

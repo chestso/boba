@@ -62,12 +62,19 @@ static void emit_text_rows(TuiRowSink *sink, const char *mark,
     }
 }
 
+/* Optional per-test row probe for render_block. */
+static void (*g_row_probe)(TuiRowSink *) = NULL;
+
 static void test_render_block(const TuiBlock *blk, const char *text, size_t len,
                               int width, TuiRowSink *sink, void *ud)
 {
     (void)blk;
     (void)width;
     (void)ud;
+    if (g_row_probe) {
+        g_row_probe(sink);
+        return;
+    }
     emit_text_rows(sink, "R|", text, len);
 }
 
@@ -787,6 +794,70 @@ static void test_resize_live_relayout(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Escape sequences split across commits stay verbatim + zero width    */
+/* ------------------------------------------------------------------ */
+
+/* A sink probe for split-escape column math: pad_to must treat the
+ * sequence-final byte as zero width (with the carry state resumed). */
+static void sink_split_escape_render(TuiRowSink *sink)
+{
+    tui_row_text(sink, "\x1b[31", 4); /* ESC [ 3 1 — split mid-CSI */
+    tui_row_text(sink, "mAB", 3);     /* 'm' completes the sequence */
+    tui_row_pad_to(sink, 5);          /* AB at col 2 -> 3 spaces */
+    tui_row_text(sink, "Z", 1);
+    tui_row_end(sink);
+}
+
+static void test_split_escape_sequence_passthrough(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    /* Byte path: the escape is staged onto the open row; the next
+     * commit extends that row (up-1, col 0) rather than starting a
+     * fresh line; the sequence and text stay verbatim. */
+    static const char csi_head[] = "\x1b[31";
+    static const char csi_tail[] = "mred\n";
+    h_send(h, tui_msg_stream_text(-1, csi_head, strlen(csi_head)));
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 1);
+    assert(h->rt->inline_partial_cols == 0); /* zero display width */
+    h_send(h, tui_msg_stream_text(-1, csi_tail, strlen(csi_tail)));
+    h_flush(h);
+    const char *out = h_read(h);
+    assert(strstr(out, "\x1b[31\r\n") != NULL);       /* on the open row */
+    assert(strstr(out, "\x1b[1A\rmred\r\n") != NULL); /* extended + closed */
+    assert(strstr(out, "\r\nmred\r\n") == NULL);      /* no fresh-line lie */
+
+    /* Sink path: split across two tui_row_text calls, the carry state
+     * must keep the sequence at zero width (pad_to sees col 2). */
+    g_row_probe = sink_split_escape_render;
+    h_send(h, tui_msg_stream_delta(0, "x\ny\n", 4));
+    h_flush(h);
+    g_row_probe = NULL;
+    out = h_read(h);
+    assert(strstr(out, "\x1b[31mAB   Z\r\n") != NULL);
+
+    /* An open byte row holding only zero-width escape bytes still
+     * counts as open: the next rendered unit starts below it (boba
+     * closes the row inside the extension), not on the same row. */
+    h_send(h, tui_msg_stream_text(-1, "\x1b[32", 4));
+    h_flush(h);
+    h_send(h, tui_msg_stream_delta(0, "A\nB\n", 4));
+    h_flush(h);
+    out = h_read(h);
+    /* extension: up-1 to the open row, CR to col 0, then the row
+     * break; the pending "y" (lookahead) commits first, then "A" —
+     * never R| rows on the escape's row */
+    assert(strstr(out, "\x1b[1A\r\r\n") != NULL);
+    assert(strstr(out, "\x1b[1A\rR|") == NULL);
+    assert(strstr(out, "\r\nR|y\r\nR|A\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* ------------------------------------------------------------------ */
 /* No bare LF in anything boba writes                                  */
 /* ------------------------------------------------------------------ */
 
@@ -830,6 +901,7 @@ int main(void)
     RUN_TEST(test_trim_after_commit);
     RUN_TEST(test_sink_tabs_wide_pad_attrs);
     RUN_TEST(test_resize_live_relayout);
+    RUN_TEST(test_split_escape_sequence_passthrough);
     RUN_TEST(test_no_bare_lf_anywhere);
     printf("test_stream: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
