@@ -123,7 +123,13 @@ typedef struct TuiRowSink TuiRowSink;
  * multiple of 8 display columns; rows wrap explicitly at the
  * terminal width (never terminal soft-wrap), so boba's row math is
  * always exact. Control bytes other than \t are not allowed; rows
- * are ended with tui_row_end(). */
+ * are ended with tui_row_end().
+ *
+ * Escape bytes in text are scanned, not trusted: SGR sequences
+ * (styling) pass through; every framing sequence — cursor movement,
+ * EL, OSC, APC/DCS — is dropped. Framing is unrepresentable by
+ * construction; sequences split across calls are buffered until
+ * complete. */
 void tui_row_text(TuiRowSink *s, const char *utf8, size_t len);
 
 /* Apply / reset an SGR attribute for subsequent text on this row.
@@ -255,7 +261,9 @@ TuiMsg tui_msg_stream_delta(int stream_id, const char *text, size_t len);
 /* Raw transcript entry, system stream only (stream_id < 0). One RAW
  * unit per call, finalized immediately: the escape hatch for tool
  * panels, command replies, error bodies. LF is normalized to CRLF by
- * boba; no raw \r ever reaches the scrollback. */
+ * boba, and escape bytes are scanned: SGR styling survives, framing
+ * (cursor movement, EL, OSC, APC/DCS) is dropped — no raw \r and no
+ * app-controlled cursor bytes ever reach the scrollback. */
 TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len);
 
 /* Finalize the stream's live content (stream end / turn end). */

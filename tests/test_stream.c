@@ -949,21 +949,44 @@ static void test_split_escape_sequence_passthrough(void)
     H *h = h_new(streams, NULL, 1);
     assert(h);
 
-    /* Byte path: the escape is staged onto the open row; the next
-     * commit extends that row (up-1, col 0) rather than starting a
-     * fresh line; the sequence and text stay verbatim. */
+    /* Byte path: an OPEN sequence is buffered — nothing is emitted
+     * until the sequence completes (the decision is made on the whole
+     * sequence), so the first commit writes nothing at all. */
     static const char csi_head[] = "\x1b[31";
     static const char csi_tail[] = "mred\n";
     h_send(h, tui_msg_stream_text(-1, csi_head, strlen(csi_head)));
     h_flush(h);
-    assert(h->rt->inline_partial_open == 1);
-    assert(h->rt->inline_partial_cols == 0); /* zero display width */
+    assert(h->rt->inline_partial_open == 0); /* nothing emitted yet */
+
     h_send(h, tui_msg_stream_text(-1, csi_tail, strlen(csi_tail)));
     h_flush(h);
     const char *out = h_read(h);
-    assert(strstr(out, "\x1b[31\r\n") != NULL);       /* on the open row */
-    assert(strstr(out, "\x1b[1A\rmred\r\n") != NULL); /* extended + closed */
-    assert(strstr(out, "\r\nmred\r\n") == NULL);      /* no fresh-line lie */
+    assert(strstr(out, "\x1b[31mred\r\n") != NULL); /* SGR kept, one row */
+    assert(strstr(out, "\r\nmred\r\n") == NULL);    /* no fresh-line lie */
+    assert(h->rt->inline_partial_open == 0);        /* row completed */
+
+    /* Policy: framing sequences (cursor movement, EL) are stripped,
+     * SGR survives. */
+    static const char csi_cursor[] = "\x1b[10;20Hx";
+    h_send(h, tui_msg_stream_text(-1, csi_cursor, strlen(csi_cursor)));
+    h_flush(h);
+    out = h_read(h);
+    assert(strstr(out, "\x1b[10;20H") == NULL); /* cursor move stripped */
+    assert(strstr(out, "x") != NULL);           /* text kept */
+
+    /* OSC and APC/DCS are stripped too */
+    static const char osc[] = "\x1b]0;title\x07visible\n";
+    h_send(h, tui_msg_stream_text(-1, osc, strlen(osc)));
+    h_flush(h);
+    out = h_read(h);
+    assert(strstr(out, "\x1b]0;title") == NULL);
+    assert(strstr(out, "visible\r\n") != NULL);
+    static const char apc[] = "\x1b_G a=T\x1b\\plain\n";
+    h_send(h, tui_msg_stream_text(-1, apc, strlen(apc)));
+    h_flush(h);
+    out = h_read(h);
+    assert(strstr(out, "\x1b_G") == NULL);
+    assert(strstr(out, "plain\r\n") != NULL);
 
     /* Sink path: split across two tui_row_text calls, the carry state
      * must keep the sequence at zero width (pad_to sees col 2). */
@@ -974,17 +997,16 @@ static void test_split_escape_sequence_passthrough(void)
     out = h_read(h);
     assert(strstr(out, "\x1b[31mAB   Z\r\n") != NULL);
 
-    /* An open byte row holding only zero-width escape bytes still
-     * counts as open: the next rendered unit starts below it (boba
-     * closes the row inside the extension), not on the same row. */
-    h_send(h, tui_msg_stream_text(-1, "\x1b[32", 4));
+    /* An open byte row holding only zero-width SGR bytes still counts
+     * as open: the next rendered unit starts below it, not on it. */
+    h_send(h, tui_msg_stream_text(-1, "\x1b[32m", 5));
     h_flush(h);
     h_send(h, tui_msg_stream_delta(0, "A\nB\n", 4));
     h_flush(h);
     out = h_read(h);
-    /* extension: up-1 to the open row, CR to col 0, then the row
-     * break; the pending "y" (lookahead) commits first, then "A" —
-     * never R| rows on the escape's row */
+    /* the extension anchors at the open SGR row (up-1, CR); the
+     * pending "y" (lookahead) commits first, then "A" — never R| rows
+     * on the SGR's row */
     assert(strstr(out, "\x1b[1A\r\r\n") != NULL);
     assert(strstr(out, "\x1b[1A\rR|") == NULL);
     assert(strstr(out, "\r\nR|y\r\nR|A\r\n") != NULL);

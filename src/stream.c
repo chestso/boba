@@ -81,6 +81,92 @@ enum
     SINK_COUNT,      /* dry run: count rows only                      */
 };
 
+/* ------------------------------------------------------------------ */
+/* Escape-sequence policy                                              */
+/* ------------------------------------------------------------------ */
+
+/* The transcript seam's promise: framing bytes (cursor movement, EL,
+ * OSC, APC/DCS, anything out-of-band) are UNREPRESENTABLE in app text.
+ * SGR attribute sequences are the one exception — styling, not
+ * framing; everything else is scanned, swallowed and dropped. A
+ * sequence split across chunks carries its scan state (and its bytes
+ * are buffered) so the decision is always made on the whole sequence.
+ */
+#define ESC_SEQ_MAX 64
+
+typedef struct
+{
+    int state;  /* 0 ground, 1 after ESC, 2 CSI, 3 OSC, 4 string, 5 ESC-in-string */
+    int resume; /* state to return to from 5 (OSC vs DCS/APC/PM/SOS) */
+    int nostore;
+    size_t len;
+    char buf[ESC_SEQ_MAX];
+} EscScan;
+
+/* Feed one byte. Returns 1 when a complete sequence decision is ready:
+ * *emit set, sc->buf/sc->len hold the sequence bytes (may be zero when
+ * dropped). Returns 0 while the sequence is still open. The caller
+ * only calls this while a sequence is open (sc->state != 0) or the
+ * byte is ESC. */
+static int esc_scan_feed(EscScan *sc, unsigned char c, int *emit)
+{
+    if (!sc->nostore && sc->len < ESC_SEQ_MAX)
+        sc->buf[sc->len++] = (char)c;
+    else
+        sc->nostore = 1;
+
+    switch (sc->state) {
+    case 0: /* the ESC that starts the sequence */
+        sc->state = 1;
+        return 0;
+    case 1: /* after ESC: kind selector */
+        if (c == '[')
+            sc->state = 2;
+        else if (c == ']')
+            sc->state = 3;
+        else if (c == 'P' || c == '_' || c == '^' || c == 'X')
+            sc->state = 4;
+        else {
+            sc->state = 0;
+            *emit = 0; /* two-byte escape: never emitted */
+            return 1;
+        }
+        return 0;
+    case 2: /* CSI: final byte in 0x40..0x7E; only SGR (m) is kept */
+        if (c >= 0x40 && c <= 0x7E) {
+            sc->state = 0;
+            *emit = (c == 'm' && !sc->nostore);
+            return 1;
+        }
+        return 0;
+    case 3: /* OSC: BEL or ESC \ terminates; never emitted */
+        if (c == 0x07) {
+            sc->state = 0;
+            *emit = 0;
+            return 1;
+        }
+        if (c == 0x1b) {
+            sc->resume = 3;
+            sc->state = 5;
+        }
+        return 0;
+    case 4: /* DCS / APC / PM / SOS: ESC \ terminates; never emitted */
+        if (c == 0x1b) {
+            sc->resume = 4;
+            sc->state = 5;
+        }
+        return 0;
+    default: /* 5: ESC seen inside a string */
+        if (c == '\\') {
+            sc->state = 0;
+            *emit = 0;
+            return 1;
+        }
+        sc->state = sc->resume;
+        return 0;
+    }
+}
+
 struct TuiRowSink
 {
     TuiTranscript *t;
@@ -89,7 +175,7 @@ struct TuiRowSink
     int width;
     int col;
     int open;             /* a row is open (content written since last row end) */
-    int esc;              /* split escape state for zero-width accounting */
+    EscScan esc;          /* split escape scan state (shared policy) */
     size_t row_start_off; /* content start of the open row */
 
     /* frame row recording (ring of the last N rows) */
@@ -111,7 +197,7 @@ struct TuiTranscript
     DynamicBuffer *staging;
     int row_open; /* the output row (staged or committed) is open */
     int row_col;  /* display cols written on that row */
-    int row_esc;  /* split ESC state on that row */
+    EscScan esc;  /* split escape scan state (see above) */
 
     int orphan_partial; /* clear() while a row was open: forget, emit nothing */
     unsigned long commit_count;
@@ -226,7 +312,6 @@ static void stage_row_break(TuiTranscript *t)
     dynamic_buffer_append(t->staging, "\r\n", 2);
     t->row_open = 0;
     t->row_col = 0;
-    t->row_esc = 0;
 }
 
 /* Append glyph bytes with explicit wrapping at t->width. */
@@ -243,47 +328,25 @@ static void stage_glyph(TuiTranscript *t, const char *bytes, size_t len,
         stage_row_break(t);
 }
 
-/* Copy one ESC-initiated sequence verbatim (zero display width). The
- * carry state resumes a sequence split across chunks; consumes only
- * the sequence bytes. */
+/* Consume escape bytes with the scan policy; only SGR is emitted (as
+ * zero-width bytes). Resumes a sequence split across chunks. */
 static void stage_escape(TuiTranscript *t, const char *bytes, size_t len,
                          size_t *i)
 {
     while (*i < len) {
         unsigned char c = (unsigned char)bytes[*i];
-        int esc = t->row_esc;
-        if (esc == 0 && c != 0x1b)
+        if (t->esc.state == 0 && c != 0x1b)
             return;
-        dynamic_buffer_append(t->staging, bytes + *i, 1);
-        t->row_open = 1; /* bytes (even zero-width) are on the open row */
+        int emit = 0;
         (*i)++;
-        if (esc == 0) {
-            t->row_esc = 1;
-            continue;
+        if (esc_scan_feed(&t->esc, c, &emit)) {
+            if (emit) {
+                dynamic_buffer_append(t->staging, t->esc.buf, t->esc.len);
+                t->row_open = 1; /* bytes (even zero-width) are on the row */
+            }
+            t->esc.len = 0;
+            t->esc.nostore = 0;
         }
-        if (esc == 1) {
-            if (c == '[')
-                t->row_esc = 2;
-            else if (c == ']')
-                t->row_esc = 3;
-            else
-                t->row_esc = 0;
-            continue;
-        }
-        if (esc == 2) {
-            if (c >= 0x40 && c <= 0x7E)
-                t->row_esc = 0;
-            continue;
-        }
-        if (esc == 3) {
-            if (c == 0x07)
-                t->row_esc = 0;
-            else if (c == 0x1b)
-                t->row_esc = 4;
-            continue;
-        }
-        /* esc == 4 */
-        t->row_esc = 0;
     }
 }
 
@@ -295,7 +358,7 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
     size_t i = 0;
     while (i < len) {
         unsigned char c = (unsigned char)bytes[i];
-        if (t->row_esc) {
+        if (t->esc.state) {
             /* resume an escape sequence split across chunks */
             stage_escape(t, bytes, len, &i);
             continue;
@@ -392,7 +455,8 @@ static void sink_row_break(TuiRowSink *s)
         if (s->t) {
             s->t->row_open = 0;
             s->t->row_col = 0;
-            s->t->row_esc = 0;
+            s->t->esc.state = 0;
+            s->t->esc.len = 0;
         }
     }
     sink_record_row(s);
@@ -400,48 +464,25 @@ static void sink_row_break(TuiRowSink *s)
     s->col = 0;
 }
 
-/* Copy an ESC-rooted byte sequence for zero-width accounting; the
- * carry state (s->esc) resumes across calls. Consumes only the
- * sequence bytes. */
+/* Consume escape bytes with the shared scan policy; only SGR survives
+ * (zero-width, styling). Resumes a sequence split across calls. */
 static void sink_escape(TuiRowSink *s, const char *utf8, size_t len,
                         size_t *i)
 {
     while (*i < len) {
         unsigned char c = (unsigned char)utf8[*i];
-        int esc = s->esc;
-        if (esc == 0 && c != 0x1b)
+        if (s->esc.state == 0 && c != 0x1b)
             return;
-        if (s->buf)
-            dynamic_buffer_append(s->buf, utf8 + *i, 1);
-        sink_note_row_start(s);
+        int emit = 0;
         (*i)++;
-        if (esc == 0) {
-            s->esc = 1;
-            continue;
+        if (esc_scan_feed(&s->esc, c, &emit)) {
+            if (emit && s->buf) {
+                dynamic_buffer_append(s->buf, s->esc.buf, s->esc.len);
+                sink_note_row_start(s);
+            }
+            s->esc.len = 0;
+            s->esc.nostore = 0;
         }
-        if (esc == 1) {
-            if (c == '[')
-                s->esc = 2;
-            else if (c == ']')
-                s->esc = 3;
-            else
-                s->esc = 0;
-            continue;
-        }
-        if (esc == 2) {
-            if (c >= 0x40 && c <= 0x7E)
-                s->esc = 0;
-            continue;
-        }
-        if (esc == 3) {
-            if (c == 0x07)
-                s->esc = 0;
-            else if (c == 0x1b)
-                s->esc = 4;
-            continue;
-        }
-        /* esc == 4 */
-        s->esc = 0;
     }
 }
 
@@ -453,7 +494,7 @@ void tui_row_text(TuiRowSink *s, const char *utf8, size_t len)
     size_t i = 0;
     while (i < len) {
         unsigned char c = (unsigned char)utf8[i];
-        if (s->esc) {
+        if (s->esc.state) {
             /* resume an escape sequence split across calls */
             sink_escape(s, utf8, len, &i);
             continue;
@@ -599,7 +640,8 @@ static void sink_commit_begin(TuiTranscript *t, TuiRowSink *s)
         dynamic_buffer_append(t->staging, "\r\n", 2);
         t->row_open = 0;
         t->row_col = 0;
-        t->row_esc = 0;
+        t->esc.state = 0;
+        t->esc.len = 0;
     }
 }
 
@@ -630,7 +672,8 @@ static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
     /* unit rows always end terminated */
     t->row_open = 0;
     t->row_col = 0;
-    t->row_esc = 0;
+    t->esc.state = 0;
+    t->esc.len = 0;
 }
 
 /* Freeze the pending line, if any. */
@@ -996,7 +1039,8 @@ static void transcript_close_row(TuiTranscript *t)
     dynamic_buffer_append(t->staging, "\r\n", 2);
     t->row_open = 0;
     t->row_col = 0;
-    t->row_esc = 0;
+    t->esc.state = 0;
+    t->esc.len = 0;
 }
 
 int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
@@ -1009,7 +1053,8 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
         t->orphan_partial = 0;
         t->row_open = 0;
         t->row_col = 0;
-        t->row_esc = 0;
+        t->esc.state = 0;
+        t->esc.len = 0;
     }
     if (t->staging->len == 0)
         return 0;
@@ -1257,7 +1302,8 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
             t->orphan_partial = 1;
         t->row_open = 0;
         t->row_col = 0;
-        t->row_esc = 0;
+        t->esc.state = 0;
+        t->esc.len = 0;
         dynamic_buffer_clear(t->staging);
         for (size_t i = 0; i <= t->n_user; i++)
             stream_reset(t, &t->streams[i]);
