@@ -461,6 +461,122 @@ static void test_labeled_fence_line_granular(void)
     h_free(h);
 }
 
+/* RECLASSIFY_PREV against a live block: truncate the block so it ends
+ * before prev, finalize it as-is, open a new live block (of the named
+ * kind) whose first line is prev. This classifier opens a table, then
+ * reclassifies its second line (a genuine in-block split). */
+
+typedef struct
+{
+    int in_table;
+    int saw_reclass;
+} SplitState;
+
+/* capture each render_block call's text for assertions */
+static char g_calls[8][256];
+static int g_ncalls;
+
+static void call_recorder(const TuiBlock *blk, const char *text, size_t len,
+                          int width, TuiRowSink *sink, void *ud)
+{
+    (void)blk;
+    (void)width;
+    (void)ud;
+    if (g_ncalls < 8) {
+        size_t n = len < 255 ? len : 255;
+        memcpy(g_calls[g_ncalls], text, n);
+        g_calls[g_ncalls][n] = '\0';
+        g_ncalls++;
+    }
+    emit_text_rows(sink, "R|", text, len);
+}
+
+static TuiLineClass block_split_classify(void *state, const char *line,
+                                         size_t len, const char *prev,
+                                         size_t prev_len,
+                                         TuiBlockKind *out_kind)
+{
+    SplitState *st = state;
+    (void)prev;
+    (void)prev_len;
+    if (len == 0) {
+        st->in_table = 0;
+        st->saw_reclass = 0;
+        return TUI_LINE_BLANK;
+    }
+    if (len == 1 && line[0] == 'H' && !st->in_table) {
+        st->in_table = 1;
+        *out_kind = TUI_BLOCK_TABLE;
+        return TUI_LINE_BLOCK_START;
+    }
+    if (len == 1 && line[0] == 'X' && st->in_table && !st->saw_reclass) {
+        st->saw_reclass = 1;
+        *out_kind = TUI_BLOCK_TABLE;
+        return TUI_LINE_RECLASSIFY_PREV;
+    }
+    if (st->in_table)
+        return TUI_LINE_CONTINUES;
+    *out_kind = TUI_BLOCK_PARAGRAPH;
+    return TUI_LINE_BLOCK_START;
+}
+
+static void test_reclassify_splits_live_block(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    SplitState st = { 0, 0 };
+    const TuiClassifier cls = {
+        .state = &st,
+        .classify = block_split_classify,
+        .reset = NULL,
+    };
+    const TuiClassifier *classifiers[1] = { &cls };
+
+    H *h = calloc(1, sizeof(*h));
+    h->text = malloc(OUT_CAP);
+    h->out = tmpfile();
+    h->view = dynamic_buffer_create(512);
+    TuiTranscriptConfig cfg = {
+        .render_block = call_recorder,
+        .render_live = test_render_live,
+        .streams = streams,
+        .classifiers = classifiers,
+        .n_streams = 1,
+    };
+    h->t = tui_transcript_create(&cfg);
+    assert(h->t);
+    TuiRuntimeConfig rcfg = { .raw_mode = 0, .output = h->out };
+    h->rt = tui_runtime_create((TuiComponent *)tui_transcript_component(h->t),
+                               h->t, &rcfg);
+    tui_runtime_set_transcript(h->rt, h->t);
+    tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
+    g_ncalls = 0;
+
+    /* H opens a table; H2 extends it; X reclassifies H2 — which is
+     * INSIDE the live block — so the block splits: [H] finalizes
+     * as-is, [H2..] becomes the new block. */
+    h_send(h, tui_msg_stream_delta(0, "H\nH2\nX\n", strlen("H\nH2\nX\n")));
+    h_flush(h);
+    assert(g_ncalls == 1); /* only the [H] split-half */
+    assert(strcmp(g_calls[0], "H\n") == 0);
+
+    /* extend the new block, then blank-finalize it */
+    h_send(h, tui_msg_stream_delta(0, "end\n\n", strlen("end\n\n")));
+    h_flush(h);
+    assert(g_ncalls == 2);
+    assert(strcmp(g_calls[1], "H2\nX\nend\n") == 0);
+
+    /* committed in order, once each (the [H] half never re-rendered) */
+    const char *out = h_read(h);
+    assert(strstr(out, "R|H\r\n") != NULL);
+    assert(strstr(out, "R|H2\r\n") != NULL);
+    assert(strstr(out, "R|X\r\n") != NULL);
+    assert(strstr(out, "R|end\r\n") != NULL);
+    assert(count_substr(out, "R|H\r\n") == 1);
+    assert(count_substr(out, "R|H2\r\n") == 1);
+
+    h_free(h);
+}
+
 /* ------------------------------------------------------------------ */
 /* Granularity: block (table) + windowing                              */
 /* ------------------------------------------------------------------ */
@@ -913,6 +1029,7 @@ int main(void)
     RUN_TEST(test_unlabeled_fence_streams_verbatim);
     RUN_TEST(test_labeled_fence_line_granular);
     RUN_TEST(test_table_block_holds_to_finalize);
+    RUN_TEST(test_reclassify_splits_live_block);
     RUN_TEST(test_tall_table_windows_to_tail);
     RUN_TEST(test_multi_stream_global_order);
     RUN_TEST(test_submit_finalizes_without_echo);

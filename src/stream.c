@@ -756,12 +756,25 @@ static void process_line(TuiTranscript *t, TuiStream *s, size_t ls, size_t le,
 
     case TUI_LINE_RECLASSIFY_PREV:
         if (s->has_block) {
-            /* prev inside a block-mode live block: splitting is not
-             * exercised by any current grammar; keeping the block
-             * intact is the conservative read (debug: contract
-             * violation). */
-            assert(!"RECLASSIFY_PREV against a live block");
-            stream_extend_block(t, s, end);
+            /* prev is the live block's last line: split the block —
+             * finalize everything before prev as-is, then open a new
+             * block of out_kind whose first line is prev. */
+            size_t block_end = s->block_off + s->block_len;
+            if (!s->has_prev || s->prev_off < s->block_off ||
+                s->prev_off >= block_end) {
+                /* contract violation (prev outside the live block):
+                 * keep the block intact in release, assert in debug */
+                assert(!"RECLASSIFY_PREV outside the live block");
+                stream_extend_block(t, s, end);
+                break;
+            }
+            size_t before = s->prev_off - s->block_off;
+            if (before > 0)
+                emit_unit(t, s, s->block_kind, s->block_off, before);
+            s->block_off = s->prev_off;
+            s->block_len = end - s->block_off;
+            s->block_kind = okind;
+            s->cur_kind = TUI_BLOCK_PARAGRAPH;
             break;
         }
         if (!s->has_pend) {
