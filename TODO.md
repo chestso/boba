@@ -46,6 +46,29 @@ display_col)`; textinput tracks `cursor_byte`. They only share the
   `TUI_CMD_CLIPBOARD_COPY` pipeline. Revisit only if a third consumer
   with the same shape appears.
 
+## Streaming transcript (step 2+)
+
+The transcript component landed in `include/boba/stream.h` (see
+AGENTS.md, "Streaming transcript"). Deferred to the next step:
+
+- **Terminal profile probe** (`terminal_profile.h`): kitty-graphics
+  and DA1 queries plus `CSI 16 t` on first flush, input-parser
+  OSC/DCS/APC capture states, `TUI_MSG_TERM_REPLY` on resolve or
+  bounded timeout, and the IMAGE commit gate it unblocks.
+
+- **Image transport** (`TuiImageSpec`, `tui_row_image`): kitty APC,
+  sixel and iTerm2 encoders behind the sink; row reservation sized
+  from the profile.
+
+- **Commit payload cap**: a single block >cap force-commits a safe
+  prefix at frozen widths (the one case the raw-buffer watermark
+  cannot bound). Correctness is unaffected; memory bound only.
+
+- **Live-row budget partition between streams**: at most one stream
+  grows at a time on every observed wire, so the growing stream takes
+  the whole budget today; revisit if an interleaving provider shows up
+  (the interleaved test already guards ordering).
+
 ## Declarative API alignment
 
 - **Declarative replacements for textinput/viewport setters.** The
