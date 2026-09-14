@@ -2190,20 +2190,39 @@ static void test_transcript_write_twice_no_drift(void)
      * starts at the frame's row 0, not at the post-write cursor. The
      * old clear+write+wakeup protocol had no anchor here: the second
      * clear erased from wherever the untracked write left the cursor
-     * (row 0 of ITS OWN stale bookkeeping), stranding rows. */
-    const char *second_erase = strstr(b, "\x1b[1A");
-    /* (multiline frame renders cursor hidden on last row → row 2;
-     * the second clear_inline must cursor-up 2 BEFORE its EL loop) */
-    const char *second_el = strstr(b, "\r\x1b[K");
-    assert(second_erase != NULL && second_el != NULL);
-    assert(second_erase < second_el);
+     * (row 0 of ITS OWN stale bookkeeping), stranding rows.
+     *
+     * Locate the second call's erase: the first up-2 after the last
+     * "line3" of the first call's frame re-render. It must clear
+     * exactly the frame (3 EL rows), then its walk-back, then the
+     * transcript bytes — all before "second". */
+    const char *line3 = NULL;
+    for (const char *p = a; p < b;) {
+        const char *q = strstr(p, "line3");
+        if (!q || q >= b)
+            break;
+        line3 = q;
+        p = q + 5;
+    }
+    assert(line3 != NULL);
+    const char *second_erase = strstr(line3, "\x1b[2A");
+    assert(second_erase != NULL && second_erase < b);
+    const char *second_el = strstr(second_erase, "\r\x1b[K");
+    assert(second_el != NULL && second_el < b);
+    /* exactly the frame's 3 rows, not the frame plus transcript rows
+     * above (drift erases more; a short erase strands rows) */
+    int second_els = 0;
+    for (const char *p = second_erase; p < b;) {
+        const char *q = strstr(p, "\r\x1b[K");
+        if (!q || q >= b)
+            break;
+        second_els++;
+        p = q + 3;
+    }
+    assert(second_els == 3);
     /* The frame's content appears after the LAST transcript line. */
     const char *after = strstr(b, "line1");
     assert(after != NULL);
-    /* No stale-line erase walking below the frame after the second
-     * write (prev_lines == 3 == line_count: nothing stale). The
-     * second call must not emit a "stale" \r\n+EL run of 3. */
-    assert(strstr(b, "second\r\n") == b); /* sanity: no re-write */
     /* Tracking still consistent. */
     assert(rt->inline_lines_rendered == 3);
 
