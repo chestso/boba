@@ -11,8 +11,8 @@
 #ifndef TUI_VIEWPORT_H
 #define TUI_VIEWPORT_H
 
-#include <boba/component.h>
-#include <boba/dynamic_buffer.h>
+#include "../component.h"
+#include "../dynamic_buffer.h"
 #include <stddef.h>
 
 /* A single line in the viewport */
