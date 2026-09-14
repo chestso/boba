@@ -378,6 +378,9 @@ static void test_unlabeled_fence_streams_verbatim(void)
     /* bytes stream verbatim as soon as the container opens */
     assert(strstr(out, "```\r\ncode1\r\ncode2\r\n") != NULL);
     assert(strstr(out, "R|") == NULL); /* never app-rendered */
+    /* ...and they have NO live representation: byte mode commits on
+     * receipt, so painting them live would double-display the bytes */
+    assert(strcmp(h_view(h), "") == 0);
 
     h_send(h, tui_msg_stream_delta(0, "```", 3)); /* close marker, no \n */
     h_send(h, tui_msg_stream_end(0));
@@ -789,7 +792,7 @@ static void test_resize_live_relayout(void)
     H *h = h_new(streams, NULL, 1);
     assert(h);
 
-    h_send(h, tui_msg_stream_delta(0, "committed line\nnext\n", 21));
+    h_send(h, tui_msg_stream_delta(0, "committed line\nnext\n", strlen("committed line\nnext\n")));
     h_flush(h);
     const char *out_before = h_read(h);
     size_t len_before = strlen(out_before);

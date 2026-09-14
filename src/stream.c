@@ -1304,6 +1304,12 @@ static int live_plan(const TuiTranscript *tc, DynamicBuffer *out, int width,
 
     for (size_t i = 0; i < t->n_user; i++) {
         TuiStream *s = &t->streams[i];
+        /* Byte-emitted content (system stream, unlabeled fences) is
+         * committed on receipt, including a trailing partial row — it
+         * has no live representation; showing it here would paint the
+         * same bytes twice (frame + scrollback). */
+        if (!s->cls || (s->in_container && s->container_byte))
+            continue;
         int has_live = 0;
         if (s->has_block)
             has_live = 1;
