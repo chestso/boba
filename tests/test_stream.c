@@ -629,6 +629,22 @@ static void test_submit_finalizes_without_echo(void)
     assert(strstr(out, "R|partial answer\r\n") != NULL);
     assert(strstr(out, "user line") == NULL); /* echo is finish_inline's */
 
+    /* submit with an unflushed system-stream write (raw bytes still
+     * live, no classifier to finalize): must not dereference the
+     * system stream's NULL classifier */
+    h_send(h, tui_msg_stream_text(-1, "unflushed tail", 14));
+    h_send(h, tui_msg_transcript_submit(NULL, 0));
+    h_flush(h);
+
+    /* submit with a live system-stream partial row: no crash, and the
+     * row closes */
+    h_send(h, tui_msg_stream_text(-1, "tail bytes", 10));
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 1);
+    h_send(h, tui_msg_transcript_submit(NULL, 0));
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 0);
+
     h_free(h);
 }
 

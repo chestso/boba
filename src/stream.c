@@ -864,9 +864,17 @@ static void stream_append(TuiTranscript *t, TuiStream *s, const char *text,
 }
 
 /* Finalize: emit the trailing unterminated line, freeze everything,
- * close containers. Does NOT reset the classifier (caller decides). */
+ * close containers. Does NOT reset the classifier (caller decides).
+ * The system stream has no classifier and stages bytes on receipt —
+ * there is nothing to finalize. */
 static void stream_finalize(TuiTranscript *t, TuiStream *s)
 {
+    if (!s->cls) {
+        /* system stream: stateless pass-through, nothing to finalize */
+        s->raw->len = 0;
+        s->tail_off = 0;
+        return;
+    }
     if (s->raw->len > s->tail_off) {
         size_t ls = s->tail_off;
         process_line(t, s, ls, s->raw->len, 0);
