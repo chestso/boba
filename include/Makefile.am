@@ -12,6 +12,7 @@ boba_HEADERS = \
     boba/ansi_sequences.h \
     boba/unicode.h \
     boba/style.h \
+    boba/stream.h \
     boba/charmtones.h
 
 boba_componentsdir = $(includedir)/boba/components

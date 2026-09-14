@@ -32,6 +32,9 @@
 /* Forward declaration */
 typedef struct TuiRuntime TuiRuntime;
 
+/* Forward declaration: streaming transcript component (stream.h). */
+typedef struct TuiTranscript TuiTranscript;
+
 /* Callback for commands the runtime doesn't handle natively */
 typedef void (*TuiCmdHandler)(TuiCmd *cmd, void *user_data);
 
@@ -155,6 +158,12 @@ struct TuiRuntime
     int inline_lines_rendered; /* lines drawn last frame in inline mode */
     int inline_cursor_row;     /* 0-indexed row where cursor was placed */
     int in_inline_mode;        /* 1 if last flush was inline mode */
+    /* Inline transcript partial row (byte-granular commits end
+     * mid-row): the seam can extend the open row on the next write.
+     * inline_partial_cols is the display column of the row's end;
+     * zero/off when no row is open. */
+    int inline_partial_open;
+    int inline_partial_cols;
     TuiMouseMode cur_mouse_mode;
     TuiKeyboardEnhancements cur_kbd_enhancements;
     int cur_report_focus;
@@ -196,6 +205,11 @@ struct TuiRuntime
     TuiMsg *msg_queue;
     int msg_queue_count;
     int msg_queue_cap;
+
+    /* Attached streaming transcript (see tui_runtime_set_transcript).
+     * Not owned. The commit pass runs at the top of tui_runtime_flush. */
+    TuiTranscript *transcript;
+    int committing; /* re-entrancy guard for the commit pass */
 
     /* Command queue (for tui_runtime_schedule) */
     TuiCmd **cmd_queue;
@@ -291,9 +305,24 @@ void tui_runtime_clear_inline(TuiRuntime *runtime);
  * print, an event-loop step between the write and the next flush)
  * can strand frame rows in the scrollback. Bytes must be line-safe
  * (every line \r\n-terminated); keep partial lines in the live
- * region. See also tui_runtime_clear_inline for the erase-only form. */
+ * region. See also tui_runtime_clear_inline for the erase-only form.
+ *
+ * Partial-row extension (byte-granular transcripts): when `bytes`
+ * does NOT end on a row terminator, the last written row stays OPEN
+ * and the next transcript_write moves back up and continues it —
+ * one call, one geometry baseline, same atomicity family. The
+ * transcript component drives this via its commit pass; direct
+ * callers should end with \r\n. */
 void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
                                   size_t len);
+
+/* Attach a streaming transcript (stream.h) to the runtime. The
+ * transcript's commit pass then runs at the top of every
+ * tui_runtime_flush: all emission units staged since the last flush
+ * reach the scrollback through exactly ONE transcript_write (one
+ * geometry baseline per batch). The runtime does not own the
+ * transcript; pass NULL to detach. Inline mode only. */
+void tui_runtime_set_transcript(TuiRuntime *runtime, TuiTranscript *transcript);
 
 /* Render view and write to output (with cursor hide/show) */
 void tui_runtime_flush(TuiRuntime *runtime);

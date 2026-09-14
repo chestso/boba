@@ -13,6 +13,8 @@ libboba_a_SOURCES = \
     base64.c \
     base64.h \
     style.c \
+    stream.c \
+    stream_internal.h \
     components/textinput.c \
     components/viewport.c \
     components/list_popup.c

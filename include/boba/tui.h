@@ -26,4 +26,7 @@
 /* Runtime (optional, for standalone applications) */
 #include "runtime.h"
 
+/* Streaming transcript component */
+#include "stream.h"
+
 #endif /* BOBA_TUI_H */

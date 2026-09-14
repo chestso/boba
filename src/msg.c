@@ -149,6 +149,15 @@ void tui_msg_free(TuiMsg *msg)
         free(msg->data.paste.text);
         msg->data.paste.text = NULL;
         msg->data.paste.len = 0;
+    } else if (msg->type == TUI_MSG_STREAM_DELTA ||
+               msg->type == TUI_MSG_STREAM_TEXT) {
+        free(msg->data.stream.text);
+        msg->data.stream.text = NULL;
+        msg->data.stream.len = 0;
+    } else if (msg->type == TUI_MSG_TRANSCRIPT_SUBMIT) {
+        free(msg->data.submit.text);
+        msg->data.submit.text = NULL;
+        msg->data.submit.len = 0;
     }
 }
 

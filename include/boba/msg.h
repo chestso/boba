@@ -24,6 +24,11 @@ typedef enum
     TUI_MSG_PASTE_START,        /* Bracketed paste begins (no payload) */
     TUI_MSG_PASTE,              /* Bracketed paste payload */
     TUI_MSG_PASTE_END,          /* Bracketed paste ends (no payload) */
+    TUI_MSG_STREAM_DELTA,       /* Streamed transcript delta (stream_id + text) */
+    TUI_MSG_STREAM_TEXT,        /* Raw transcript entry, system stream (id < 0) */
+    TUI_MSG_STREAM_END,         /* Stream finished (stream_id) */
+    TUI_MSG_TRANSCRIPT_SUBMIT,  /* User line submitted (finalizes LIVE blocks) */
+    TUI_MSG_TRANSCRIPT_CLEAR,   /* New chat (resets the transcript) */
     TUI_MSG_CUSTOM_BASE = 1000, /* Base for application-defined messages */
 } TuiMsgType;
 
@@ -143,6 +148,27 @@ typedef struct
     size_t len; /* Byte length, not counting trailing null */
 } TuiPasteMsg;
 
+/* Stream message payload (TUI_MSG_STREAM_DELTA / TUI_MSG_STREAM_TEXT).
+ *
+ * Memory ownership: stream text is heap-allocated and owned by the
+ * message; tui_msg_free() frees it. Constructors copy, so the caller's
+ * buffer may be transient (agent callbacks hand out borrowed bytes
+ * that die before a posted message is dispatched). */
+typedef struct
+{
+    int stream_id; /* user stream index, or -1 for the system stream */
+    char *text;    /* owned; also null-terminated for convenience */
+    size_t len;
+} TuiStreamMsg;
+
+/* Transcript submit payload (TUI_MSG_TRANSCRIPT_SUBMIT). Owned like
+ * TuiStreamMsg.text. */
+typedef struct
+{
+    char *text; /* owned; also null-terminated for convenience */
+    size_t len;
+} TuiSubmitMsg;
+
 /* Main message structure (tagged union) */
 typedef struct
 {
@@ -153,7 +179,9 @@ typedef struct
         TuiMouseMsg mouse;
         TuiWindowSizeMsg size;
         TuiPasteMsg paste;
-        void *custom; /* For application-defined message data */
+        TuiStreamMsg stream; /* TUI_MSG_STREAM_DELTA / _TEXT / _END */
+        TuiSubmitMsg submit; /* TUI_MSG_TRANSCRIPT_SUBMIT */
+        void *custom;        /* For application-defined message data */
     } data;
 } TuiMsg;
 

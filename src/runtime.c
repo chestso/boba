@@ -2,8 +2,11 @@
 
 #include <boba/ansi_sequences.h>
 #include <boba/runtime.h>
+#include <boba/unicode.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "stream_internal.h"
 
 #ifndef _WIN32
 #include <errno.h>
@@ -538,6 +541,9 @@ void tui_runtime_stop(TuiRuntime *runtime)
             runtime->cur_bracketed_paste = 0;
         }
         runtime->inline_lines_rendered = 0;
+        runtime->inline_cursor_row = 0;
+        runtime->inline_partial_open = 0;
+        runtime->inline_partial_cols = 0;
         runtime->in_inline_mode = 0;
         fflush(runtime->output);
         runtime->started = 0;
@@ -570,7 +576,9 @@ void tui_runtime_stop(TuiRuntime *runtime)
  * application output appears below the input. The cursor may be on
  * any row (e.g. the user moved it up); we cursor-down to the last
  * rendered row, then write \r\n to start a fresh line for output.
- * Resets tracking so the next flush renders on a fresh line. */
+ * Resets tracking so the next flush renders on a fresh line. Any
+ * open partial transcript row is orphaned (it stays on screen as-is;
+ * a later commit starts below it instead of extending it). */
 void tui_runtime_finish_inline(TuiRuntime *runtime)
 {
     if (!runtime || !runtime->in_inline_mode)
@@ -593,6 +601,8 @@ void tui_runtime_finish_inline(TuiRuntime *runtime)
     /* Reset so the next flush doesn't cursor-up into old content */
     runtime->inline_lines_rendered = 0;
     runtime->inline_cursor_row = 0;
+    runtime->inline_partial_open = 0;
+    runtime->inline_partial_cols = 0;
 
     fflush(fp);
 }
@@ -651,8 +661,8 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
 
 /* Transcript write: the ATOMIC inline-print seam. Erase the live frame
  * in place (exactly clear_inline's erase), write the caller's bytes
- * over the erased area (whole transcript lines, each ending \r\n),
- * then re-render the live region below them in the same call.
+ * over the erased area, then re-render the live region below them in
+ * the same call.
  *
  * Why atomic: with clear_inline + fwrite + a later flush as separate
  * steps, the bytes the app writes move the real cursor by an amount
@@ -663,10 +673,12 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
  * call keeps the geometry consistent by construction: the repaint
  * sees the post-write cursor as its baseline and records it.
  *
- * The bytes must be "line-safe" for an inline transcript: every line
- * ends \r\n (raw mode: the terminal does not translate \n). Callers
- * needing mid-line continuation keep the partial line in their live
- * region (it re-renders here) and only ever write whole lines.
+ * Partial rows (byte-granular streams): when the payload does NOT end
+ * on a row terminator, the last row is left OPEN — the cursor moves
+ * below it for the live region, and the next call moves back up and
+ * extends the row in place (same one-call, one-baseline discipline).
+ * The transcript component drives this; direct callers should end on
+ * \r\n.
  *
  * Without an inline frame yet (before the first flush) the erase is a
  * no-op — the bytes still go out and the next flush renders below
@@ -677,18 +689,51 @@ void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
     if (!runtime || !bytes || len == 0)
         return;
 
+    int extend = runtime->inline_partial_open && runtime->in_inline_mode;
+    int cols = extend ? runtime->inline_partial_cols : 0;
+
     /* Erase the current frame in place; the cursor lands at frame
      * row 0 (or wherever it is with no frame — nothing to erase). */
     tui_runtime_clear_inline(runtime);
 
-    /* Write the transcript bytes; the cursor ends M rows below where
-     * the frame was (M = the \n count in the bytes, modulo wrapping
-     * and scrolling). Reset BOTH trackers: the next render must not
-     * cursor-up (the old frame is gone from the screen) and must not
-     * stale-erase into the fresh transcript lines. */
+    /* Extend path: the frame sat one row below the open partial row
+     * (we wrote \r\n after it); go back up and move to its end. */
+    if (extend) {
+        int width = runtime->term_width > 1 ? runtime->term_width : 80;
+        if (cols > width - 1)
+            cols = width - 1;
+        fputs("\x1b[1A", runtime->output);
+        fputs("\r", runtime->output);
+        if (cols > 0) {
+            char fwd_buf[16];
+            ansi_format_cursor_fwd(fwd_buf, sizeof(fwd_buf), cols);
+            fputs(fwd_buf, runtime->output);
+        }
+    }
+
+    /* Write the transcript bytes; a payload that does not end on \n
+     * leaves the row open for the next call to extend. */
     fwrite(bytes, 1, len, runtime->output);
     fflush(runtime->output);
 
+    int open = bytes[len - 1] != '\n';
+    int esc = 0;
+    int col = tui_rowcols_advance(cols, bytes, len, &esc);
+    if (open) {
+        runtime->inline_partial_open = 1;
+        runtime->inline_partial_cols = col;
+        /* move below the open row so the live region renders on its
+         * own rows; the next call moves back up to extend it */
+        fputs("\r\n", runtime->output);
+        fflush(runtime->output);
+    } else {
+        runtime->inline_partial_open = 0;
+        runtime->inline_partial_cols = 0;
+    }
+
+    /* Reset BOTH trackers: the next render must not cursor-up (the
+     * old frame is gone from the screen) and must not stale-erase
+     * into the fresh transcript lines. */
     runtime->inline_lines_rendered = 0;
     runtime->inline_cursor_row = 0;
 
@@ -696,6 +741,24 @@ void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
      * geometry is re-established from the post-write cursor inside
      * this same call — no window for divergence. */
     tui_runtime_flush(runtime);
+}
+
+/* Attach a streaming transcript; the commit pass then runs at the top
+ * of every flush (see runtime.h). Not owned by the runtime. */
+void tui_runtime_set_transcript(TuiRuntime *runtime, TuiTranscript *transcript)
+{
+    if (runtime)
+        runtime->transcript = transcript;
+}
+
+/* Forget an open partial row without emitting anything (transcript
+ * clear: the row above stays; the next write starts below it). */
+void tui_runtime_transcript_orphan(TuiRuntime *runtime)
+{
+    if (!runtime)
+        return;
+    runtime->inline_partial_open = 0;
+    runtime->inline_partial_cols = 0;
 }
 
 /* Render view, reconcile terminal mode against the View's declarations,
@@ -712,6 +775,19 @@ void tui_runtime_flush(TuiRuntime *runtime)
 {
     if (!runtime || !runtime->component || !runtime->model)
         return;
+
+    /* Commit pass (streaming transcripts): all emission units staged
+     * since the last flush go out through ONE transcript_write — one
+     * geometry baseline per batch. The seam re-renders the live region
+     * itself (its flush runs with committing set, so no recursion), so
+     * a successful commit ends this flush. */
+    if (runtime->transcript && !runtime->committing) {
+        runtime->committing = 1;
+        int wrote = tui_transcript_commit_pending(runtime->transcript, runtime);
+        runtime->committing = 0;
+        if (wrote)
+            return;
+    }
 
     /* Render content into the view buffer. */
     DynamicBuffer *content = runtime->view_buf;
@@ -1002,8 +1078,13 @@ void tui_runtime_drain(TuiRuntime *runtime)
         free(snap_cmds);
 
         /* Process messages through update() */
-        for (int i = 0; i < snap_msg_count; i++)
+        for (int i = 0; i < snap_msg_count; i++) {
             tui_runtime_send(runtime, snap_msgs[i]);
+            /* posted messages may own heap payloads (stream text,
+             * paste buffers); free after dispatch, per the msg.h
+             * ownership contract */
+            tui_msg_free(&snap_msgs[i]);
+        }
         free(snap_msgs);
 
         /* Loop again if processing enqueued more items */
