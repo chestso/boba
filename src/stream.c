@@ -200,6 +200,8 @@ struct TuiTranscript
     EscScan esc;  /* split escape scan state (see above) */
 
     int orphan_partial; /* clear() while a row was open: forget, emit nothing */
+    int image_pending;  /* an IMAGE unit is staged: commit waits for the
+                         * terminal profile (see commit_gated) */
     unsigned long commit_count;
 
     /* live planner scratch (reused; see memory-reuse principle) */
@@ -664,6 +666,14 @@ static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
     blk.off = off;
     blk.len = len;
 
+    /* An image's row reservation depends on the terminal profile
+     * (graphics tier, cell size), so once an IMAGE unit is staged the
+     * commit waits for the probe's verdict — see
+     * tui_transcript_commit_gated(). One-way latch: the profile
+     * resolves once, so subsequent batches are never gated. */
+    if (kind == TUI_BLOCK_IMAGE)
+        t->image_pending = 1;
+
     TuiRowSink sink;
     sink_commit_begin(t, &sink);
     t->cfg.render_block(&blk, s->raw->data + off, len, sink.width, &sink,
@@ -1047,6 +1057,29 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
 {
     if (!t || !rt)
         return 0;
+
+    /* Commit gate: staged bytes carrying an IMAGE unit wait for the
+     * terminal profile (the batch is held in `staging` untouched —
+     * trimming and emission happen only after a write). The cap is a
+     * memory bound only: past it the profile resolves conservatively
+     * (no graphics -> the app's degradation markers) and the batch
+     * goes out. */
+    if (tui_transcript_commit_gated(t) &&
+        !tui_runtime_terminal_profile(rt)->resolved) {
+        if (tui_transcript_staged_bytes(t) < TUI_TRANSCRIPT_STAGED_CAP) {
+            /* A verdict is required, but reaching it is the runtime's
+             * job: if no probe is outstanding (the component never
+             * declared one / has no view), resolve conservatively now
+             * rather than hold the batch forever. */
+            tui_runtime_probe_ensure(rt);
+            if (!tui_runtime_terminal_profile(rt)->resolved)
+                return 0;
+        } else {
+            tui_runtime_probe_check(rt);
+            if (!tui_runtime_terminal_profile(rt)->resolved)
+                return 0;
+        }
+    }
 
     if (t->orphan_partial) {
         tui_runtime_transcript_orphan(rt);
@@ -1442,6 +1475,20 @@ int tui_transcript_live_rows(const TuiTranscript *t, int width, int rows_cap)
 unsigned long tui_transcript_commit_count(const TuiTranscript *t)
 {
     return t ? t->commit_count : 0;
+}
+
+size_t tui_transcript_staged_bytes(const TuiTranscript *t)
+{
+    if (!t || !t->staging)
+        return 0;
+    return t->staging->len;
+}
+
+int tui_transcript_commit_gated(const TuiTranscript *t)
+{
+    if (!t || !t->image_pending)
+        return 0;
+    return tui_transcript_staged_bytes(t) > 0;
 }
 
 size_t tui_transcript_stream_raw_len(const TuiTranscript *t, int stream_id)

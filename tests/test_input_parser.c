@@ -4,6 +4,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <boba/input_parser.h>
@@ -366,6 +367,174 @@ static void test_paste_grows_beyond_initial_buf(void)
         tui_msg_free(&msgs[i]);
 }
 
+/* ----- capability replies (OSC / DCS / APC captures) -------------------- */
+
+/* Feed `input`, then pull replies the way the runtime does. Returns the
+ * count; fills up to `max` payloads (caller frees each). */
+static int capture_replies(const char *input, char *out[], int max)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    tui_input_parser_claim_reply(p);
+    TuiMsg msgs[8];
+    int n = tui_input_parser_parse(p, (const unsigned char *)input,
+                                   strlen(input), msgs, 8);
+    for (int i = 0; i < n; i++)
+        tui_msg_free(&msgs[i]);
+    int got = 0;
+    char *payload = NULL;
+    size_t len = 0;
+    while (got < max && tui_input_parser_next_reply(p, &payload, &len)) {
+        out[got++] = payload;
+        payload = NULL;
+    }
+    tui_input_parser_free(p);
+    return got;
+}
+
+static void test_kitty_query_reply_captured(void)
+{
+    char *r[4];
+    int n = capture_replies("\033_Gi=31;OK\033\\", r, 4);
+    assert(n == 1);
+    assert(strcmp(r[0], "Gi=31;OK") == 0);
+    free(r[0]);
+}
+
+static void test_da1_reply_captured(void)
+{
+    char *r[4];
+    int n = capture_replies("\033[?1;2;4c", r, 4);
+    assert(n == 1);
+    assert(strcmp(r[0], "[?1;2;4c") == 0);
+    free(r[0]);
+}
+
+static void test_cell_size_reply_captured(void)
+{
+    char *r[4];
+    int n = capture_replies("\033[6;18;9t", r, 4);
+    assert(n == 1);
+    assert(strcmp(r[0], "[6;18;9t") == 0);
+    free(r[0]);
+}
+
+static void test_xtversion_reply_captured(void)
+{
+    char *r[4];
+    int n = capture_replies("\033P>|kitty(0.36.0)\033\\", r, 4);
+    assert(n == 1);
+    assert(strcmp(r[0], ">|kitty(0.36.0)") == 0);
+    free(r[0]);
+}
+
+static void test_replies_are_not_key_input(void)
+{
+    /* A config reply must produce ZERO key messages — it used to leak
+     * in as characters (the '?' and '1' of "?1;2;4c"). */
+    TuiMsg msgs[8];
+    const char *input = "\033[?1;2;4c";
+    int n = parse_into(input, strlen(input), msgs, 8);
+    assert(n == 0);
+}
+
+static void test_unclaimed_replies_are_dropped(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    TuiMsg msgs[4];
+    const char *seq = "\033_Gi=31;OK\033\\";
+    int n = tui_input_parser_parse(p, (const unsigned char *)seq, strlen(seq),
+                                   msgs, 4);
+    for (int i = 0; i < n; i++)
+        tui_msg_free(&msgs[i]);
+    char *payload = NULL;
+    size_t len = 0;
+    assert(tui_input_parser_next_reply(p, &payload, &len) == 0);
+    tui_input_parser_free(p);
+}
+
+static void test_release_drops_queued_replies(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    tui_input_parser_claim_reply(p);
+    TuiMsg msgs[4];
+    const char *seq = "\033_Gi=31;OK\033\\";
+    int n = tui_input_parser_parse(p, (const unsigned char *)seq, strlen(seq),
+                                   msgs, 4);
+    for (int i = 0; i < n; i++)
+        tui_msg_free(&msgs[i]);
+    tui_input_parser_release_reply(p);
+    char *payload = NULL;
+    size_t len = 0;
+    assert(tui_input_parser_next_reply(p, &payload, &len) == 0);
+    tui_input_parser_free(p);
+}
+
+static void test_reply_split_across_feeds(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    tui_input_parser_claim_reply(p);
+    TuiMsg msgs[4];
+    /* sequence split mid-payload and mid-terminator */
+    const char *p1 = "\033_Gi=3";
+    const char *p2 = "1;OK\033";
+    const char *p3 = "\\";
+    int n = tui_input_parser_parse(p, (const unsigned char *)p1, strlen(p1),
+                                   msgs, 4);
+    for (int i = 0; i < n; i++)
+        tui_msg_free(&msgs[i]);
+    n = tui_input_parser_parse(p, (const unsigned char *)p2, strlen(p2), msgs,
+                               4);
+    for (int i = 0; i < n; i++)
+        tui_msg_free(&msgs[i]);
+    n = tui_input_parser_parse(p, (const unsigned char *)p3, strlen(p3), msgs,
+                               4);
+    for (int i = 0; i < n; i++)
+        tui_msg_free(&msgs[i]);
+    char *payload = NULL;
+    size_t len = 0;
+    assert(tui_input_parser_next_reply(p, &payload, &len) == 1);
+    assert(strcmp(payload, "Gi=31;OK") == 0);
+    free(payload);
+    tui_input_parser_free(p);
+}
+
+static void test_key_after_reply_still_parses(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    tui_input_parser_claim_reply(p);
+    TuiMsg msgs[4];
+    const char *seq = "\033_Gi=31;OK\033\\x";
+    int n = tui_input_parser_parse(p, (const unsigned char *)seq, strlen(seq),
+                                   msgs, 4);
+    assert(n == 1);
+    assert(msgs[0].type == TUI_MSG_KEY_PRESS);
+    assert(msgs[0].data.key.rune == 'x');
+    tui_msg_free(&msgs[0]);
+    char *payload = NULL;
+    size_t len = 0;
+    assert(tui_input_parser_next_reply(p, &payload, &len) == 1);
+    free(payload);
+    tui_input_parser_free(p);
+}
+
+static void test_osc_title_is_not_a_reply(void)
+{
+    /* Unrecognized string traffic is captured-and-dropped, never
+     * surfaced as keys and never as a reply payload. */
+    TuiMsg msgs[4];
+    const char *input = "\033]0;my title\007x";
+    int n = parse_into(input, strlen(input), msgs, 4);
+    assert(n == 1);
+    assert(msgs[0].type == TUI_MSG_KEY_PRESS);
+    assert(msgs[0].data.key.rune == 'x');
+    tui_msg_free(&msgs[0]);
+}
+
 int main(void)
 {
     printf("Running input parser tests...\n");
@@ -405,6 +574,17 @@ int main(void)
     RUN_TEST(test_paste_contains_csi_not_reparsed);
     RUN_TEST(test_paste_contains_bare_esc);
     RUN_TEST(test_paste_grows_beyond_initial_buf);
+
+    RUN_TEST(test_kitty_query_reply_captured);
+    RUN_TEST(test_da1_reply_captured);
+    RUN_TEST(test_cell_size_reply_captured);
+    RUN_TEST(test_xtversion_reply_captured);
+    RUN_TEST(test_replies_are_not_key_input);
+    RUN_TEST(test_unclaimed_replies_are_dropped);
+    RUN_TEST(test_release_drops_queued_replies);
+    RUN_TEST(test_reply_split_across_feeds);
+    RUN_TEST(test_key_after_reply_still_parses);
+    RUN_TEST(test_osc_title_is_not_a_reply);
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

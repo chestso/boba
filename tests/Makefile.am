@@ -1,6 +1,6 @@
 # tests/Makefile.am - Build and run boba unit tests
 
-UNIT_TESTS = test_ansi test_textinput test_viewport test_runtime test_focus test_clipboard test_input_parser test_style test_list_popup test_charmtones test_stream
+UNIT_TESTS = test_ansi test_textinput test_viewport test_runtime test_focus test_clipboard test_input_parser test_style test_list_popup test_charmtones test_stream test_terminal_profile
 
 check_PROGRAMS = $(UNIT_TESTS)
 
@@ -18,6 +18,7 @@ test_style_SOURCES = test_style.c
 test_list_popup_SOURCES = test_list_popup.c
 test_charmtones_SOURCES = test_charmtones.c
 test_stream_SOURCES = test_stream.c
+test_terminal_profile_SOURCES = test_terminal_profile.c
 
 # tmux-driven end-to-end tests. Folded into `make check` when tmux was
 # detected at configure time, so a regression in shell-driven UI tests

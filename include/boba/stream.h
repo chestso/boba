@@ -59,6 +59,15 @@
  *
  * Inline mode only: "commit to the scrollback" has no meaning in an
  * alt-screen layout; this component targets boba's inline frame.
+ *
+ * Two seams are deferred to the image tier (see the TM-image work):
+ * the app-side degradation policy (tier choice from the profile) and
+ * `tui_row_image` transport are not implemented yet. What IS
+ * implemented is the part that would be wrong to retrofit: an IMAGE
+ * unit's commit waits for the terminal profile (probe verdict or
+ * timeout) when one has been declared, and the gate is a plain
+ * staging-buffer hold, so nothing on the transcript side changes when
+ * the seam lands.
  */
 
 #ifndef BOBA_STREAM_H
@@ -69,6 +78,7 @@
 #include "component.h"
 #include "dynamic_buffer.h"
 #include "msg.h"
+#include "terminal_profile.h"
 
 /* ------------------------------------------------------------------ */
 /* Blocks                                                              */
@@ -207,9 +217,8 @@ const TuiClassifier *tui_classifier_default(void);
 
 typedef struct TuiTranscript TuiTranscript;
 
-/* Terminal capability profile (defined in terminal_profile.h when the
- * probe lands; opaque here). */
-typedef struct TuiTerminalProfile TuiTerminalProfile;
+/* Terminal capability profile (defined in terminal_profile.h; the
+ * probe lands in terminal_profile.c — see that header). */
 
 typedef struct TuiStreamSpec
 {
@@ -298,6 +307,12 @@ void tui_transcript_view(const TuiTranscript *t, DynamicBuffer *out, int width,
  * implementation to drift), for footer/cursor placement. */
 int tui_transcript_live_rows(const TuiTranscript *t, int width, int rows_cap);
 
+/* Safety cap on bytes held by the IMAGE commit gate: a pathological
+ * block larger than this forces the probe to resolve conservatively
+ * rather than let the staging buffer grow for the whole session.
+ * Memory bound only — correctness is unaffected. */
+#define TUI_TRANSCRIPT_STAGED_CAP (1024 * 1024)
+
 /* ----- Test / introspection seams ----- */
 
 /* Number of transcript_write batches driven by the commit pass. */
@@ -306,5 +321,13 @@ unsigned long tui_transcript_commit_count(const TuiTranscript *t);
 /* Bytes retained in a stream's raw buffer (after trim). stream_id -1
  * addresses the system stream. */
 size_t tui_transcript_stream_raw_len(const TuiTranscript *t, int stream_id);
+
+/* Bytes staged but not yet committed. Non-zero while the commit gate
+ * holds a batch (see the image gate note in stream.h). */
+size_t tui_transcript_staged_bytes(const TuiTranscript *t);
+
+/* 1 while the commit pass is holding staged bytes for the terminal
+ * profile (an IMAGE unit is staged and the probe has not resolved). */
+int tui_transcript_commit_gated(const TuiTranscript *t);
 
 #endif /* BOBA_STREAM_H */

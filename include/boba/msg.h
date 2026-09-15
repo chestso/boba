@@ -233,8 +233,9 @@ TuiMsg tui_msg_paste(char *text, size_t len);
 /* Create a paste-end message (no payload) */
 TuiMsg tui_msg_paste_end(void);
 
-/* Free any heap data owned by a TuiMsg (currently: paste text). No-op for
- * messages without owned data. Safe to call multiple times. */
+/* Free any heap data owned by a TuiMsg (currently: paste/text
+ * payloads). No-op for messages without owned data. Safe to call
+ * multiple times. */
 void tui_msg_free(TuiMsg *msg);
 
 /* Check if message is a key press of specific type */

@@ -29,4 +29,7 @@
 /* Streaming transcript component */
 #include "stream.h"
 
+/* Terminal capability probe */
+#include "terminal_profile.h"
+
 #endif /* BOBA_TUI_H */

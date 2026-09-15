@@ -1,24 +1,31 @@
 /* input_parser.c - Terminal input parsing for boba TUI library */
 
 #include <boba/input_parser.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* Parser states */
 typedef enum
 {
-    PARSER_STATE_GROUND,    /* Normal state, waiting for input */
-    PARSER_STATE_ESCAPE,    /* Got ESC, waiting for next char */
-    PARSER_STATE_CSI,       /* In CSI sequence (ESC [) */
-    PARSER_STATE_CSI_MOUSE, /* In SGR mouse sequence (ESC [ <) */
-    PARSER_STATE_SS3,       /* In SS3 sequence (ESC O) */
-    PARSER_STATE_UTF8,      /* In UTF-8 multi-byte sequence */
-    PARSER_STATE_PASTE,     /* Inside bracketed paste, scanning for ESC[201~ */
+    PARSER_STATE_GROUND,     /* Normal state, waiting for input */
+    PARSER_STATE_ESCAPE,     /* Got ESC, waiting for next char */
+    PARSER_STATE_CSI,        /* In CSI sequence (ESC [) */
+    PARSER_STATE_CSI_MOUSE,  /* In SGR mouse sequence (ESC [ <) */
+    PARSER_STATE_SS3,        /* In SS3 sequence (ESC O) */
+    PARSER_STATE_UTF8,       /* In UTF-8 multi-byte sequence */
+    PARSER_STATE_PASTE,      /* Inside bracketed paste, scanning for ESC[201~ */
+    PARSER_STATE_OSC,        /* In OSC string (ESC ]), until BEL or ST */
+    PARSER_STATE_STRING,     /* In DCS/APC/PM/SOS (ESC P _ ^ X), until ST */
+    PARSER_STATE_STRING_ESC, /* ESC seen inside a string: ST or content */
 } ParserState;
 
 /* Bracketed-paste end marker: ESC [ 2 0 1 ~ */
 static const unsigned char PASTE_END_MARKER[6] = { 0x1B, '[', '2', '0', '1',
                                                    '~' };
+
+#define REPLY_MAX_BYTES  4096
+#define REPLY_MAX_QUEUED 32
 
 /* Input parser structure */
 struct TuiInputParser
@@ -39,6 +46,22 @@ struct TuiInputParser
      * plus one queued msg (used to emit PASTE then PASTE_END together). */
     int has_pending;
     TuiMsg pending;
+
+    /* Terminal capability replies (CSI / OSC / DCS / APC captures).
+     *
+     * These are NOT key input: they are parked for the runtime, which
+     * hands them to the probe decoder (terminal_profile.c). The bytes
+     * are the sequence payload — '[params final' for CSI, the body for
+     * a string sequence, introducer and terminator stripped. Claiming
+     * is explicit (see the capture section below), so unsolicited
+     * string traffic is dropped rather than queued. */
+    unsigned char reply_buf[REPLY_MAX_BYTES];
+    size_t reply_len;
+    int reply_truncated;
+    int reply_claimed; /* a probe is outstanding: queue captures */
+    unsigned char *reply_queue[REPLY_MAX_QUEUED];
+    size_t reply_qlen[REPLY_MAX_QUEUED];
+    int reply_qread, reply_qcount;
 };
 
 /* Grow paste_buf to hold at least `needed` bytes. Returns 0 on success,
@@ -70,6 +93,127 @@ static void paste_buf_append(TuiInputParser *p, const unsigned char *data,
     p->paste_len += n;
 }
 
+/* ------------------------------------------------------------------ */
+/* Terminal capability reply capture                                   */
+/* ------------------------------------------------------------------ */
+
+/* A terminal's answer to a capability query arrives on stdin as a CSI,
+ * OSC, DCS or APC sequence. None of those is key input: the capture
+ * below accumulates the sequence PAYLOAD (CSI introducer and final
+ * char kept; string introducer and terminator stripped) and parks it on
+ * a small ring, where the runtime picks it up and hands it to the
+ * probe decoder (terminal_profile.c).
+ *
+ * The parser makes no judgement about which reply means what — it only
+ * guarantees (a) such sequences are never dispatched to components as
+ * key presses, and (b) the bytes survive for whoever is waiting on
+ * them. All decoding lives in the probe (terminal_profile.c), because
+ * that is where the query grammar lives.
+ *
+ * Claiming is explicit: only a runtime with an outstanding probe calls
+ * tui_input_parser_claim_reply(), so unsolicited string traffic (a
+ * terminal echoing OSC 52, an image passthrough, a hostile stream)
+ * cannot make the ring grow without bound. Unclaimed captures are
+ * dropped. */
+#define REPLY_MAX_BYTES  4096
+#define REPLY_MAX_QUEUED 32
+
+static void reply_capture_begin(TuiInputParser *p)
+{
+    p->reply_len = 0;
+    p->reply_truncated = 0;
+}
+
+static void reply_capture_byte(TuiInputParser *p, unsigned char c)
+{
+    if (p->reply_len >= REPLY_MAX_BYTES) {
+        p->reply_truncated = 1;
+        return;
+    }
+    p->reply_buf[p->reply_len++] = c;
+}
+
+/* Park `len` payload bytes for the runtime. Dropped when no probe has
+ * claimed replies, or when the ring is full (one 256-byte read per loop
+ * iteration with a drain after each cannot fill 32 slots, but never
+ * grow without bound). The payload is copied; the capture buffer stays
+ * put for reuse (memory-reuse principle). */
+static void reply_queue_payload(TuiInputParser *p, const unsigned char *bytes,
+                                size_t len)
+{
+    if (len == 0)
+        return;
+    if (!p->reply_claimed)
+        return;
+    if (p->reply_qcount >= REPLY_MAX_QUEUED) {
+        p->reply_qread = 0;
+        p->reply_qcount = 0;
+    }
+    unsigned char *copy = malloc(len + 1);
+    if (!copy)
+        return;
+    memcpy(copy, bytes, len);
+    copy[len] = '\0';
+    int i = p->reply_qcount++;
+    p->reply_queue[i] = copy;
+    p->reply_qlen[i] = len;
+}
+
+/* Finish a string capture (OSC / DCS / APC): hand the payload over. */
+static void reply_capture_finish(TuiInputParser *p)
+{
+    if (p->reply_len == 0)
+        return;
+    if (p->reply_truncated)
+        return; /* a truncated reply is not decodable */
+    reply_queue_payload(p, p->reply_buf, p->reply_len);
+    p->reply_len = 0;
+}
+
+/* Mark that a probe is outstanding: subsequent captures are parked for
+ * the runtime instead of dropped. Idempotent. */
+void tui_input_parser_claim_reply(TuiInputParser *p)
+{
+    if (p)
+        p->reply_claimed = 1;
+}
+
+/* Mark that no probe is outstanding: queued captures are dropped and
+ * further captures ignored until claimed again. */
+void tui_input_parser_release_reply(TuiInputParser *p)
+{
+    if (!p)
+        return;
+    p->reply_claimed = 0;
+    while (p->reply_qread < p->reply_qcount)
+        free(p->reply_queue[p->reply_qread++]);
+    p->reply_qread = 0;
+    p->reply_qcount = 0;
+}
+
+/* Pull one captured reply. Returns 1 and sets *text (owned by the
+ * caller) and *len when one was queued. */
+int tui_input_parser_next_reply(TuiInputParser *p, char **text, size_t *len)
+{
+    if (!p)
+        return 0;
+    if (p->reply_qread >= p->reply_qcount) {
+        /* empty: reset both cursors so the next capture starts at 0 */
+        p->reply_qread = 0;
+        p->reply_qcount = 0;
+        return 0;
+    }
+    int i = p->reply_qread++;
+    if (text)
+        *text = (char *)p->reply_queue[i];
+    else
+        free(p->reply_queue[i]);
+    if (len)
+        *len = p->reply_qlen[i];
+    p->reply_queue[i] = NULL;
+    return 1;
+}
+
 /* Create a new input parser */
 TuiInputParser *tui_input_parser_create(void)
 {
@@ -86,6 +230,7 @@ TuiInputParser *tui_input_parser_create(void)
 void tui_input_parser_free(TuiInputParser *parser)
 {
     if (parser) {
+        tui_input_parser_release_reply(parser);
         free(parser->paste_buf);
         free(parser);
     }
@@ -103,11 +248,16 @@ void tui_input_parser_reset(TuiInputParser *parser)
     parser->paste_len = 0;
     parser->paste_match = 0;
     parser->has_pending = 0;
+    parser->reply_len = 0;
+    parser->reply_truncated = 0;
     /* paste_buf retained for reuse across pastes. */
 }
 
-/* Parse CSI sequence and return appropriate key message */
-static TuiMsg parse_csi_sequence(const unsigned char *seq, int len)
+/* Parse CSI sequence and return appropriate key message. `parser` is
+ * used only to record capability-probe replies (DA1, cell size); a
+ * NULL parser (unit tests) simply skips the recording. */
+static TuiMsg parse_csi_sequence(TuiInputParser *parser,
+                                 const unsigned char *seq, int len)
 {
     TuiMsg msg = tui_msg_none();
     int mods = TUI_MOD_NONE;
@@ -119,11 +269,15 @@ static TuiMsg parse_csi_sequence(const unsigned char *seq, int len)
      * - ';' is the standard CSI parameter separator.
      * - ':' is the sub-parameter separator (used by the Kitty keyboard
      *   protocol, e.g. CSI 65 ; 5 : 3 u for Ctrl+'A' release).
-     * For our flat dispatch we treat both identically. */
+     * For our flat dispatch we treat both identically.
+     * A leading '?' (DEC private) is skipped: DA1 is `CSI ? 1 ; 2 ; 4 c`. */
     int params[8] = { 0 };
     int n_params = 0;
     const char *p = (const char *)seq;
     char final = seq[len - 1];
+
+    if (*p == '?')
+        p++;
 
     while (n_params < 8) {
         int v = 0;
@@ -166,6 +320,23 @@ static TuiMsg parse_csi_sequence(const unsigned char *seq, int len)
             mods |= TUI_MOD_CTRL | TUI_MOD_ALT;
         else if (param2 == 8)
             mods |= TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_SHIFT;
+    }
+
+    /* SGR mouse sequences reach parse_sgr_mouse_sequence instead. `c`
+     * (DA1, XTVERSION-class capability) and `t` (cell/character size)
+     * are capability replies: not key input. When a probe has claimed
+     * replies, park the raw sequence (introducer + final, no ESC) for
+     * the decoder — including any unrecognized `c`/`t` reply, so the
+     * profile is built from what the terminal actually said. */
+    if (final == 'c' || final == 't') {
+        if (parser && parser->reply_claimed) {
+            char payload[64];
+            int n = snprintf(payload, sizeof(payload), "[%s", (char *)seq);
+            if (n > 0 && (size_t)n < sizeof(payload))
+                reply_queue_payload(parser, (const unsigned char *)payload,
+                                    (size_t)n);
+        }
+        return tui_msg_none();
     }
 
     /* Map final character to key */
@@ -470,6 +641,18 @@ int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
             /* SS3 sequence */
             parser->state = PARSER_STATE_SS3;
             return 0;
+        } else if (byte == ']') {
+            /* OSC string — not key input; parked for a capability probe */
+            reply_capture_begin(parser);
+            parser->state = PARSER_STATE_OSC;
+            return 0;
+        } else if (byte == 'P' || byte == '_' || byte == '^' || byte == 'X') {
+            /* DCS / APC / PM / SOS string — same treatment. The
+             * introducer is dropped; the payload starts with the next
+             * byte (kitty's "G", XTVERSION's ">"). */
+            reply_capture_begin(parser);
+            parser->state = PARSER_STATE_STRING;
+            return 0;
         } else {
             /* Alt+key or unknown sequence */
             parser->state = PARSER_STATE_GROUND;
@@ -515,7 +698,7 @@ int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
                 return 0;
             }
 
-            *msg = parse_csi_sequence(parser->seq_buf, parser->seq_len);
+            *msg = parse_csi_sequence(parser, parser->seq_buf, parser->seq_len);
             parser->state = PARSER_STATE_GROUND;
             return msg->type != TUI_MSG_NONE;
         }
@@ -538,6 +721,43 @@ int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
         *msg = parse_ss3_sequence(byte);
         parser->state = PARSER_STATE_GROUND;
         return msg->type != TUI_MSG_NONE;
+
+    case PARSER_STATE_OSC:
+        /* OSC payload until BEL or ST (ESC \). */
+        if (byte == 0x07) {
+            reply_capture_finish(parser);
+            parser->state = PARSER_STATE_GROUND;
+            return 0;
+        }
+        if (byte == 0x1B) {
+            parser->state = PARSER_STATE_STRING_ESC;
+            return 0;
+        }
+        reply_capture_byte(parser, byte);
+        return 0;
+
+    case PARSER_STATE_STRING:
+        /* DCS/APC/PM/SOS payload until ST. */
+        if (byte == 0x1B) {
+            parser->state = PARSER_STATE_STRING_ESC;
+            return 0;
+        }
+        reply_capture_byte(parser, byte);
+        return 0;
+
+    case PARSER_STATE_STRING_ESC:
+        /* ESC inside a string: ST ("\\") ends it; anything else is
+         * content (an ESC byte and its follower belong to the payload).
+         * Re-dispatching the follower through the string state keeps
+         * that decision in one place. */
+        if (byte == '\\') {
+            reply_capture_finish(parser);
+            parser->state = PARSER_STATE_GROUND;
+            return 0;
+        }
+        reply_capture_byte(parser, 0x1B);
+        parser->state = PARSER_STATE_STRING;
+        return tui_input_parser_feed(parser, byte, msg);
 
     case PARSER_STATE_UTF8:
         if ((byte & 0xC0) != 0x80) {

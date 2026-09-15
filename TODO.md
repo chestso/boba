@@ -46,19 +46,19 @@ display_col)`; textinput tracks `cursor_byte`. They only share the
   `TUI_CMD_CLIPBOARD_COPY` pipeline. Revisit only if a third consumer
   with the same shape appears.
 
-## Streaming transcript (step 2+)
+## Streaming transcript (step 3+)
 
 The transcript component landed in `include/boba/stream.h` (see
-AGENTS.md, "Streaming transcript"). Deferred to the next step:
-
-- **Terminal profile probe** (`terminal_profile.h`): kitty-graphics
-  and DA1 queries plus `CSI 16 t` on first flush, input-parser
-  OSC/DCS/APC capture states, `TUI_MSG_TERM_REPLY` on resolve or
-  bounded timeout, and the IMAGE commit gate it unblocks.
+AGENTS.md, "Streaming transcript"); the terminal capability probe and
+the IMAGE commit gate landed with it in `terminal_profile.h`. The
+probe's completion signal is the deadline, never a single reply (FIFO
+answers arrive in one burst; resolving on DA1 would discard the cell
+size / XTVERSION that follow). Deferred to the next steps:
 
 - **Image transport** (`TuiImageSpec`, `tui_row_image`): kitty APC,
   sixel and iTerm2 encoders behind the sink; row reservation sized
-  from the profile.
+  from the profile. (`tui_row_image` is currently a no-op; nevermore's
+  renderer degrades IMAGE blocks to their text.)
 
 - **Commit payload cap**: a single block >cap force-commits a safe
   prefix at frozen widths (the one case the raw-buffer watermark

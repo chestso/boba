@@ -19,6 +19,7 @@
 #include "dynamic_buffer.h"
 #include "input_parser.h"
 #include "msg.h"
+#include "terminal_profile.h"
 
 #include <stdio.h>
 
@@ -100,6 +101,15 @@ typedef void (*TuiOnResize)(int width, int height, void *user_data);
 /* Callback: called after stdin input is processed through the runtime */
 typedef void (*TuiOnStdinProcessed)(void *user_data);
 
+/* Callback: the terminal capability probe reached its verdict — a
+ * profile arrived, or the deadline passed (see terminal_profile.h).
+ * Fires exactly once per probe, on the loop thread. The profile is
+ * borrowed and lives as long as the runtime. Components then commit
+ * any content that was gated on capability (e.g. IMAGE blocks) by
+ * posting a message; they must not commit from inside this callback. */
+typedef void (*TuiOnTermReply)(const struct TuiTerminalProfile *profile,
+                               void *user_data);
+
 /* Callback: handle a clipboard-copy command. If installed, the runtime calls
  * this instead of emitting OSC 52 to the output. Useful when running inside
  * a terminal that does not implement OSC 52 (notably VTE-based terminals
@@ -130,6 +140,7 @@ typedef struct TuiRuntimeConfig
     TuiGetTickTimeoutMs get_tick_timeout_ms; /* Dynamic tick timeout */
     TuiOnResize on_resize;                   /* Terminal resized */
     TuiOnStdinProcessed on_stdin_processed;  /* After stdin processed */
+    TuiOnTermReply on_term_reply;            /* Capability probe resolved */
     void *event_data;                        /* Context pointer for event callbacks */
 
     /* Clipboard override. If non-NULL, the runtime calls this for
@@ -217,6 +228,16 @@ struct TuiRuntime
      * Not owned. The commit pass runs at the top of tui_runtime_flush. */
     TuiTranscript *transcript;
     int committing; /* re-entrancy guard for the commit pass */
+
+    /* Terminal capability probe (see terminal_profile.h).
+     *
+     * probe_state: 0 = idle, 1 = declared and about to be emitted,
+     * 2 = outstanding (replies claimed, deadline armed),
+     * 3 = resolved (callback fired).
+     * probe_deadline_ms is a monotonic absolute time (0 = not armed). */
+    TuiTerminalProfile profile;
+    int probe_state;
+    long long probe_deadline_ms;
 
     /* Command queue (for tui_runtime_schedule) */
     TuiCmd **cmd_queue;
@@ -330,6 +351,25 @@ void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
  * geometry baseline per batch). The runtime does not own the
  * transcript; pass NULL to detach. Inline mode only. */
 void tui_runtime_set_transcript(TuiRuntime *runtime, TuiTranscript *transcript);
+
+/* Resolve the outstanding capability probe now, conservatively, and
+ * fire on_term_reply if it has not fired yet. Called by the runtime
+ * itself on timeout and on teardown; exposed because embedding
+ * consumers that drive their own event loop must call it from their
+ * timer, exactly as they call tui_runtime_drain() on the wakeup fd. */
+void tui_runtime_probe_check(TuiRuntime *runtime);
+
+/* Guarantee a profile verdict right now (conservative resolution if no
+ * probe is outstanding). The transcript commit gate calls this when it
+ * is holding an IMAGE unit, so a gated batch can never deadlock against
+ * a probe the component forgot to declare. */
+void tui_runtime_probe_ensure(TuiRuntime *runtime);
+
+/* Terminal capability profile accessor. The profile lives in
+ * terminal_profile.h; declared here so runtime.h clients get it
+ * without an extra include. Never NULL; `resolved` says whether the
+ * probe reached its verdict. */
+const TuiTerminalProfile *tui_runtime_terminal_profile(TuiRuntime *rt);
 
 /* Render view and write to output (with cursor hide/show) */
 void tui_runtime_flush(TuiRuntime *runtime);

@@ -48,4 +48,27 @@ int tui_input_parser_parse(TuiInputParser *parser, const unsigned char *input,
 int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
                           TuiMsg *msg);
 
+/* Terminal capability-probe replies.
+ *
+ * OSC / DCS / APC sequences on stdin are never key input. The parser
+ * captures their payloads and parks them on a small ring; a consumer
+ * waiting on a probe (the runtime's terminal-profile probe,
+ * terminal_profile.h) pulls them with next_reply().
+ *
+ * Claiming is explicit: while no probe is outstanding the parser drops
+ * captures, so unsolicited string traffic (a terminal echoing OSC 52,
+ * an image passthrough) cannot grow the ring. Claim/release are
+ * idempotent; release discards anything still queued. */
+
+/* Mark a probe outstanding: captures are parked for next_reply(). */
+void tui_input_parser_claim_reply(TuiInputParser *parser);
+
+/* No probe outstanding: drop queued captures and ignore new ones. */
+void tui_input_parser_release_reply(TuiInputParser *parser);
+
+/* Pull one captured reply payload into *text (heap-allocated, owned by
+ * the caller; *len set). Returns 1 when one was queued, 0 when none. */
+int tui_input_parser_next_reply(TuiInputParser *parser, char **text,
+                                size_t *len);
+
 #endif /* BOBA_INPUT_PARSER_H */

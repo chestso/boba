@@ -1041,6 +1041,95 @@ static void test_no_bare_lf_anywhere(void)
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* IMAGE commit gate: an IMAGE unit waits for the terminal profile     */
+/* ------------------------------------------------------------------ */
+
+/* Classifier that opens a paragraph block on a "!img" line, kind IMAGE. */
+static TuiLineClass image_classify(void *state, const char *line, size_t len,
+                                   const char *prev, size_t prev_len,
+                                   TuiBlockKind *out_kind)
+{
+    (void)state;
+    (void)prev;
+    *out_kind = TUI_BLOCK_PARAGRAPH;
+    if (len >= 4 && strncmp(line, "!img", 4) == 0) {
+        *out_kind = TUI_BLOCK_IMAGE;
+        return TUI_LINE_BLOCK_START;
+    }
+    if (len == 0)
+        return TUI_LINE_BLANK;
+    return TUI_LINE_CONTINUES;
+}
+
+static const TuiClassifier image_cls = {
+    .state = NULL,
+    .classify = image_classify,
+    .reset = NULL,
+};
+
+static void test_image_unit_gated_until_profile(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    H *h = h_new(streams, classifiers, 1);
+    assert(h);
+
+    /* stage the IMAGE unit: it must NOT commit while the profile is
+     * unresolved (no probe declared on this harness's view) */
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 11));
+    h->rt->probe_state = 2;       /* pretend an outstanding probe */
+    h->rt->probe_deadline_ms = 0; /* not yet due */
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 0);
+    assert(tui_transcript_staged_bytes(h->t) > 0);
+    assert(tui_transcript_commit_gated(h->t) == 1);
+
+    /* the profile resolves: the held batch goes out */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 1);
+    assert(strstr(h_read(h), "R|!img") != NULL);
+    assert(tui_transcript_staged_bytes(h->t) == 0);
+
+    h_free(h);
+}
+
+static void test_image_gate_does_not_deadlock_unclaimed(void)
+{
+    /* No probe was ever declared: the gate must resolve conservatively
+     * and commit rather than hold the batch forever. */
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    H *h = h_new(streams, classifiers, 1);
+    assert(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 11));
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 1);
+    assert(strstr(h_read(h), "R|!img") != NULL);
+
+    h_free(h);
+}
+
+static void test_non_image_never_gated(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    /* an unresolved probe must not hold ordinary text */
+    h->rt->probe_state = 2;
+    h->rt->probe_deadline_ms = 0;
+    h_send(h, tui_msg_stream_delta(0, "hello\nworld\n", 12));
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 1);
+    assert(tui_transcript_commit_gated(h->t) == 0);
+
+    h_free(h);
+}
+
 int main(void)
 {
     printf("test_stream: streaming transcript component\n");
@@ -1061,6 +1150,9 @@ int main(void)
     RUN_TEST(test_resize_live_relayout);
     RUN_TEST(test_split_escape_sequence_passthrough);
     RUN_TEST(test_no_bare_lf_anywhere);
+    RUN_TEST(test_image_unit_gated_until_profile);
+    RUN_TEST(test_image_gate_does_not_deadlock_unclaimed);
+    RUN_TEST(test_non_image_never_gated);
     printf("test_stream: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

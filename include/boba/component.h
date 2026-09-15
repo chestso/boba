@@ -108,6 +108,15 @@ typedef struct TuiView
     /* Window title. NULL = leave alone. */
     const char *window_title;
 
+    /* Ask the runtime to probe terminal capabilities once (graphics
+     * protocol, cell size) — see terminal_profile.h. Declaring it on
+     * any frame's view enables the probe; the runtime emits the query
+     * once, ahead of that frame's content, and reports the verdict
+     * through TuiRuntimeConfig::on_term_reply. Components that gate
+     * layout on capability (an image block's row reservation) must
+     * declare it; everything else leaves it 0. */
+    int probe_terminal;
+
     /* Cursor placement. visible=0 = hidden. */
     TuiCursor cursor;
 } TuiView;

@@ -2553,6 +2553,122 @@ static void test_inline_resize_triggers_repaint(void)
     fclose(fp);
 }
 
+/* ========================================================================
+ * Terminal capability probe through the real event loop
+ * ======================================================================== */
+
+static int s_probe_reply_calls;
+static int s_probe_sixel;
+static int s_probe_kitty;
+
+static TuiInitResult probe_loop_init(void *config)
+{
+    (void)config;
+    TestModel *m = calloc(1, sizeof(TestModel));
+    m->base.type = 996;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+/* Never quits on its own: the run ends when stdin hits EOF. */
+static TuiUpdateResult probe_loop_update(TuiModel *model, TuiMsg msg)
+{
+    (void)model;
+    (void)msg;
+    return tui_update_result_none();
+}
+
+static TuiView probe_loop_view(const TuiModel *model, DynamicBuffer *out)
+{
+    (void)model;
+    dynamic_buffer_append_str(out, "p\r\n");
+    TuiView v = tui_view_default(out);
+    v.probe_terminal = 1;
+    return v;
+}
+
+static TuiComponent probe_loop_component = {
+    .init = probe_loop_init,
+    .update = probe_loop_update,
+    .view = probe_loop_view,
+    .free = test_free,
+};
+
+static void probe_loop_on_reply(const TuiTerminalProfile *p, void *data)
+{
+    (void)data;
+    s_probe_reply_calls++;
+    s_probe_sixel = p->sixel;
+    s_probe_kitty = p->kitty_graphics;
+}
+
+/* Run the real loop with `reply` sitting in a stdin pipe; EOF (closing
+ * the write end) ends the run, exactly like a terminal that went away.
+ * Returns elapsed wall-clock ms. */
+static long long probe_loop_run(const char *reply)
+{
+    int stdin_pipe[2];
+    assert(pipe(stdin_pipe) == 0);
+    int orig_stdin = dup(STDIN_FILENO);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+
+    FILE *out = fopen(DEVNULL, "w");
+    assert(out != NULL);
+
+    s_probe_reply_calls = 0;
+    s_probe_sixel = 0;
+    s_probe_kitty = 0;
+
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = out,
+        .on_term_reply = probe_loop_on_reply,
+    };
+    TuiRuntime *rt = tui_runtime_create(&probe_loop_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    /* The reply (or nothing) is already in the pipe. EOF follows. */
+    if (reply && *reply)
+        assert(write(stdin_pipe[1], reply, strlen(reply)) ==
+               (ssize_t)strlen(reply));
+    close(stdin_pipe[1]);
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    assert(tui_runtime_run(rt) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    /* teardown-time probe check must have fired (guaranteed one-shot) */
+    assert(s_probe_reply_calls == 1);
+
+    dup2(orig_stdin, STDIN_FILENO);
+    close(orig_stdin);
+    close(stdin_pipe[0]);
+    tui_runtime_free(rt);
+    fclose(out);
+
+    return (long long)(t1.tv_sec - t0.tv_sec) * 1000 +
+           (t1.tv_nsec - t0.tv_nsec) / 1000000;
+}
+
+/* A real terminal's answers, read through the parser, resolve the probe
+ * and fire the callback once. */
+static void test_probe_resolves_in_loop(void)
+{
+    probe_loop_run("\033_Gi=31;OK\033\\\033[?1;2;4c");
+    assert(s_probe_reply_calls == 1);
+    assert(s_probe_kitty == 1);
+    assert(s_probe_sixel == 1);
+}
+
+/* Silence resolves conservatively at EOF — must not hang, and the
+ * callback still fires (exactly once). */
+static void test_probe_silent_loop_resolves_on_exit(void)
+{
+    probe_loop_run("");
+    assert(s_probe_reply_calls == 1);
+    assert(s_probe_kitty == 0 && s_probe_sixel == 0);
+}
+
 #endif /* _WIN32 */
 
 /* ======================================================================== */
@@ -2640,6 +2756,8 @@ int main(void)
     RUN_TEST(test_start_inline_no_decsc);
     RUN_TEST(test_start_resets_inline_lines_rendered);
     RUN_TEST(test_inline_resize_triggers_repaint);
+    RUN_TEST(test_probe_resolves_in_loop);
+    RUN_TEST(test_probe_silent_loop_resolves_on_exit);
 #endif
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);

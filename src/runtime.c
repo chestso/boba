@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "stream_internal.h"
+#include "terminal_profile_internal.h"
 
 #ifndef _WIN32
 #include <errno.h>
@@ -260,6 +261,116 @@ static void runtime_tick_maybe(TuiRuntime *runtime, int interval_ms)
         return;
     runtime->last_tick_ms = now;
     runtime->config.on_tick(runtime->config.event_data);
+}
+
+/* ------------------------------------------------------------------ */
+/* Terminal capability probe (see terminal_profile.h)                  */
+/* ------------------------------------------------------------------ */
+
+/* Finish the probe: stamp the verdict and fire the callback once.
+ * `emitted` is whether the query actually went out (an output stream
+ * that cannot take it still resolves the probe — reaching a verdict is
+ * what consumers wait on). */
+static void runtime_probe_resolve(TuiRuntime *runtime)
+{
+    if (runtime->probe_state != 2)
+        return;
+    runtime->probe_state = 3;
+    runtime->probe_deadline_ms = 0;
+    runtime->profile.resolved = 1;
+    if (runtime->parser)
+        tui_input_parser_release_reply(runtime->parser);
+    if (runtime->config.on_term_reply)
+        runtime->config.on_term_reply(&runtime->profile,
+                                      runtime->config.event_data);
+}
+
+/* Drain every reply the parser captured since the last call. Returns
+ * nothing on purpose: the probe's completion signal is the deadline,
+ * not a particular reply. The terminal answers in FIFO order (kitty
+ * graphics ack, then DA1, then cell size, then XTVERSION), so resolving
+ * on any single reply would discard the ones still in flight — and a
+ * terminal that answers none of them looks identical to one whose
+ * answers have not arrived yet. */
+static void runtime_probe_drain(TuiRuntime *runtime)
+{
+    char *payload = NULL;
+    size_t len = 0;
+    while (tui_input_parser_next_reply(runtime->parser, &payload, &len)) {
+        if (payload) {
+            tui_term_profile_feed(&runtime->profile, payload, len);
+            free(payload);
+        }
+        payload = NULL;
+        len = 0;
+    }
+}
+
+/* Public: resolve a probe whose deadline has passed. The runtime calls
+ * this from the tick; embedding consumers call it from their own timer
+ * (see runtime.h). Before the first flush the parser is NULL, so the
+ * guard is real. */
+void tui_runtime_probe_check(TuiRuntime *runtime)
+{
+    if (!runtime || runtime->probe_state != 2)
+        return;
+    runtime_probe_drain(runtime);
+    long long now = runtime_now_ms();
+    if (runtime->probe_deadline_ms != 0 && now >= runtime->probe_deadline_ms)
+        runtime_probe_resolve(runtime);
+}
+
+/* Public: guarantee a profile verdict. Called by the transcript commit
+ * gate when an IMAGE unit is staged — a gated batch must not be able
+ * to deadlock against a probe that was never declared (an embedding
+ * component with no view, or one that forgot the declaration). Idle =>
+ * resolve conservatively now; outstanding => apply the deadline. */
+void tui_runtime_probe_ensure(TuiRuntime *runtime)
+{
+    if (!runtime || runtime->profile.resolved)
+        return;
+    if (runtime->probe_state == 0) {
+        runtime->probe_state = 2;
+        runtime_probe_resolve(runtime);
+        return;
+    }
+    tui_runtime_probe_check(runtime);
+}
+
+/* Begin the probe, if the component asked for one and none has run.
+ * Called from flush AFTER view() (so the View's declaration is known)
+ * and BEFORE the frame's bytes go out. Returns 1 when the query must be
+ * emitted ahead of this frame — exactly once, at the transition. */
+static int runtime_probe_maybe_start(TuiRuntime *runtime, const TuiView *v)
+{
+    if (runtime->probe_state != 0 || !v->probe_terminal ||
+        runtime->profile.resolved)
+        return 0;
+
+    runtime->probe_state = 1;
+    memset(&runtime->profile, 0, sizeof(runtime->profile));
+    tui_term_profile_apply_env(&runtime->profile);
+
+    if (!runtime->parser) {
+        /* No parser (a test harness that never reads input): resolve
+         * immediately from environment hints alone. */
+        runtime->probe_state = 2;
+        runtime_probe_resolve(runtime);
+        return 0;
+    }
+
+    tui_input_parser_claim_reply(runtime->parser);
+    runtime->probe_state = 2;
+    runtime->probe_deadline_ms = runtime_now_ms() + TUI_TERM_PROBE_TIMEOUT_MS;
+    return 1;
+}
+
+const TuiTerminalProfile *tui_runtime_terminal_profile(TuiRuntime *runtime)
+{
+    static const TuiTerminalProfile empty = { 0 };
+    if (!runtime)
+        return &empty;
+    return &runtime->profile;
 }
 
 /* Create runtime with component */
@@ -837,6 +948,21 @@ void tui_runtime_flush(TuiRuntime *runtime)
 
     FILE *fp = runtime->output;
 
+    /* Capability probe: start it (before this frame's bytes, so the
+     * query precedes content and a terminal's reply arrives as the
+     * next input) and drain any replies that landed since the last
+     * flush before the commit gate below inspects the profile. The
+     * query itself is emitted exactly once, at the transition. */
+    int probe_emit = runtime_probe_maybe_start(runtime, &v);
+    if (probe_emit) {
+        char query[TUI_TERM_PROBE_QUERY_MAX];
+        size_t qlen = tui_term_probe_query(query, sizeof(query));
+        if (qlen > 0)
+            fwrite(query, 1, qlen, fp);
+    } else if (runtime->probe_state == 2) {
+        tui_runtime_probe_check(runtime);
+    }
+
     /* 1. Hide cursor while painting to prevent flicker. */
     fputs(ANSI_HIDE_CURSOR, fp);
 
@@ -1285,8 +1411,12 @@ int tui_runtime_run(TuiRuntime *runtime)
             break;        /* Real error */
         }
 
-        /* stdin ready */
-        if (ready > 0 && (fds[idx_stdin].revents & POLLIN)) {
+        /* stdin ready. POLLHUP without POLLIN is a closed stdin with no
+         * data left — still dispatch it so the read below observes EOF;
+         * checking POLLIN alone spins the loop forever on a terminal
+         * that went away. */
+        if (ready > 0 &&
+            (fds[idx_stdin].revents & (POLLIN | POLLHUP))) {
             unsigned char buf[STDIN_READ_BUF_SIZE];
             ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
             if (n > 0) {
@@ -1339,8 +1469,20 @@ int tui_runtime_run(TuiRuntime *runtime)
         }
 
         /* Tick — the periodic timer, rate-limited to the configured
-         * interval (see runtime_tick_maybe). */
+         * interval (see runtime_tick_maybe). The capability probe
+         * shares the tick as its deadline clock: a terminal that never
+         * answers must not hold the commit gate forever. */
         runtime_tick_maybe(runtime, timeout_ms);
+        tui_runtime_probe_check(runtime);
+    }
+
+    /* An unresolved probe must still reach a verdict (the callback is a
+     * guaranteed one-shot), so resolve conservatively on exit — the
+     * deadline is irrelevant once the loop is gone: a terminal that
+     * vanished (EOF) will never answer. */
+    if (runtime->probe_state == 2) {
+        runtime->probe_deadline_ms = 1; /* expire it */
+        tui_runtime_probe_check(runtime);
     }
 
     /* Teardown */
@@ -1574,6 +1716,14 @@ int tui_runtime_run(TuiRuntime *runtime)
          * so map "wait forever" to the no-tick sentinel. */
         runtime_tick_maybe(runtime,
                            timeout_ms == INFINITE ? -1 : (int)timeout_ms);
+        tui_runtime_probe_check(runtime);
+    }
+
+    /* Guaranteed one-shot verdict (see the Unix branch): a vanished
+     * terminal will never answer, so the deadline is irrelevant here. */
+    if (runtime->probe_state == 2) {
+        runtime->probe_deadline_ms = 1;
+        tui_runtime_probe_check(runtime);
     }
 
     /* Teardown: stop reader thread */
