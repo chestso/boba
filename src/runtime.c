@@ -14,6 +14,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 #else
 #include <io.h>
@@ -227,6 +228,39 @@ static void runtime_wakeup_win(TuiRuntime *rt)
 
 /* Forward declaration */
 static int execute_cmd(TuiRuntime *runtime, TuiCmd *cmd);
+
+/* Monotonic milliseconds, for rate-limiting the periodic tick. */
+static long long runtime_now_ms(void)
+{
+#ifndef _WIN32
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+#else
+    return (long long)GetTickCount64();
+#endif
+}
+
+/* Dispatch on_tick at most once per interval. on_tick is a periodic
+ * timer (Elm's Time.every); firing it on EVERY loop iteration turns a
+ * callback that touches the terminal (spinner frame → wakeup → wait →
+ * tick → …) into a busy loop — boba's wait becomes a no-op because the
+ * wakeup pipe is always armed. `interval_ms` is the timeout the wait
+ * just used; a negative interval means "no periodic tick wanted". */
+static void runtime_tick_maybe(TuiRuntime *runtime, int interval_ms)
+{
+    if (!runtime->config.on_tick || interval_ms < 0)
+        return;
+    if (interval_ms == 0)
+        interval_ms = 100; /* config default when get_tick_timeout_ms absent */
+    long long now = runtime_now_ms();
+    if (runtime->last_tick_ms != 0 &&
+        now - runtime->last_tick_ms < interval_ms)
+        return;
+    runtime->last_tick_ms = now;
+    runtime->config.on_tick(runtime->config.event_data);
+}
 
 /* Create runtime with component */
 TuiRuntime *tui_runtime_create(TuiComponent *component, void *component_config,
@@ -637,12 +671,19 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
         fputs(up_buf, fp);
     }
 
-    /* Erase each rendered row, walking down to the last one */
+    /* Erase each rendered row, walking down to the last one.
+     * Cursor-DOWN, never "\r\n": at the bottom of the screen a line
+     * feed SCROLLS the screen up (moves the frame's top row off into
+     * the scrollback and shifts everything under the cursor), while
+     * the frame's own bookkeeping still assumes the rows stayed put.
+     * That divergence strands the frame's top row in the scrollback
+     * and skews every later cursor-up — the "duplicated partial line"
+     * class. CUD clamps at the last row; no scroll, frame intact. */
     for (int i = 0; i < lines; i++) {
         fputs("\r", fp);
         fputs(EL_TO_END, fp);
         if (i < lines - 1)
-            fputs("\r\n", fp);
+            fputs("\x1b[1B", fp); /* CUD 1 */
     }
 
     /* Walk back up to frame row 0 so app output overwrites the area
@@ -845,11 +886,16 @@ void tui_runtime_flush(TuiRuntime *runtime)
 
         /* Erase stale lines below the new content if the previous frame
          * had more lines than the current one. prev_lines was saved
-         * before we overwrote inline_lines_rendered above. */
+         * before we overwrote inline_lines_rendered above. Cursor-down
+         * (not "\r\n") for the same reason clear_inline uses it: a line
+         * feed at the screen bottom scrolls, and the cursor-up below
+         * would then be measured against a shifted screen. */
         if (prev_lines > line_count) {
             int stale = prev_lines - line_count;
             for (int i = 0; i < stale; i++) {
-                fputs("\r\n" EL_TO_END, fp);
+                fputs("\x1b[1B", fp); /* CUD 1 */
+                fputs("\r", fp);
+                fputs(EL_TO_END, fp);
             }
             /* Move back up to the last content line */
             char up_buf[16];
@@ -1292,9 +1338,9 @@ int tui_runtime_run(TuiRuntime *runtime)
             tui_runtime_flush(runtime);
         }
 
-        /* Tick — fires on every iteration (timeout, fd activity, wakeup) */
-        if (runtime->config.on_tick)
-            runtime->config.on_tick(runtime->config.event_data);
+        /* Tick — the periodic timer, rate-limited to the configured
+         * interval (see runtime_tick_maybe). */
+        runtime_tick_maybe(runtime, timeout_ms);
     }
 
     /* Teardown */
@@ -1523,9 +1569,11 @@ int tui_runtime_run(TuiRuntime *runtime)
             }
         }
 
-        /* Tick */
-        if (runtime->config.on_tick)
-            runtime->config.on_tick(runtime->config.event_data);
+        /* Tick — rate-limited to the configured interval. On the
+         * Windows branch timeout_ms is DWORD (INFINITE = 0xFFFFFFFF),
+         * so map "wait forever" to the no-tick sentinel. */
+        runtime_tick_maybe(runtime,
+                           timeout_ms == INFINITE ? -1 : (int)timeout_ms);
     }
 
     /* Teardown: stop reader thread */

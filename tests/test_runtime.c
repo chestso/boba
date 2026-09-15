@@ -19,6 +19,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #else
 #include <winsock2.h>
@@ -1070,6 +1071,101 @@ static void test_fill_overflow_clamps(void)
     fclose(devnull);
 }
 
+/* The tick is a PERIODIC timer (Elm's Time.every), not an
+ * every-iteration hook. A tick callback that wakes the loop (nevermore's
+ * spinner does exactly this: advance frame → tui_runtime_wakeup) must
+ * not spin: the wakeup re-arms the wait, the wait times out, and a
+ * naive "fire on every iteration" tick would re-wake forever at CPU
+ * speed. Regression for the nevermore 2026-09-15 repaint storm
+ * (341k fps, giant PTY captures, duplicated transcript rows).
+ *
+ * The counter callback wakes every time it runs and gives up after a
+ * bounded number of dispatches; with rate limiting it must be far
+ * below the iteration count that a 200ms wall-clock run with an
+ * always-armed wakeup pipe would produce if the tick fired per loop. */
+#ifndef _WIN32
+
+static TuiRuntime *s_tick_count_rt = NULL;
+static int s_tick_count = 0;
+static int s_tick_wake_again = 1;
+
+static void tick_count_callback(void *data)
+{
+    (void)data;
+    s_tick_count++;
+    if (!s_tick_wake_again)
+        return;
+    /* Self-wake: exactly nevermore's spinner pattern. */
+    tui_runtime_wakeup(s_tick_count_rt);
+    if (s_tick_count >= 6) {
+        s_tick_wake_again = 0;
+        TuiMsg msg = tui_msg_custom(WAKEUP_MSG_TYPE, NULL);
+        tui_runtime_post(s_tick_count_rt, msg); /* quit via update */
+    }
+}
+
+static int tick_count_timeout(void *data)
+{
+    (void)data;
+    return 100; /* the documented default interval */
+}
+
+static void test_tick_is_rate_limited(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    int stdin_pipe[2];
+    assert(pipe(stdin_pipe) == 0);
+    int orig_stdin = dup(STDIN_FILENO);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+
+    s_tick_count = 0;
+    s_tick_wake_again = 1;
+
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .on_tick = tick_count_callback,
+        .get_tick_timeout_ms = tick_count_timeout,
+    };
+    TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_tick_count_rt = rt;
+    s_tick_post_done = 0;
+
+    /* The callback wakes the loop after every dispatch (the nevermore
+     * spinner pattern) and is released on the Nth. With rate limiting,
+     * reaching N dispatches takes N*interval ms of wall clock; when
+     * the tick fired every loop iteration it returned in microseconds
+     * with an astronomically larger count. Measure the wall time and
+     * bound the dispatch count, which is the observable difference. */
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    assert(tui_runtime_run(rt) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long long elapsed_ms =
+        (long long)(t1.tv_sec - t0.tv_sec) * 1000 +
+        (t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+    /* 6 dispatches at 100ms ≈ 600ms; a per-iteration tick would
+     * deliver them and quit in a few ms. Allow generous slack for
+     * loaded CI while still separating the two behaviors by 100x. */
+    assert(s_tick_count >= 6);
+    assert(elapsed_ms >= 300);
+
+    dup2(orig_stdin, STDIN_FILENO);
+    close(orig_stdin);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+
+    s_tick_count_rt = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+
+#endif /* !_WIN32 */
+
 /* Fill returning N entries: three slots survive a full wait cycle.
  * Fds 60–62 are not open — poll reports POLLNVAL, which the runtime
  * maps to READ|WRITE and dispatches to the (tolerant) sink. That is
@@ -1836,12 +1932,13 @@ static void test_flush_inline_erases_stale_lines_on_shrink(void)
     tui_runtime_flush(rt2);
     fflush(fp);
 
-    /* Should emit \r\n + EL_TO_END for 3 stale lines */
+    /* Should emit CUD + \r + EL for the stale lines (never a line
+     * feed — a feed at the screen bottom scrolls the frame away). */
     const char *p = outbuf + pos1;
     int count = 0;
-    while ((p = strstr(p, "\r\n\x1b[K")) != NULL) {
+    while ((p = strstr(p, "\x1b[1B\r\x1b[K")) != NULL) {
         count++;
-        p += 3;
+        p += 7;
     }
     assert(count >= 2);
 
@@ -1996,8 +2093,9 @@ static void test_clear_inline_erases_frame_and_keeps_lines(void)
     /* Cursor-up 1 first (from row 1 to frame row 0), not 2 */
     assert(strncmp(outbuf + pos, "\x1b[1A", 4) == 0);
 
-    /* Three EL erases with \r\n between them, then cursor-up 2 back
-     * to frame row 0 (last erase ends on row 2). */
+    /* Three EL erases separated by cursor-DOWN (never \r\n: a line
+     * feed at the screen bottom scrolls, skewing the frame geometry),
+     * then cursor-up 2 back to frame row 0 (last erase ends on row 2). */
     const char *p = outbuf + pos;
     int el_count = 0;
     while ((p = strstr(p, "\r\x1b[K")) != NULL) {
@@ -2005,6 +2103,8 @@ static void test_clear_inline_erases_frame_and_keeps_lines(void)
         p += 3;
     }
     assert(el_count == 3);
+    assert(strstr(outbuf + pos, "\x1b[1B") != NULL);
+    assert(strstr(outbuf + pos, "\r\n") == NULL);
     assert(strstr(outbuf + pos, "\x1b[2A") != NULL);
 
     /* Tracking: lines KEPT, cursor row reset */
@@ -2065,14 +2165,21 @@ static void test_clear_inline_stale_erase_still_fires(void)
     tui_runtime_flush(rt2);
     fflush(fp);
 
-    /* 3 > 1 → two stale \r\n+EL rows erased below the new frame */
+    /* 3 > 1 → two stale rows erased below the new frame, each moved to
+     * with cursor-DOWN then \r+EL (never a line feed — see the
+     * clear_inline note). */
     const char *q = outbuf + pos;
     int stale = 0;
-    while ((q = strstr(q, "\r\n\x1b[K")) != NULL) {
+    while ((q = strstr(q, "\x1b[1B\r\x1b[K")) != NULL) {
         stale++;
-        q += 3;
+        q += 7;
     }
     assert(stale == 2);
+
+    /* The stale-erase walk must contain NO line feed: at the bottom of
+     * the screen "\r\n" scrolls, and the cursor-up that follows would
+     * be measured against a shifted screen. */
+    assert(strstr(outbuf + pos, "\r\n") == NULL);
 
     tui_runtime_free(rt);
     tui_runtime_free(rt2);
@@ -2487,6 +2594,7 @@ int main(void)
 #ifndef _WIN32
     RUN_TEST(test_runtime_run_immediate_quit);
     RUN_TEST(test_post_wakes_event_loop);
+    RUN_TEST(test_tick_is_rate_limited);
     RUN_TEST(test_fill_zero_in_run);
     RUN_TEST(test_fill_overflow_clamps);
     RUN_TEST(test_fill_three_in_run);

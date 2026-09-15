@@ -164,6 +164,13 @@ struct TuiRuntime
      * zero/off when no row is open. */
     int inline_partial_open;
     int inline_partial_cols;
+    /* Monotonic time (ms) of the last on_tick dispatch. on_tick is a
+     * periodic timer (Elm's Time.every), so it fires only once per
+     * get_tick_timeout_ms interval even when the loop wakes early for
+     * fds or wakeups — otherwise a dispatch that touches the terminal
+     * spins the loop (a wakeup re-arms the wait, the wait fires the
+     * tick, the tick wakes again). */
+    long long last_tick_ms;
     TuiMouseMode cur_mouse_mode;
     TuiKeyboardEnhancements cur_kbd_enhancements;
     int cur_report_focus;
