@@ -162,6 +162,7 @@ typedef struct TuiAttr
     int dim;
     int italic;
     int underline;
+    int strikethrough;
     int has_fg;
     int fg_r, fg_g, fg_b;
     int has_bg;

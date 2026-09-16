@@ -1060,6 +1060,17 @@ static void sink_probe_render(const TuiBlock *blk, const char *text, size_t len,
     tui_row_pad_to(sink, 4);
     tui_row_text(sink, "x", 1);
     tui_row_end(sink);
+    /* composed flags emit in order 1,2,3,4,9,fg,bg — strikethrough is
+     * the flag the nevermore markdown renderer needs for `~~strike~~` */
+    TuiAttr strike = { 0 };
+    strike.bold = 1;
+    strike.italic = 1;
+    strike.underline = 1;
+    strike.strikethrough = 1;
+    tui_row_attr(sink, strike);
+    tui_row_text(sink, "s", 1);
+    tui_row_attr_reset(sink);
+    tui_row_end(sink);
 }
 
 static void test_sink_tabs_wide_pad_attrs(void)
@@ -1089,6 +1100,8 @@ static void test_sink_tabs_wide_pad_attrs(void)
     /* tab expanded to the next multiple of 8 (col 1 -> col 8); the
      * dim attr opens the row and resets after its terminator */
     assert(strstr(out, "\x1b[0;2ma       b\r\n") != NULL);
+    /* composed flags: 1 (bold), 3 (italic), 4 (underline), 9 (strike) */
+    assert(strstr(out, "\x1b[0;1;3;4;9ms\x1b[0m") != NULL);
     /* wide char occupies 2 cols; pad_to(4) adds 2 spaces; then x */
     assert(strstr(out, "\x1b[0m\xe8\xa1\xa8  x\r\n") != NULL);
 

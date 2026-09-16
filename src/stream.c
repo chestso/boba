@@ -571,6 +571,8 @@ void tui_row_attr(TuiRowSink *s, TuiAttr a)
         buf[n++] = ';', buf[n++] = '3';
     if (a.underline)
         buf[n++] = ';', buf[n++] = '4';
+    if (a.strikethrough)
+        buf[n++] = ';', buf[n++] = '9';
     if (a.has_fg)
         n += (size_t)snprintf(buf + n, sizeof(buf) - n, ";38;2;%d;%d;%d",
                               a.fg_r, a.fg_g, a.fg_b);
