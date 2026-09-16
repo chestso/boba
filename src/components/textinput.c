@@ -1318,14 +1318,11 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                 dynamic_buffer_append_str(out, pos_buf);
                 dynamic_buffer_append_str(out, EL_TO_END);
 
-                /* Prompt or indentation */
+                /* Prompt or indentation (TuiStyle > legacy prompt_color) */
                 if (current_line == 0 && input->show_prompt && input->prompt &&
                     input->prompt_len > 0) {
-                    if (input->prompt_color[0] != '\0')
-                        dynamic_buffer_append_str(out, input->prompt_color);
-                    dynamic_buffer_append_str(out, input->prompt);
-                    if (input->prompt_color[0] != '\0')
-                        dynamic_buffer_append_str(out, SGR_RESET);
+                    emit_styled_or_legacy(out, prompt_style_for(input),
+                                          input->prompt_color, input->prompt);
                 } else if (current_line > 0 && input->show_prompt && input->prompt &&
                            input->prompt_len > 0) {
                     render_continuation_prompt(input, out);
@@ -1349,13 +1346,10 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
         dynamic_buffer_append_str(out, "\r");
         dynamic_buffer_append_str(out, EL_TO_END);
 
-        /* Output prompt if set and shown */
+        /* Output prompt if set and shown (TuiStyle > legacy prompt_color) */
         if (input->show_prompt && input->prompt && input->prompt_len > 0) {
-            if (input->prompt_color[0] != '\0')
-                dynamic_buffer_append_str(out, input->prompt_color);
-            dynamic_buffer_append_str(out, input->prompt);
-            if (input->prompt_color[0] != '\0')
-                dynamic_buffer_append_str(out, SGR_RESET);
+            emit_styled_or_legacy(out, prompt_style_for(input),
+                                  input->prompt_color, input->prompt);
         }
 
         /* Output text content per line (selection-aware), with scroll window / clip */

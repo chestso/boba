@@ -316,6 +316,32 @@ static void test_focused_blurred_styles_differ(void)
     tui_textinput_free(input);
 }
 
+static void test_prompt_style_applies_in_multiline_mode(void)
+{
+    /* Regression: the multiline render paths read prompt_color directly
+     * and ignored focused/blurred_prompt_style (nevermore's chat is a
+     * multiline input, so its colored prompt had no effect). */
+    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_terminal_width(input, 20);
+    tui_textinput_set_focused_prompt_style(
+        input, tui_style_bold(tui_style_new(), 1));
+    tui_textinput_set_focus(input, 1);
+
+    char *out = render_view(input);
+    assert(strstr(out, "\033[1m> ") != NULL); /* bold prompt */
+    free(out);
+
+    /* legacy color is honored when no style is set */
+    tui_textinput_set_focused_prompt_style(input, tui_style_new());
+    tui_textinput_set_prompt_color(input, "\033[35m");
+    out = render_view(input);
+    assert(strstr(out, "\033[35m> ") != NULL);
+    free(out);
+    tui_textinput_free(input);
+}
+
 static void test_legacy_color_still_works(void)
 {
     /* When no TuiStyle is set, the legacy raw-ANSI setter still applies. */
@@ -1361,6 +1387,7 @@ int main(void)
     RUN_TEST(test_unfocused_ignores_input);
     RUN_TEST(test_release_event_ignored);
     RUN_TEST(test_focused_blurred_styles_differ);
+    RUN_TEST(test_prompt_style_applies_in_multiline_mode);
     RUN_TEST(test_legacy_color_still_works);
     RUN_TEST(test_style_overrides_legacy);
     RUN_TEST(test_history_navigation);
