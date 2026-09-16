@@ -43,6 +43,7 @@ typedef struct TuiStream
 {
     const char *name;         /* borrowed from config */
     const TuiClassifier *cls; /* NULL = system stream */
+    const TuiAttr *live_attr; /* borrowed from config (NULL = plain) */
 
     DynamicBuffer *raw;
 
@@ -479,8 +480,11 @@ static void sink_escape(TuiRowSink *s, const char *utf8, size_t len,
         (*i)++;
         if (esc_scan_feed(&s->esc, c, &emit)) {
             if (emit && s->buf) {
-                dynamic_buffer_append(s->buf, s->esc.buf, s->esc.len);
+                /* D9: note the row BEFORE appending — a leading attr
+                 * opens the row range, so the frame's recorded range
+                 * includes it (capture happens at row end). */
                 sink_note_row_start(s);
+                dynamic_buffer_append(s->buf, s->esc.buf, s->esc.len);
             }
             s->esc.len = 0;
             s->esc.nostore = 0;
@@ -574,14 +578,30 @@ void tui_row_attr(TuiRowSink *s, TuiAttr a)
         n += (size_t)snprintf(buf + n, sizeof(buf) - n, ";48;2;%d;%d;%d",
                               a.bg_r, a.bg_g, a.bg_b);
     buf[n++] = 'm';
+    /* D9: the attr may LEAD the row. Open the row range first, or the
+     * frame's recorded range (captured at row end) starts after it and
+     * the attr is dropped from the emitted bytes. */
+    sink_note_row_start(s);
     dynamic_buffer_append(s->buf, buf, n);
 }
 
 void tui_row_attr_reset(TuiRowSink *s)
 {
+    static const char reset[] = "\x1b[0m";
     if (!s || !s->buf || s->dest == SINK_COUNT)
         return;
-    dynamic_buffer_append(s->buf, "\x1b[0m", 4);
+    if (!s->open && s->dest == SINK_FRAME && s->rstart && s->rcap > 0 &&
+        s->nrows > 0) {
+        /* D9: a reset after the row closed (tui_row_text broke at an
+         * exact multiple of the width) terminates the row just
+         * rendered. Extend that row's recorded end — the reset adds no
+         * row and cannot inflate tui_transcript_live_rows. */
+        int idx = (s->nrows - 1) % s->rcap;
+        s->rend[idx] = s->buf->len + sizeof(reset) - 1;
+    } else {
+        sink_note_row_start(s);
+    }
+    dynamic_buffer_append(s->buf, reset, sizeof(reset) - 1);
 }
 
 void tui_row_pad_to(TuiRowSink *s, int display_col)
@@ -653,7 +673,9 @@ static void sink_commit_end(TuiRowSink *s)
         tui_row_end(s);
 }
 
-/* Render one emission unit (a frozen line or a finalized block). */
+/* Render one emission unit (a frozen line or a finalized block). The
+ * stream is the config index, or -1 for the system stream (which is
+ * byte-emitted and never reaches here). */
 static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
                       size_t off, size_t len)
 {
@@ -665,6 +687,7 @@ static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
     blk.state = TUI_BLOCK_FINAL;
     blk.off = off;
     blk.len = len;
+    blk.stream = s->cls ? (int)(s - t->streams) : -1;
 
     /* An image's row reservation depends on the terminal profile
      * (graphics tier, cell size), so once an IMAGE unit is staged the
@@ -1225,6 +1248,7 @@ TuiTranscript *tui_transcript_create(const TuiTranscriptConfig *cfg)
     for (size_t i = 0; i < t->n_user; i++) {
         TuiStream *s = &t->streams[i];
         s->name = t->cfg.streams ? t->cfg.streams[i].name : NULL;
+        s->live_attr = t->cfg.streams ? t->cfg.streams[i].live_attr : NULL;
         s->cls = (t->cfg.classifiers && t->cfg.classifiers[i])
                      ? t->cfg.classifiers[i]
                      : tui_classifier_default();
@@ -1420,6 +1444,7 @@ static int live_plan(const TuiTranscript *tc, DynamicBuffer *out, int width,
                 blk.state = TUI_BLOCK_LIVE;
                 blk.off = s->block_off;
                 blk.len = s->block_len;
+                blk.stream = (int)i;
                 t->cfg.render_live(&blk, s->raw->data + s->block_off,
                                    s->block_len, w, cap, &sink,
                                    t->cfg.user_data);
@@ -1427,11 +1452,19 @@ static int live_plan(const TuiTranscript *tc, DynamicBuffer *out, int width,
                     sink_row_break(&sink);
             }
         } else {
-            /* boba-owned plain rows: lookahead line + partial tail */
+            /* boba-owned plain rows: lookahead line + partial tail.
+             * The stream's app-declared attr (if any) wraps the run;
+             * the reset is D9's closed-row case when the run wrapped
+             * at an exact multiple of the width. */
             size_t start = s->has_pend ? s->pend_off : s->tail_off;
-            if (start < s->raw->len)
+            if (start < s->raw->len) {
+                if (s->live_attr)
+                    tui_row_attr(&sink, *s->live_attr);
                 tui_row_text(&sink, s->raw->data + start,
                              s->raw->len - start);
+                if (s->live_attr)
+                    tui_row_attr_reset(&sink);
+            }
         }
     }
     if (sink.open)

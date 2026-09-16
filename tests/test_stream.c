@@ -108,6 +108,14 @@ static const char *h_view(H *h)
     return h->view->data;
 }
 
+/* The live region at an explicit width (exact-wrap cases). */
+static const char *h_view_w(H *h, int width)
+{
+    dynamic_buffer_clear(h->view);
+    tui_transcript_view(h->t, h->view, width, 10);
+    return h->view->data;
+}
+
 static void h_free(H *h)
 {
     if (h->rt)
@@ -474,18 +482,21 @@ typedef struct
 
 /* capture each render_block call's text for assertions */
 static char g_calls[8][256];
+static int g_call_stream[8];
+static int g_call_kind[8];
 static int g_ncalls;
 
 static void call_recorder(const TuiBlock *blk, const char *text, size_t len,
                           int width, TuiRowSink *sink, void *ud)
 {
-    (void)blk;
     (void)width;
     (void)ud;
     if (g_ncalls < 8) {
         size_t n = len < 255 ? len : 255;
         memcpy(g_calls[g_ncalls], text, n);
         g_calls[g_ncalls][n] = '\0';
+        g_call_stream[g_ncalls] = blk->stream;
+        g_call_kind[g_ncalls] = (int)blk->kind;
         g_ncalls++;
     }
     emit_text_rows(sink, "R|", text, len);
@@ -724,6 +735,192 @@ static void test_multi_stream_global_order(void)
     const char *c = strstr(out, "R|answer\r\n");
     assert(a && b && c);
     assert(a < b && b < c);
+
+    h_free(h);
+}
+
+/* ------------------------------------------------------------------ */
+/* Block stream id: render_block/render_live see which stream          */
+/* ------------------------------------------------------------------ */
+
+/* A harness whose render_block is caller-supplied (the recorder, or a
+ * line-granular probe). */
+static H *h_new_render(const TuiStreamSpec *streams,
+                       const TuiClassifier **classifiers, size_t n,
+                       void (*render_block)(const TuiBlock *, const char *,
+                                            size_t, int, TuiRowSink *, void *))
+{
+    H *h = calloc(1, sizeof(*h));
+    if (!h)
+        return NULL;
+    h->text = malloc(OUT_CAP);
+    h->out = tmpfile();
+    h->view = dynamic_buffer_create(512);
+    TuiTranscriptConfig cfg = {
+        .render_block = render_block,
+        .render_live = test_render_live,
+        .streams = streams,
+        .classifiers = classifiers,
+        .n_streams = n,
+    };
+    h->t = tui_transcript_create(&cfg);
+    if (!h->text || !h->out || !h->view || !h->t) {
+        h_free(h);
+        return NULL;
+    }
+    TuiRuntimeConfig rcfg = { .raw_mode = 0, .output = h->out };
+    h->rt = tui_runtime_create((TuiComponent *)tui_transcript_component(h->t),
+                               h->t, &rcfg);
+    if (!h->rt) {
+        h_free(h);
+        return NULL;
+    }
+    tui_runtime_set_transcript(h->rt, h->t);
+    tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
+    return h;
+}
+
+static void test_block_stream_id(void)
+{
+    TuiStreamSpec streams[2] = { { "content" }, { "reasoning" } };
+    int in_table = 0;
+    const TuiClassifier cls = {
+        .state = &in_table,
+        .classify = table_classify,
+        .reset = NULL,
+    };
+    const TuiClassifier *classifiers[2] = { &cls, &cls };
+    H *h = h_new_render(streams, classifiers, 2, call_recorder);
+    assert(h);
+
+    /* stream 1 commits first (both freeze in one batch) */
+    g_ncalls = 0;
+    h_send(h, tui_msg_stream_delta(1, "think\n", 6));
+    h_send(h, tui_msg_stream_delta(0, "answer\n", 7));
+    h_send(h, tui_msg_stream_end(1));
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+    assert(g_ncalls == 2);
+    assert(strcmp(g_calls[0], "think") == 0); /* unit text: no newline */
+    assert(g_call_stream[0] == 1);
+    assert(strcmp(g_calls[1], "answer") == 0);
+    assert(g_call_stream[1] == 0);
+
+    /* a live TABLE block also carries its stream id (render_live) */
+    h_send(h, tui_msg_stream_delta(1, "| h |\n| - |\n", 12));
+    h_flush(h);
+    assert(strstr(h_view(h), "L|| h |") != NULL);
+
+    /* the system stream never reaches render_block: byte-emitted */
+    g_ncalls = 0;
+    h_send(h, tui_msg_stream_text(-1, "panel\n", 6));
+    h_flush(h);
+    assert(g_ncalls == 0);
+    assert(strstr(h_read(h), "panel\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* ------------------------------------------------------------------ */
+/* live_attr: boba-painted provisional rows                            */
+/* ------------------------------------------------------------------ */
+
+/* Line-granular probe: the same block text marked "R|" in the commit
+ * path, so the frame and scrollback are distinguishable. */
+static void live_attr_probe(const TuiBlock *blk, const char *text, size_t len,
+                            int width, TuiRowSink *sink, void *ud)
+{
+    (void)blk;
+    (void)width;
+    (void)ud;
+    emit_text_rows(sink, "R|", text, len);
+}
+
+static H *h_new_attr(const TuiStreamSpec *streams,
+                     const TuiClassifier **classifiers, size_t n,
+                     void (*render_block)(const TuiBlock *, const char *,
+                                          size_t, int, TuiRowSink *, void *))
+{
+    return h_new_render(streams, classifiers, n, render_block);
+}
+
+static void test_live_attr_styles_provisional_rows(void)
+{
+    static const TuiAttr dim = { .dim = 1 };
+    TuiStreamSpec streams[2] = {
+        { "content", NULL },
+        { "reasoning", &dim },
+    };
+    H *h = h_new_attr(streams, NULL, 2, live_attr_probe);
+    assert(h);
+
+    /* reasoning: one delta, no newline -> boba-painted live row */
+    h_send(h, tui_msg_stream_delta(1, "weighing options", 16));
+    h_flush(h);
+    const char *view = h_view(h);
+    /* leading-attr inclusion: dim BEFORE the text in the frame bytes */
+    const char *dimpos = strstr(view, "\x1b[0;2m");
+    assert(dimpos != NULL);
+    assert(dimpos < strstr(view, "weighing options"));
+    /* the reset follows the run */
+    assert(strstr(view, "weighing options\x1b[0m") != NULL);
+
+    /* content stream stays plain (no live_attr) */
+    h_send(h, tui_msg_stream_delta(0, "plain tail", 10));
+    h_flush(h);
+    view = h_view(h);
+    const char *plain = strstr(view, "plain tail");
+    assert(plain != NULL);
+    /* the dim reset of the preceding reasoning row precedes it; the
+     * plain row itself carries no attr */
+    const char *after = plain + strlen("plain tail");
+    assert(strncmp(after, "\x1b[0", 3) != 0);
+
+    h_free(h);
+}
+
+static void test_live_attr_does_not_add_rows(void)
+{
+    static const TuiAttr dim = { .dim = 1 };
+    TuiStreamSpec streams[1] = { { "reasoning", &dim } };
+    H *h = h_new_attr(streams, NULL, 1, live_attr_probe);
+    assert(h);
+
+    int plain_rows = tui_transcript_live_rows(h->t, 60, 10);
+    h_send(h, tui_msg_stream_delta(0, "short", 5));
+    h_flush(h);
+    /* the attr is zero-width: exactly the plain text's row count */
+    assert(plain_rows == 0);
+    assert(tui_transcript_live_rows(h->t, 60, 10) == 1);
+
+    h_free(h);
+}
+
+static void test_live_attr_resets_at_exact_width_wrap(void)
+{
+    static const TuiAttr dim = { .dim = 1 };
+    TuiStreamSpec streams[1] = { { "reasoning", &dim } };
+    H *h = h_new_attr(streams, NULL, 1, live_attr_probe);
+    assert(h);
+
+    /* exactly `width` display columns: tui_row_text breaks the row
+     * internally, so the trailing reset lands after the row closed
+     * (D9's closed-row rule: extend the previous row, add no row) */
+    h_send(h, tui_msg_stream_delta(0, "abcdefghij", 10));
+    h_flush(h);
+    assert(tui_transcript_live_rows(h->t, 10, 10) == 1);
+    const char *view = h_view_w(h, 10);
+    assert(strstr(view, "\x1b[0;2mabcdefghij\x1b[0m") != NULL);
+    /* the reset sits inside the emitted row (after the last glyph) */
+
+    /* one display column more: the row wraps to 2, reset still after
+     * the run, live_rows == 2 (no phantom) */
+    h_send(h, tui_msg_stream_delta(0, "k", 1));
+    h_flush(h);
+    assert(tui_transcript_live_rows(h->t, 10, 10) == 2);
+    view = h_view_w(h, 10);
+    /* the second row's EL prefix sits between the rows */
+    assert(strstr(view, "abcdefghij\r\n\x1b[Kk\x1b[0m") != NULL);
 
     h_free(h);
 }
@@ -1143,6 +1340,10 @@ int main(void)
     RUN_TEST(test_reclassify_splits_live_block);
     RUN_TEST(test_tall_table_windows_to_tail);
     RUN_TEST(test_multi_stream_global_order);
+    RUN_TEST(test_block_stream_id);
+    RUN_TEST(test_live_attr_styles_provisional_rows);
+    RUN_TEST(test_live_attr_does_not_add_rows);
+    RUN_TEST(test_live_attr_resets_at_exact_width_wrap);
     RUN_TEST(test_submit_finalizes_without_echo);
     RUN_TEST(test_clear_resets_and_emits_nothing);
     RUN_TEST(test_trim_after_commit);

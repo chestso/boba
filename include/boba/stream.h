@@ -24,6 +24,14 @@
  *     app cannot emit framing bytes, cursor movement, or raw
  *     buffer access. boba owns terminators, EL, CRLF
  *     normalization, capability sequences and cursor placement.
+ *   - an optional `live_attr` (TuiStreamSpec): the app owns the
+ *     value, boba maps it to SGR and applies it around the live rows
+ *     boba paints itself. This is the one exception to "the app owns
+ *     styling": those rows already have boba as their writer, so
+ *     routing them through an app callback would mean the app
+ *     re-implementing boba's wrap semantics on the hot live path.
+ *     Everything block-granular stays app-rendered, so the app still
+ *     owns all real styling.
  *
  * Emission granularity is keyed by block kind, because retention is
  * only needed where rendering can still change:
@@ -116,6 +124,10 @@ typedef struct TuiBlock
     int n_cols;              /* TABLE: locked at delimiter              */
     unsigned char col_align; /* TABLE: 2 bits per column                */
     int image_id;            /* IMAGE: app-assigned                     */
+    int stream;              /* app-facing stream id (0..n_streams-1;
+                              * -1 = system). Set for render_block and
+                              * render_live blocks. Borrowed facts, like
+                              * every TuiBlock field. */
 } TuiBlock;
 
 /* ------------------------------------------------------------------ */
@@ -223,6 +235,19 @@ typedef struct TuiTranscript TuiTranscript;
 typedef struct TuiStreamSpec
 {
     const char *name; /* "content", "reasoning", "system" */
+
+    /* App-supplied attribute for boba-painted line-granular live
+     * rows (the one-line lookahead + partial tail). boba owns those
+     * rows, so boba applies the attr; the app owns the value (keep it
+     * alive for the transcript's lifetime — the spec borrows the
+     * pointer). NULL = plain, the default. Block-granular LIVE
+     * content goes through render_live instead and is app-rendered.
+     *
+     * This is the one deliberate exception to "boba never styles":
+     * it is app data, like classifiers, applied by boba only because
+     * boba is the writer of those rows. Ignored for the system stream
+     * (byte-emitted; it has no live representation). */
+    const TuiAttr *live_attr;
 } TuiStreamSpec;
 
 typedef struct TuiTranscriptConfig
