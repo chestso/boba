@@ -57,7 +57,7 @@ typedef struct TuiListPopup
     char *filter;
 
     /* Colors (all default to NONE = inherit terminal defaults).
-     * Set via tui_list_popup_set_colors() using CharmTone values. */
+     * Set via tui_list_popup_set_colors(). */
     TuiColor border_color;
     TuiColor title_color;
     TuiColor selected_bg;
