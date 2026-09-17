@@ -1290,6 +1290,62 @@ static void render_wrapped_line_absolute(const TuiTextInput *input,
     } while (pos < line_end && content_w > 0);
 }
 
+/* Render one logical line across one or more visual rows in RELATIVE
+ * positioning mode (terminal_row unset — inline rendering). Unlike the
+ * absolute variant there is no CSI row placement: rows are separated with
+ * "\r\n" + EL so the runtime's newline-based frame accounting matches the
+ * number of visual rows drawn, and wrapped rows are indented with the
+ * continuation prompt under the text column (matching the wrap arithmetic
+ * in tui_textinput_cursor_pos()).
+ *
+ * Without this, relative mode emitted the whole logical line and let the
+ * terminal auto-wrap. The runtime counts frame rows by '\n', so a line that
+ * softly wrapped in the terminal but carried no '\n' made the tracked row
+ * count disagree with the painted rows; each frame then moved the cursor one
+ * row too far up, walking the prompt to the top of the screen.
+ *
+ * *first_row is 1 for the frame's first visual row; the caller clears it.
+ * Every later row is preceded by the row separator. */
+static void render_wrapped_line_relative(const TuiTextInput *input,
+                                         DynamicBuffer *out, size_t line_start,
+                                         size_t line_end, int line_index,
+                                         int *first_row)
+{
+    int prompt_w = line_prompt_width(input, line_index);
+    int content_w = input->terminal_width - prompt_w;
+    int show_prefix =
+        input->show_prompt && input->prompt && input->prompt_len > 0;
+
+    size_t pos = line_start;
+    int first_chunk = 1;
+    do {
+        if (!*first_row) {
+            dynamic_buffer_append_str(out, "\r\n");
+            dynamic_buffer_append_str(out, EL_TO_END);
+        }
+        *first_row = 0;
+
+        if (first_chunk && line_index == 0) {
+            if (show_prefix)
+                emit_styled_or_legacy(out, prompt_style_for(input),
+                                      input->prompt_color, input->prompt);
+        } else if (show_prefix) {
+            render_continuation_prompt(input, out);
+        }
+        first_chunk = 0;
+
+        /* Emit the next chunk of content_width codepoints (or the rest of
+         * the line when wrapping is disabled/degenerate). */
+        size_t chunk_end = line_end;
+        if (content_w > 0)
+            chunk_end = pos + tui_utf8_byte_offset(input->text + pos,
+                                                   line_end - pos, content_w);
+        if (chunk_end > pos)
+            render_text_range(input, out, pos, chunk_end);
+        pos = chunk_end;
+    } while (pos < line_end && content_w > 0);
+}
+
 /* Render prompt and visible text slice to output buffer */
 static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
 {
@@ -1444,7 +1500,15 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
         dynamic_buffer_append_str(out, "\r");
         dynamic_buffer_append_str(out, EL_TO_END);
 
-        render_prompt_and_text(input, out);
+        if (input->soft_wrap && input->terminal_width > 0) {
+            /* Soft-wrap: emit the line across explicit rows so the runtime's
+             * newline-counted frame height matches the painted rows. */
+            int first_row = 1;
+            render_wrapped_line_relative(input, out, 0, input->text_len, 0,
+                                         &first_row);
+        } else {
+            render_prompt_and_text(input, out);
+        }
         /* Cursor placement: relative mode has no absolute coordinate frame;
          * cursor() abstains and the cursor naturally lands at the end of what
          * we just wrote. */
@@ -1453,6 +1517,23 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
         /* Clear current line, then render prompt + text per line */
         dynamic_buffer_append_str(out, "\r");
         dynamic_buffer_append_str(out, EL_TO_END);
+
+        if (input->soft_wrap && input->terminal_width > 0) {
+            /* Soft-wrap each logical line across explicit rows, matching
+             * tui_textinput_cursor_pos() and tui_textinput_get_height(). */
+            int first_row = 1;
+            int current_line = 0;
+            size_t line_start = 0;
+            for (size_t i = 0; i <= input->text_len; i++) {
+                if (i == input->text_len || input->text[i] == '\n') {
+                    render_wrapped_line_relative(input, out, line_start, i,
+                                                 current_line, &first_row);
+                    current_line++;
+                    line_start = i + 1;
+                }
+            }
+            return;
+        }
 
         /* Output prompt if set and shown (TuiStyle > legacy prompt_color) */
         if (input->show_prompt && input->prompt && input->prompt_len > 0) {
@@ -1903,8 +1984,18 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
                     int cursor_cp = tui_utf8_cp_index(
                         input->text + line_start,
                         input->cursor_byte - line_start);
-                    int wrap_row = cursor_cp / line_content_w;
-                    int wrap_col = cursor_cp % line_content_w;
+                    /* A cursor at the end of a line that exactly fills its
+                     * last visual row sits at that row's end — not at the
+                     * start of a fresh, empty row. Folding by the raw count
+                     * would report a phantom extra row, which in inline mode
+                     * walks the tracked cursor-up one row too far each
+                     * frame. */
+                    int eff_cp = cursor_cp;
+                    if (eff_cp > 0 && eff_cp == line_cps &&
+                        eff_cp % line_content_w == 0)
+                        eff_cp -= 1;
+                    int wrap_row = eff_cp / line_content_w;
+                    int wrap_col = eff_cp % line_content_w;
                     int row = base_row + visual_row + wrap_row;
                     int col = line_prompt_w + wrap_col + 1;
                     return tui_cursor_at(row, col);

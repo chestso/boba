@@ -1520,6 +1520,106 @@ static void test_soft_wrap_absolute_erases_surplus_rows(void)
     tui_textinput_free(input);
 }
 
+/* In RELATIVE mode (terminal_row unset — inline rendering) a soft-wrapped
+ * logical line must be split into explicit visual rows separated by "\r\n"
+ * + EL, with the continuation prompt indenting the wrapped rows. Regression:
+ * relative mode emitted the whole line and let the terminal auto-wrap, so
+ * the runtime (which counts frame rows by '\n') tracked fewer rows than were
+ * painted and walked the cursor one row too far up on every frame. */
+static void test_soft_wrap_relative_splits_into_rows(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghijklmno"); /* 15 chars → 2 visual rows */
+
+    assert(tui_textinput_get_height(input) == 2);
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    /* Two explicit rows: prompt + 8 cells, then continuation + remainder. */
+    assert(strstr(data, "\r\n\033[K") != NULL);
+    assert(strstr(data, "> abcdefgh") != NULL);
+    assert(strstr(data, "  ijklmno") != NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* The runtime derives the inline frame height from the count of '\n' bytes
+ * in the rendered content. For soft-wrapped relative output that count (+1)
+ * must equal tui_textinput_get_height(), or the tracked and painted row
+ * counts diverge. */
+static void test_soft_wrap_relative_rows_match_height(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 12); /* content width = 10 */
+    tui_textinput_set_soft_wrap(input, 1);
+
+    /* Two logical lines, both long enough to wrap. */
+    send_string(input, "hello foo bar baz"); /* 18 chars → 2 rows */
+    TuiUpdateResult r = tui_textinput_update(
+        input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_string(input, "second line"); /* 11 chars → 2 rows */
+
+    int height = tui_textinput_get_height(input);
+    assert(height == 4);
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    int newlines = 0;
+    for (const char *p = data; *p; p++)
+        if (*p == '\n')
+            newlines++;
+    /* Explicit row separators: visual rows = newlines + 1. */
+    assert(newlines + 1 == height);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* A cursor at the end of a line whose length exactly fills the last visual
+ * row belongs to that row's end, not a phantom next row. Reporting the
+ * phantom row made the inline runtime move the cursor up one row too far
+ * each frame — the walk-to-top-of-screen drift. */
+static void test_soft_wrap_cursor_exact_wrap_boundary(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
+    tui_textinput_set_soft_wrap(input, 1);
+
+    /* Exactly one row of content: cursor stays on row 1, at the row's end. */
+    send_string(input, "abcdefgh");
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.row == 1);
+    assert(c.col == 10);
+
+    /* Exactly two rows: cursor on row 2, not a phantom row 3. */
+    send_string(input, "ijklmnop");
+    c = tui_textinput_cursor_pos(input);
+    assert(c.row == 2);
+    assert(c.col == 10);
+    assert(tui_textinput_get_height(input) == 2);
+
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -1612,6 +1712,9 @@ int main(void)
     RUN_TEST(test_soft_wrap_absolute_single_line);
     RUN_TEST(test_no_soft_wrap_absolute_stays_single_row);
     RUN_TEST(test_soft_wrap_absolute_erases_surplus_rows);
+    RUN_TEST(test_soft_wrap_relative_splits_into_rows);
+    RUN_TEST(test_soft_wrap_relative_rows_match_height);
+    RUN_TEST(test_soft_wrap_cursor_exact_wrap_boundary);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
