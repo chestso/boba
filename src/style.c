@@ -912,8 +912,9 @@ char *tui_style_render(const TuiStyle *style, const char *content)
  * built-in title API as of v2.0.3).
  * ===================================================================== */
 
-/* Tile the codepoints of `pattern` cyclically until `cols` display columns
- * have been emitted, accounting for wide characters via tui_codepoint_width. */
+/* Tile the grapheme clusters of `pattern` cyclically until `cols` display
+ * columns have been emitted (cluster-aware, so a wide or composed glyph
+ * is never half-emitted). */
 static void append_pattern_tiled(DynamicBuffer *buf, const char *pattern,
                                  int cols)
 {
@@ -925,19 +926,16 @@ static void append_pattern_tiled(DynamicBuffer *buf, const char *pattern,
     while (emitted < cols) {
         if (bp >= plen)
             bp = 0;
-        int clen = tui_utf8_char_len(pattern + bp);
+        size_t clen = 0;
+        int w = tui_next_cluster(pattern + bp, plen - bp, &clen);
         if (clen < 1)
             clen = 1;
-        if (bp + (size_t)clen > plen)
-            clen = (int)(plen - bp);
-        uint32_t cp = tui_utf8_decode(pattern + bp, clen);
-        int w = tui_codepoint_width(cp);
         if (w < 1)
             w = 1;
         if (emitted + w > cols)
             break;
-        dynamic_buffer_append(buf, pattern + bp, (size_t)clen);
-        bp += (size_t)clen;
+        dynamic_buffer_append(buf, pattern + bp, clen);
+        bp += clen;
         emitted += w;
     }
     while (emitted < cols) {

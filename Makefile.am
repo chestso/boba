@@ -11,6 +11,7 @@ EXTRA_DIST = \
     autogen.sh \
     build-aux/git-version.sh \
     scripts/build-ucrt64.sh \
+    scripts/sync-unicode-tables.sh \
     README.md \
     TODO.md \
     NEWS \

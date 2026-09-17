@@ -10,6 +10,7 @@ libboba_a_SOURCES = \
     dynamic_buffer.c \
     ansi_sequences.c \
     unicode.c \
+    unicode_tables.h \
     base64.c \
     base64.h \
     style.c \

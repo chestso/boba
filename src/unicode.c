@@ -2,6 +2,9 @@
 
 #include <boba/unicode.h>
 
+#include <stdbool.h>
+#include <string.h>
+
 int tui_utf8_char_len(const char *ptr)
 {
     unsigned char c = (unsigned char)*ptr;
@@ -111,63 +114,158 @@ int tui_utf8_cp_index(const char *text, size_t byte_pos)
     return cp;
 }
 
+/* --- Interval tables (UCD-derived) ------------------------------------ */
+
+#include "unicode_tables.h"
+
+#define TU_CLUSTER_MAX 16 /* max codepoints in one grapheme cluster */
+
+static int range_lookup(const TuiRange *table, size_t n, uint32_t cp)
+{
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (cp < table[mid].lo)
+            hi = mid;
+        else if (cp > table[mid].hi)
+            lo = mid + 1;
+        else
+            return 1;
+    }
+    return 0;
+}
+
 int tui_codepoint_width(uint32_t cp)
 {
-    /* Zero-width characters */
-    if (cp == 0x200B || cp == 0x200C || cp == 0x200D) /* ZWSP, ZWNJ, ZWJ */
+    /* ASCII fast path */
+    if (cp < 0x7Fu)
+        return cp < 0x20u ? 0 : 1;
+    if (cp < 0xA0u)
+        return 0; /* DEL + C1 controls */
+    if (cp == 0x00ADu)
+        return 0; /* soft hyphen */
+
+    if (range_lookup(TU_ZERO, TU_ZERO_LEN, cp))
         return 0;
-    if (cp >= 0x0300 && cp <= 0x036F) /* Combining diacritical marks */
-        return 0;
-    if (cp >= 0xFE00 && cp <= 0xFE0F) /* Variation selectors */
-        return 0;
-
-    /* East Asian Wide characters */
-    if (cp >= 0x1100 && cp <= 0x115F) /* Hangul Jamo */
+    if (range_lookup(TU_WIDE, TU_WIDE_LEN, cp))
         return 2;
-    if (cp >= 0x2E80 && cp <= 0x303E) /* CJK radicals, Kangxi, ideographic */
-        return 2;
-    if (cp >= 0x3040 && cp <= 0x33FF) /* Hiragana, Katakana, CJK compat */
-        return 2;
-    if (cp >= 0x3400 && cp <= 0x4DBF) /* CJK Unified Ext A */
-        return 2;
-    if (cp >= 0x4E00 && cp <= 0x9FFF) /* CJK Unified Ideographs */
-        return 2;
-    if (cp >= 0xAC00 && cp <= 0xD7AF) /* Hangul Syllables */
-        return 2;
-    if (cp >= 0xF900 && cp <= 0xFAFF) /* CJK Compatibility Ideographs */
-        return 2;
-    if (cp >= 0xFE30 && cp <= 0xFE6F) /* CJK Compatibility Forms */
-        return 2;
-    if (cp >= 0xFF01 && cp <= 0xFF60) /* Fullwidth forms */
-        return 2;
-    if (cp >= 0xFFE0 && cp <= 0xFFE6) /* Fullwidth signs */
-        return 2;
-
-    /* Misc symbols and dingbats (includes ⚓ U+2693) */
-    if (cp >= 0x2600 && cp <= 0x27BF)
-        return 2;
-
-    /* Emoji ranges */
-    if (cp >= 0x1F000 && cp <= 0x1FBFF)
-        return 2;
-
-    /* CJK Unified Ext B and beyond */
-    if (cp >= 0x20000 && cp <= 0x2FA1F)
-        return 2;
-
     return 1;
 }
+
+/* --- Grapheme clusters ------------------------------------------------ */
+
+static bool tu_is_extend(uint32_t cp)
+{
+    /* GB9: Extend | ZWJ — no break before these. */
+    return range_lookup(TU_EXTEND, TU_EXTEND_LEN, cp) != 0;
+}
+
+static bool tu_is_spacing_mark(uint32_t cp)
+{
+    /* GB9a: SpacingMark — no break before these. */
+    return range_lookup(TU_SPACING_MARK, TU_SPACING_MARK_LEN, cp) != 0;
+}
+
+static bool tu_is_prepend(uint32_t cp)
+{
+    /* GB9b: Prepend — forces the next character into this cluster. */
+    return range_lookup(TU_PREPEND, TU_PREPEND_LEN, cp) != 0;
+}
+
+static bool tu_is_extended_pictographic(uint32_t cp)
+{
+    return range_lookup(TU_EXT_PICT, TU_EXT_PICT_LEN, cp) != 0;
+}
+
+static bool tu_is_regional_indicator(uint32_t cp)
+{
+    return cp >= 0x1F1E6u && cp <= 0x1F1FFu;
+}
+
+/* Does a grapheme break sit between `prev` and `cur`? A stateless
+ * approximation of UAX #29 GB3-GB13 (same shape coffer uses): enough
+ * for the dominant cases — combining marks attach, a ZWJ emoji sequence
+ * holds together, regional indicators pair into a flag. */
+static bool tu_grapheme_break_before(uint32_t prev, uint32_t cur)
+{
+    if (prev == 0x0Du && cur == 0x0Au) /* GB3: CR x LF */
+        return false;
+    if (cur == 0x0Au || cur == 0x0Du || cur == 0x00) /* GB4-5: controls */
+        return true;
+    if (tu_is_extend(cur)) /* GB9: x Extend, x ZWJ */
+        return false;
+    if (tu_is_spacing_mark(cur)) /* GB9a */
+        return false;
+    if (tu_is_prepend(prev)) /* GB9b */
+        return false;
+    if (prev == 0x200Du && tu_is_extended_pictographic(cur)) /* GB11 */
+        return false;
+    if (tu_is_regional_indicator(prev) && tu_is_regional_indicator(cur)) /* GB12-13 */
+        return false;
+    return true; /* GB999 */
+}
+
+int tui_cluster_width(const uint32_t *cps, uint32_t len)
+{
+    if (len == 0)
+        return 0;
+    /* A regional indicator pair is one flag, two cells. */
+    if (len >= 2 && tu_is_regional_indicator(cps[0]) && tu_is_regional_indicator(cps[1]))
+        return 2;
+    /* Presentation selectors, scanned from the END: the last one in the
+     * cluster wins. VS16 forces emoji presentation (two cells) even on a
+     * Narrow base; VS15 cancels the doubling but never narrows a Wide
+     * base — CJK and emoji-presentation codepoints have no 1-cell glyph. */
+    for (uint32_t i = len; i-- > 0;) {
+        if (cps[i] == 0xFE0Fu)
+            return 2;
+        if (cps[i] == 0xFE0Eu)
+            return tui_codepoint_width(cps[0]);
+    }
+    return tui_codepoint_width(cps[0]);
+}
+
+int tui_next_cluster(const char *utf8, size_t len, size_t *bytes)
+{
+    uint32_t cluster[TU_CLUSTER_MAX];
+    uint32_t clen = 0;
+    size_t i = 0;
+
+    while (i < len) {
+        int char_len = tui_utf8_char_len(utf8 + i);
+        if (char_len <= 0 || i + (size_t)char_len > len)
+            break; /* truncated tail */
+        uint32_t cp = tui_utf8_decode(utf8 + i, char_len);
+        if (clen > 0 && tu_grapheme_break_before(cluster[clen - 1], cp))
+            break;
+        /* Past the cap further joiners are folded in rather than
+         * overflowing the stack buffer (matches the grid rule). */
+        if (clen < TU_CLUSTER_MAX)
+            cluster[clen++] = cp;
+        i += (size_t)char_len;
+    }
+
+    if (bytes)
+        *bytes = i;
+    return tui_cluster_width(cluster, clen);
+}
+
+/* --- Display width ---------------------------------------------------- */
 
 int tui_utf8_display_width(const char *str)
 {
     if (!str)
         return 0;
+    size_t len = strlen(str);
+    size_t i = 0;
     int width = 0;
-    while (*str) {
-        int char_len = tui_utf8_char_len(str);
-        uint32_t cp = tui_utf8_decode(str, char_len);
-        width += tui_codepoint_width(cp);
-        str += char_len;
+    while (i < len) {
+        size_t bytes = 0;
+        int w = tui_next_cluster(str + i, len - i, &bytes);
+        if (bytes == 0)
+            break;
+        width += w;
+        i += bytes;
     }
     return width;
 }
@@ -176,26 +274,32 @@ size_t tui_utf8_display_width_ansi(const char *text, size_t len)
 {
     size_t width = 0;
     int in_escape = 0;
+    size_t i = 0;
 
-    for (size_t i = 0; i < len; i++) {
+    while (i < len) {
+        unsigned char c = (unsigned char)text[i];
         if (in_escape) {
             /* End of CSI sequence */
-            if ((text[i] >= 'A' && text[i] <= 'Z') ||
-                (text[i] >= 'a' && text[i] <= 'z')) {
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
                 in_escape = 0;
-            }
-        } else if (text[i] == '\033' && i + 1 < len && text[i + 1] == '[') {
-            in_escape = 1;
-            i++; /* Skip '[' */
-        } else if ((unsigned char)text[i] >= 0x20) {
-            int clen = tui_utf8_char_len(&text[i]);
-            /* Clamp to remaining bytes */
-            if (i + clen > len)
-                clen = (int)(len - i);
-            uint32_t cp = tui_utf8_decode(&text[i], clen);
-            width += tui_codepoint_width(cp);
-            i += clen - 1; /* -1 because loop increments */
+            i++;
+            continue;
         }
+        if (c == '\033' && i + 1 < len && text[i + 1] == '[') {
+            in_escape = 1;
+            i += 2; /* ESC [ */
+            continue;
+        }
+        if (c < 0x20) { /* control bytes occupy no columns */
+            i++;
+            continue;
+        }
+        size_t bytes = 0;
+        int w = tui_next_cluster(text + i, len - i, &bytes);
+        if (bytes == 0)
+            break;
+        width += (size_t)w;
+        i += bytes;
     }
 
     return width;

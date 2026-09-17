@@ -628,8 +628,9 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
         const char *item = p->items[idx];
         int item_w = str_display_width(item);
         if (item_w > text_max) {
+            size_t item_len = strlen(item);
             int col = 0;
-            for (size_t i = 0; item[i] && col < text_max; i++) {
+            for (size_t i = 0; i < item_len && col < text_max; i++) {
                 if ((unsigned char)item[i] == 0x1b && item[i + 1] == '[') {
                     dynamic_buffer_append(out, &item[i], 1);
                     size_t j = i + 1;
@@ -643,9 +644,10 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
                         i = j;
                     }
                 } else {
-                    int clen = tui_utf8_char_len(&item[i]);
-                    uint32_t cp = tui_utf8_decode(&item[i], clen);
-                    int w = tui_codepoint_width(cp);
+                    size_t clen = 0;
+                    int w = tui_next_cluster(&item[i], item_len - i, &clen);
+                    if (clen < 1)
+                        clen = 1;
                     if (col + w > text_max)
                         break;
                     dynamic_buffer_append(out, &item[i], clen);

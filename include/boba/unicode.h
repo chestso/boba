@@ -40,8 +40,19 @@ int tui_utf8_cp_index(const char *text, size_t byte_pos);
  * Handles zero-width, wide (CJK), and emoji characters. */
 int tui_codepoint_width(uint32_t cp);
 
+/* Display width of one grapheme cluster given as decoded codepoints:
+ * VS16 forces emoji presentation (two cells), a regional indicator pair
+ * is one flag, combining marks attach without widening. */
+int tui_cluster_width(const uint32_t *cps, uint32_t len);
+
+/* Display width of the next grapheme cluster in utf8[0..len). Advances
+ * *bytes past the cluster; *bytes is 0 at end of input or when the next
+ * character cannot be decoded. This is the column-safe unit: a caller
+ * that emits or wraps by *bytes never splits a base from its modifiers. */
+int tui_next_cluster(const char *utf8, size_t len, size_t *bytes);
+
 /* Calculate display width (terminal columns) of a NUL-terminated UTF-8 string.
- * Does not skip ANSI escape sequences. */
+ * Cluster-aware. Does not skip ANSI escape sequences. */
 int tui_utf8_display_width(const char *str);
 
 /* Calculate display width of a UTF-8 string, skipping ANSI escape sequences. */

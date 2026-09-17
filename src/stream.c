@@ -295,12 +295,12 @@ int tui_rowcols_advance(int col, const char *bytes, size_t len, int *esc_state)
             i++;
             continue;
         }
-        int cl = tui_utf8_char_len(bytes + i);
-        if (cl <= 0 || i + (size_t)cl > len)
+        size_t cl = 0;
+        int w = tui_next_cluster(bytes + i, len - i, &cl);
+        if (cl == 0)
             break;
-        uint32_t cp = tui_utf8_decode(bytes + i, cl);
-        col += tui_codepoint_width(cp);
-        i += (size_t)cl;
+        col += w;
+        i += cl;
     }
     if (esc_state)
         *esc_state = esc;
@@ -399,13 +399,12 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
             i++; /* drop stray controls */
             continue;
         }
-        int cl = tui_utf8_char_len(bytes + i);
-        if (cl <= 0 || i + (size_t)cl > len)
+        size_t cl = 0;
+        int gw = tui_next_cluster(bytes + i, len - i, &cl);
+        if (cl == 0)
             break;
-        uint32_t cp = tui_utf8_decode(bytes + i, cl);
-        int gw = tui_codepoint_width(cp);
-        stage_glyph(t, bytes + i, (size_t)cl, gw);
-        i += (size_t)cl;
+        stage_glyph(t, bytes + i, cl, gw);
+        i += cl;
     }
 }
 
@@ -550,20 +549,19 @@ void tui_row_text(TuiRowSink *s, const char *utf8, size_t len)
             i++; /* drop stray controls */
             continue;
         }
-        int cl = tui_utf8_char_len(utf8 + i);
-        if (cl <= 0 || i + (size_t)cl > len)
+        size_t cl = 0;
+        int gw = tui_next_cluster(utf8 + i, len - i, &cl);
+        if (cl == 0)
             break;
-        uint32_t cp = tui_utf8_decode(utf8 + i, cl);
-        int gw = tui_codepoint_width(cp);
         if (wrap && s->col + gw > w)
             sink_row_break(s); /* explicit wrap, never soft-wrap */
         sink_note_row_start(s);
         if (s->buf)
-            dynamic_buffer_append(s->buf, utf8 + i, (size_t)cl);
+            dynamic_buffer_append(s->buf, utf8 + i, cl);
         s->col += gw;
         if (wrap && s->col >= w)
             sink_row_break(s);
-        i += (size_t)cl;
+        i += cl;
     }
 }
 

@@ -47,12 +47,10 @@ static int emit_cols(const char *text, size_t len, size_t *pos, int max_cols,
             in_escape = 1;
             dynamic_buffer_append(out, &text[*pos], 1); /* ESC */
         } else if (ch >= 0x20) {
-            int clen = tui_utf8_char_len(&text[*pos]);
-            /* Clamp to remaining bytes */
-            if (*pos + clen > len)
-                clen = (int)(len - *pos);
-            uint32_t cp = tui_utf8_decode(&text[*pos], clen);
-            int w = tui_codepoint_width(cp);
+            size_t clen = 0;
+            int w = tui_next_cluster(&text[*pos], len - *pos, &clen);
+            if (clen < 1)
+                clen = 1; /* invalid tail: consume a byte to progress */
             if (w > 0 && col + w > max_cols)
                 break;
 
@@ -140,11 +138,13 @@ static int scan_word_wrapped_lines(const char *text, size_t len,
             continue;
         }
 
-        int clen = tui_utf8_char_len(&text[i]);
-        if (clen <= 0 || i + (size_t)clen > len)
-            clen = 1;
-        uint32_t cp = tui_utf8_decode(&text[i], clen);
-        int cp_w = tui_codepoint_width(cp);
+        size_t clen = 0;
+        int cp_w = tui_next_cluster(&text[i], len - i, &clen);
+        if (clen == 0) {
+            clen = 1; /* invalid tail: consume a byte to progress */
+            cp_w = 0;
+        }
+        int is_ws = text[i] == ' ' || text[i] == '\t';
 
         if (col + cp_w > viewport_width) {
             size_t break_at;
@@ -169,7 +169,7 @@ static int scan_word_wrapped_lines(const char *text, size_t len,
         col += cp_w;
         i += clen;
 
-        if (cp == ' ' || cp == '\t') {
+        if (is_ws) {
             last_word_start = i;
             last_word_start_col = col;
         }
@@ -401,11 +401,13 @@ static size_t find_word_wrap_subline_offset(const char *text, size_t len,
             continue;
         }
 
-        int clen = tui_utf8_char_len(&text[i]);
-        if (clen <= 0 || i + (size_t)clen > len)
-            clen = 1;
-        uint32_t cp = tui_utf8_decode(&text[i], clen);
-        int cp_w = tui_codepoint_width(cp);
+        size_t clen = 0;
+        int cp_w = tui_next_cluster(&text[i], len - i, &clen);
+        if (clen == 0) {
+            clen = 1; /* invalid tail: consume a byte to progress */
+            cp_w = 0;
+        }
+        int is_ws = text[i] == ' ' || text[i] == '\t';
 
         if (col + cp_w > viewport_width) {
             size_t break_at;
@@ -428,7 +430,7 @@ static size_t find_word_wrap_subline_offset(const char *text, size_t len,
         col += cp_w;
         i += clen;
 
-        if (cp == ' ' || cp == '\t') {
+        if (is_ws) {
             last_word_start = i;
             last_word_start_col = col;
         }
@@ -498,11 +500,11 @@ static void render_line_segment(const TuiViewportLine *line, int viewport_width,
                 csi_start = i;
                 i++;
             } else if ((unsigned char)text[i] >= 0x20) {
-                int clen = tui_utf8_char_len(&text[i]);
-                if (i + clen > len)
-                    clen = (int)(len - i);
-                uint32_t cp = tui_utf8_decode(&text[i], clen);
-                skipped += tui_codepoint_width(cp);
+                size_t clen = 0;
+                int w = tui_next_cluster(&text[i], len - i, &clen);
+                if (clen < 1)
+                    clen = 1;
+                skipped += w;
                 i += clen - 1;
             }
         }
@@ -936,11 +938,10 @@ static size_t byte_offset_for_display_col(const char *text, size_t len,
             in_escape = 1;
             i++; /* ESC */
         } else if (ch >= 0x20) {
-            int clen = tui_utf8_char_len(&text[i]);
-            if (i + clen > len)
-                clen = (int)(len - i);
-            uint32_t cp = tui_utf8_decode(&text[i], clen);
-            int w = tui_codepoint_width(cp);
+            size_t clen = 0;
+            int w = tui_next_cluster(&text[i], len - i, &clen);
+            if (clen < 1)
+                clen = 1;
             if (col + w > target)
                 break;
             col += w;
