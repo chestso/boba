@@ -127,6 +127,21 @@ static void h_free(H *h)
     free(h);
 }
 
+/* Wire the transcript to the runtime and hand it a geometry, the way
+ * tui_runtime_run() does at startup: runtime_update_size() (which a
+ * bare create() skips — it zeroes term_width, and only run()/SIGWINCH
+ * fill it in) plus the initial TUI_MSG_WINDOW_SIZE. Both halves matter
+ * because the commit seam's soft-wrap geometry for an open partial row
+ * comes from runtime->term_width, while the live frame wraps at the
+ * transcript's own width. */
+static void h_attach(H *h, int width, int height)
+{
+    tui_runtime_set_transcript(h->rt, h->t);
+    h->rt->term_width = width;
+    h->rt->term_height = height;
+    tui_runtime_send(h->rt, tui_msg_window_size(width, height));
+}
+
 static H *h_new(const TuiStreamSpec *streams,
                 const TuiClassifier **classifiers, size_t n)
 {
@@ -155,8 +170,7 @@ static H *h_new(const TuiStreamSpec *streams,
         h_free(h);
         return NULL;
     }
-    tui_runtime_set_transcript(h->rt, h->t);
-    tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
+    h_attach(h, 60, 10);
     return h;
 }
 
@@ -775,8 +789,7 @@ static H *h_new_render(const TuiStreamSpec *streams,
         h_free(h);
         return NULL;
     }
-    tui_runtime_set_transcript(h->rt, h->t);
-    tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
+    h_attach(h, 60, 10);
     return h;
 }
 
