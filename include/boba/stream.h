@@ -142,10 +142,14 @@ typedef struct TuiBlock
 typedef struct TuiRowSink TuiRowSink;
 
 /* Append UTF-8 text to the current row. Hard tabs expand to the next
- * multiple of 8 display columns; rows wrap explicitly at the
- * terminal width (never terminal soft-wrap), so boba's row math is
- * always exact. Control bytes other than \t are not allowed; rows
- * are ended with tui_row_end().
+ * multiple of 8 (physical) display columns. The COMMIT destination
+ * never inserts a width break: committed bytes are the scrollback's
+ * truth, so a long logical line stays one run and the terminal owns
+ * soft-wrapping (and reflow on resize). The LIVE FRAME destination
+ * wraps explicitly at the terminal width (never terminal soft-wrap)
+ * so boba's inline-frame row math stays exact — those bytes are
+ * transient and re-rendered every flush. Control bytes other than \t
+ * are not allowed; rows are ended with tui_row_end().
  *
  * Escape bytes in text are scanned, not trusted: SGR sequences
  * (styling) pass through; every framing sequence — cursor movement,

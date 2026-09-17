@@ -26,8 +26,10 @@ void tui_runtime_transcript_orphan(TuiRuntime *rt);
 /* Advance a display column over a byte run. \n resets the column, \t
  * expands to the next multiple of 8, ESC sequences count zero, UTF-8
  * counts by codepoint width. `esc_state` carries a split escape
- * sequence across calls (0 = none). No wrapping here — callers
- * pre-wrap. */
+ * sequence across calls (0 = none). The result is the running DISPLAY
+ * total of the current logical line (no width wrap here): callers
+ * derive the physical row/column against the terminal width, since a
+ * committed row may soft-wrap. */
 int tui_rowcols_advance(int col, const char *bytes, size_t len,
                         int *esc_state);
 

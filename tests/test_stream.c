@@ -1340,6 +1340,110 @@ static void test_non_image_never_gated(void)
     h_free(h);
 }
 
+/* ------------------------------------------------------------------ */
+/* Commit path: no software wrap (the terminal owns wrapping/reflow)   */
+/* ------------------------------------------------------------------ */
+
+/* A logical line longer than the width must reach the scrollback as
+ * ONE byte run (a single trailing \r\n): no width break is baked in,
+ * so the terminal can soft-wrap AND reflow it on resize. */
+static void test_committed_line_is_not_width_wrapped(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1); /* width 60 */
+    assert(h);
+
+    char line[121];
+    memset(line, 'x', 100);
+    line[100] = '\n';
+    line[101] = '\0';
+
+    h_send(h, tui_msg_stream_delta(0, line, 101));
+    h_send(h, tui_msg_stream_delta(0, "after\n", 6));
+    h_flush(h);
+
+    assert(tui_transcript_commit_count(h->t) == 1);
+    const char *out = h_read(h);
+    /* 100 columns on a 60-wide terminal: still one row, no break */
+    char expect[128];
+    snprintf(expect, sizeof(expect), "R|%.*s\r\n", 100, line);
+    assert(strstr(out, expect) != NULL);
+    assert(count_substr(out, "R|") == 1); /* exactly one committed row */
+
+    h_free(h);
+}
+
+/* The byte path (system stream) has no live representation, so its
+ * committed bytes are never width-wrapped either. */
+static void test_committed_byte_run_is_not_width_wrapped(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1); /* width 60 */
+    assert(h);
+
+    char line[121];
+    memset(line, 'y', 100);
+    line[100] = '\n';
+    line[101] = '\0';
+
+    h_send(h, tui_msg_stream_text(-1, line, 101));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    char expect[128];
+    snprintf(expect, sizeof(expect), "%.*s\r\n", 100, line);
+    assert(strstr(out, expect) != NULL); /* one run, one break */
+
+    h_free(h);
+}
+
+/* A partial (unterminated) committed row that soft-wrapped is extended
+ * at its true end: one physical row up with a column carry. */
+static void test_partial_row_wrapped_extends_at_column(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1); /* width 60 */
+    assert(h);
+
+    char run[91];
+    memset(run, 'z', 90); /* 90 cols -> wraps to row 1, col 30 */
+    h_send(h, tui_msg_stream_text(-1, run, 90));
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 1);
+    assert(h->rt->inline_partial_cols == 90);
+
+    h_send(h, tui_msg_stream_text(-1, "def\n", 4));
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 0);
+    /* up one physical row, then right to column 30 (90 % 60) */
+    assert(strstr(h_read(h), "\x1b[1A\r\x1b[30Cdef\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* A partial row whose last glyph exactly filled a physical row needs no
+ * up: \r\n already landed on the append row (column 0). */
+static void test_partial_row_exact_wrap_extends_on_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1); /* width 60 */
+    assert(h);
+
+    char run[61];
+    memset(run, 'q', 60); /* exactly one full row */
+    h_send(h, tui_msg_stream_text(-1, run, 60));
+    h_flush(h);
+    assert(h->rt->inline_partial_cols == 60);
+
+    h_send(h, tui_msg_stream_text(-1, "def\n", 4));
+    h_flush(h);
+    /* no cursor-up, no forward: \r + continuation on the next row */
+    assert(strstr(h_read(h), "\rdef\r\n") != NULL);
+    assert(strstr(h_read(h), "\x1b[1A\rdef") == NULL);
+
+    h_free(h);
+}
+
 int main(void)
 {
     printf("test_stream: streaming transcript component\n");
@@ -1367,6 +1471,10 @@ int main(void)
     RUN_TEST(test_image_unit_gated_until_profile);
     RUN_TEST(test_image_gate_does_not_deadlock_unclaimed);
     RUN_TEST(test_non_image_never_gated);
+    RUN_TEST(test_committed_line_is_not_width_wrapped);
+    RUN_TEST(test_committed_byte_run_is_not_width_wrapped);
+    RUN_TEST(test_partial_row_wrapped_extends_at_column);
+    RUN_TEST(test_partial_row_exact_wrap_extends_on_row);
     printf("test_stream: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

@@ -13,11 +13,13 @@
  *                 blank / block start / stream end
  *
  * Byte-emitted content (the system stream, unlabeled fences) stages
- * straight into the transcript's staging buffer, wrapped explicitly at
- * the terminal width. Everything else freezes into emission units and
- * renders through the row sink into staging. tui_runtime_flush() runs
- * the commit pass, so all units staged since the last flush reach the
- * scrollback through exactly one transcript_write.
+ * straight into the transcript's staging buffer. Everything else
+ * freezes into emission units and renders through the row sink into
+ * staging. Committed bytes carry no width breaks — the terminal owns
+ * soft-wrapping (and reflow); only logical line breaks are emitted.
+ * tui_runtime_flush() runs the commit pass, so all units staged since
+ * the last flush reach the scrollback through exactly one
+ * transcript_write.
  */
 
 #include <assert.h>
@@ -309,7 +311,8 @@ int tui_rowcols_advance(int col, const char *bytes, size_t len, int *esc_state)
 /* Byte-mode staging (system stream + unlabeled fences)                */
 /* ------------------------------------------------------------------ */
 
-/* Emit the explicit row break; never soft-wrap. */
+/* Emit the logical line break (\n / \r\n normalized to \r\n). This is
+ * the only break the commit path emits: the terminal owns wrapping. */
 static void stage_row_break(TuiTranscript *t)
 {
     dynamic_buffer_append(t->staging, "\r\n", 2);
@@ -317,18 +320,14 @@ static void stage_row_break(TuiTranscript *t)
     t->row_col = 0;
 }
 
-/* Append glyph bytes with explicit wrapping at t->width. */
+/* Append glyph bytes. The commit path inserts NO width break — the
+ * terminal owns soft-wrapping and reflow (see tui_row_text). */
 static void stage_glyph(TuiTranscript *t, const char *bytes, size_t len,
                         int gw)
 {
-    int w = t->width > 1 ? t->width : 80;
-    if (t->row_col + gw > w)
-        stage_row_break(t);
     dynamic_buffer_append(t->staging, bytes, len);
     t->row_open = 1;
     t->row_col += gw;
-    if (t->row_col >= w)
-        stage_row_break(t);
 }
 
 /* Consume escape bytes with the scan policy; only SGR is emitted (as
@@ -353,9 +352,10 @@ static void stage_escape(TuiTranscript *t, const char *bytes, size_t len,
     }
 }
 
-/* Normalize + wrap raw byte-run text into the staging buffer. Handles
- * LF/CRLF/CR -> \r\n, hard tabs (8-col stops), ANSI passthrough with
- * explicit wrapping, and no raw \r on output. */
+/* Normalize raw byte-run text into the staging buffer. Handles
+ * LF/CRLF/CR -> \r\n, hard tabs (physical-column stops), ANSI
+ * passthrough with no width wrap (the terminal soft-wraps), and no raw
+ * \r on output. */
 static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
 {
     size_t i = 0;
@@ -379,16 +379,15 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
             continue;
         }
         if (c == '\t') {
+            /* Tab stops sit at physical columns; the committed row may
+             * have soft-wrapped, so derive the physical column from
+             * the running display total. */
             int w = t->width > 1 ? t->width : 80;
-            int stop = 8 - (t->row_col % 8);
-            if (t->row_col + stop > w)
-                stop = w - t->row_col;
+            int stop = 8 - ((t->row_col % w) % 8);
             for (int k = 0; k < stop; k++)
                 dynamic_buffer_append(t->staging, " ", 1);
             t->row_open = 1;
             t->row_col += stop;
-            if (t->row_col >= w)
-                stage_row_break(t);
             i++;
             continue;
         }
@@ -492,11 +491,21 @@ static void sink_escape(TuiRowSink *s, const char *utf8, size_t len,
     }
 }
 
-/* Append UTF-8 text to the current row (public: tui_row_text). */
+/* Append UTF-8 text to the current row (public: tui_row_text).
+ *
+ * The commit path (SINK_COMMIT) inserts NO width break: committed
+ * bytes are the scrollback's truth, and the terminal owns
+ * soft-wrapping — a long logical line stays one byte run and the
+ * terminal (portty) reflows it on resize. The live frame (SINK_FRAME
+ * / SINK_COUNT) still wraps explicitly at the width: those bytes feed
+ * the inline frame's own row geometry, which the cursor math counts
+ * by row breaks. */
 void tui_row_text(TuiRowSink *s, const char *utf8, size_t len)
 {
     if (!s || !utf8)
         return;
+    int wrap = s->dest != SINK_COMMIT;
+    int w = s->width > 1 ? s->width : 1;
     size_t i = 0;
     while (i < len) {
         unsigned char c = (unsigned char)utf8[i];
@@ -515,16 +524,20 @@ void tui_row_text(TuiRowSink *s, const char *utf8, size_t len)
             continue;
         }
         if (c == '\t') {
-            int stop = 8 - (s->col % 8);
-            if (s->col + stop > s->width)
-                stop = s->width - s->col;
+            /* Emulated tab stops sit at physical columns. The commit
+             * path may have soft-wrapped, so derive the physical
+             * column from the running display total. */
+            int phys = wrap ? s->col : (s->col % w);
+            int stop = 8 - (phys % 8);
+            if (wrap && s->col + stop > w)
+                stop = w - s->col;
             sink_note_row_start(s);
             for (int k = 0; k < stop; k++) {
                 if (s->buf)
                     dynamic_buffer_append(s->buf, " ", 1);
             }
             s->col += stop;
-            if (s->col >= s->width)
+            if (wrap && s->col >= w)
                 sink_row_break(s);
             i++;
             continue;
@@ -542,13 +555,13 @@ void tui_row_text(TuiRowSink *s, const char *utf8, size_t len)
             break;
         uint32_t cp = tui_utf8_decode(utf8 + i, cl);
         int gw = tui_codepoint_width(cp);
-        if (s->col + gw > s->width)
+        if (wrap && s->col + gw > w)
             sink_row_break(s); /* explicit wrap, never soft-wrap */
         sink_note_row_start(s);
         if (s->buf)
             dynamic_buffer_append(s->buf, utf8 + i, (size_t)cl);
         s->col += gw;
-        if (s->col >= s->width)
+        if (wrap && s->col >= w)
             sink_row_break(s);
         i += (size_t)cl;
     }
@@ -610,8 +623,10 @@ void tui_row_pad_to(TuiRowSink *s, int display_col)
 {
     if (!s)
         return;
-    if (display_col > s->width)
-        display_col = s->width;
+    int wrap = s->dest != SINK_COMMIT;
+    int w = s->width > 1 ? s->width : 1;
+    if (display_col > w)
+        display_col = w;
     if (display_col <= s->col)
         return;
     int pad = display_col - s->col;
@@ -621,7 +636,7 @@ void tui_row_pad_to(TuiRowSink *s, int display_col)
             dynamic_buffer_append(s->buf, " ", 1);
     }
     s->col += pad;
-    if (s->col >= s->width)
+    if (wrap && s->col >= w)
         sink_row_break(s);
 }
 

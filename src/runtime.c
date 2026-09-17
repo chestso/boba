@@ -849,16 +849,27 @@ void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
     tui_runtime_clear_inline(runtime);
 
     /* Extend path: the frame sat one row below the open partial row
-     * (we wrote \r\n after it); go back up and move to its end. */
+     * (we wrote \r\n after it); go back up and move to its end.
+     *
+     * Committed rows are no longer pre-wrapped, so the open partial
+     * row may have soft-wrapped. `\r\n` advanced exactly one row from
+     * the row carrying the row's LAST glyph, so the append point (the
+     * next glyph) is one row up with a column carry — except when the
+     * last glyph exactly filled a physical row (cols % width == 0),
+     * where `\r\n` already landed on the append row and no up is
+     * needed. See the row/column derivation: the append point is
+     * cols/width rows below the row the run started on, col
+     * cols%width. */
     if (extend) {
         int width = runtime->term_width > 1 ? runtime->term_width : 80;
-        if (cols > width - 1)
-            cols = width - 1;
-        fputs("\x1b[1A", runtime->output);
+        int up = (cols > 0 && cols % width == 0) ? 0 : 1;
+        int fwd = cols % width;
+        if (up)
+            fputs("\x1b[1A", runtime->output);
         fputs("\r", runtime->output);
-        if (cols > 0) {
+        if (fwd > 0) {
             char fwd_buf[16];
-            ansi_format_cursor_fwd(fwd_buf, sizeof(fwd_buf), cols);
+            ansi_format_cursor_fwd(fwd_buf, sizeof(fwd_buf), fwd);
             fputs(fwd_buf, runtime->output);
         }
     }
