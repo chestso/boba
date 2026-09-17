@@ -97,6 +97,12 @@ typedef struct TuiTextInput
     int echo_mode; /* 0 = normal, 1 = masked (show * per codepoint) */
     int soft_wrap; /* 0 = horizontal scroll (default), 1 = soft-wrap long lines */
 
+    /* Rows drawn by the last absolute-positioning view() pass. Used to erase
+     * surplus rows when a soft-wrapped line shrinks (e.g. backspacing across
+     * a wrap boundary) — the runtime does not clear stale alt-screen rows,
+     * so the component owns cleanup of its own area. */
+    int last_render_rows;
+
     /* Styled-text highlight hook. If set, render_text_range calls this
      * instead of emitting raw text bytes. The callback returns a malloc'd
      * styled string (ANSI escape sequences + text); textinput appends it

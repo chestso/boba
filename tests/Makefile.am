@@ -23,12 +23,13 @@ test_terminal_profile_SOURCES = test_terminal_profile.c
 # detected at configure time, so a regression in shell-driven UI tests
 # can never silently slip through. The mini-apps the scripts drive are
 # in check_PROGRAMS, so automake builds them before TESTS runs.
-TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh
+TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh tmux/wrap_multiline.sh
 
 if HAVE_TMUX
-check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap
+check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap apps/tmux_textinput_wrap
 apps_tmux_textinput_multi_SOURCES = apps/tmux_textinput_multi.c
 apps_tmux_focus_swap_SOURCES = apps/tmux_focus_swap.c
+apps_tmux_textinput_wrap_SOURCES = apps/tmux_textinput_wrap.c
 TESTS = $(UNIT_TESTS) $(TMUX_TESTS)
 else
 TESTS = $(UNIT_TESTS)

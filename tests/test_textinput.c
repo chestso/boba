@@ -1364,6 +1364,162 @@ static void test_soft_wrap_disabled_default(void)
     tui_textinput_free(input);
 }
 
+/* In multiline absolute mode, soft-wrap must split a long logical line
+ * across visual rows (continuation-indented) instead of emitting the whole
+ * line on one row for the terminal to auto-wrap. Regression: previously the
+ * absolute multiline path ignored soft_wrap entirely and rendered each
+ * logical line on a single row, so content past the terminal width spilled
+ * (and garbled the screen with autowrap). */
+static void test_soft_wrap_absolute_splits_into_visual_rows(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghijklmno"); /* 15 chars -> 2 visual rows */
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    /* Two absolute rows, the second indented under the text column. */
+    assert(strstr(data, "\x1b[1;1H") != NULL);
+    assert(strstr(data, "\x1b[2;1H") != NULL);
+    assert(strstr(data, "> abcdefgh") != NULL);
+    assert(strstr(data, "  ijklmno") != NULL);
+
+    /* Cursor lands on the second visual row, after the 7 wrapped chars:
+     * prompt width (2) + 7 + 1 (1-indexed) = 10. */
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.row == 2);
+    assert(c.col == 10);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* Row count emitted by soft-wrapped absolute rendering must match the height
+ * reported by tui_textinput_get_height(), and the cursor's row must fall
+ * within that range — otherwise the parent under-reserves space. */
+static void test_soft_wrap_absolute_rows_match_height(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 12); /* content width = 10 */
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_soft_wrap(input, 1);
+
+    /* Two logical lines, both long enough to wrap. */
+    send_string(input, "hello foo bar baz"); /* 18 chars, line 0 */
+    TuiUpdateResult r = tui_textinput_update(
+        input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_string(input, "second line"); /* 11 chars, line 1 */
+
+    int height = tui_textinput_get_height(input);
+    assert(height == 4); /* 2 + 2 visual rows */
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    /* Count absolute row placements: CSI <n>;1H */
+    int rows = 0;
+    for (const char *p = data; (p = strstr(p, "\x1b[")) != NULL; p++) {
+        if (p[2] >= '1' && p[2] <= '9')
+            rows++;
+    }
+    assert(rows == height);
+
+    /* Cursor must fall on one of the rendered rows. */
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.row >= 1 && c.row <= height);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* Single-line soft-wrap in absolute mode also spreads across visual rows. */
+static void test_soft_wrap_absolute_single_line(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghijklmno");
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    assert(strstr(data, "\x1b[2;1H") != NULL);
+    assert(strstr(data, "> abcdefgh") != NULL);
+    assert(strstr(data, "  ijklmno") != NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* With soft_wrap OFF, multiline absolute rendering keeps one row per
+ * logical line and horizontally scrolls (unchanged behavior). */
+static void test_no_soft_wrap_absolute_stays_single_row(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_terminal_row(input, 1);
+    send_string(input, "abcdefghijklmno");
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    assert(tui_textinput_get_height(input) == 1);
+    assert(strstr(data, "\x1b[1;1H") != NULL);
+    assert(strstr(data, "\x1b[2;1H") == NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* When a soft-wrapped line shrinks back to fewer visual rows, the next frame
+ * must erase the leftover rows (the runtime does not clear stale alt-screen
+ * rows). Regression: backspacing across a wrap boundary used to leave the
+ * vacated row rendered. */
+static void test_soft_wrap_absolute_erases_surplus_rows(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_soft_wrap(input, 1);
+    send_string(input, "abcdefghijklmno"); /* 2 visual rows */
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf); /* frame 1: two rows */
+    dynamic_buffer_clear(buf);
+
+    for (int i = 0; i < 10; i++)
+        send_key(input, TUI_KEY_BACKSPACE);
+    tui_textinput_view(input, buf); /* frame 2: one row */
+    const char *data = dynamic_buffer_data(buf);
+
+    /* Row 2 must be cleared (positioned + EL_TO_END), even though the current
+     * frame only has one row of content. */
+    assert(strstr(data, "\x1b[2;1H\x1b[K") != NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -1451,6 +1607,11 @@ int main(void)
     RUN_TEST(test_soft_wrap_height_multiline_wrap);
     RUN_TEST(test_soft_wrap_cursor_row);
     RUN_TEST(test_soft_wrap_disabled_default);
+    RUN_TEST(test_soft_wrap_absolute_splits_into_visual_rows);
+    RUN_TEST(test_soft_wrap_absolute_rows_match_height);
+    RUN_TEST(test_soft_wrap_absolute_single_line);
+    RUN_TEST(test_no_soft_wrap_absolute_stays_single_row);
+    RUN_TEST(test_soft_wrap_absolute_erases_surplus_rows);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

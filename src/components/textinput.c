@@ -1239,6 +1239,57 @@ static void get_line_render_range(const TuiTextInput *input, size_t line_start,
     *out_end = line_end;
 }
 
+/* Render one logical line across one or more visual rows using absolute
+ * cursor positioning, soft-wrapping the content at the line's content width.
+ *
+ * Each visual row is positioned with CSI <row>;1H, cleared to EOL, and
+ * prefixed with prompt indentation so wrapped rows align under the text
+ * column — matching the wrap arithmetic in tui_textinput_cursor_pos(). The
+ * first visual row of logical line 0 shows the main prompt; every other row
+ * (wrapped rows and later logical lines) shows the continuation prompt.
+ *
+ * *row is advanced past the rows consumed. */
+static void render_wrapped_line_absolute(const TuiTextInput *input,
+                                         DynamicBuffer *out, size_t line_start,
+                                         size_t line_end, int line_index,
+                                         int *row)
+{
+    char pos_buf[32];
+
+    int prompt_w = line_prompt_width(input, line_index);
+    int content_w = input->terminal_width - prompt_w;
+    int show_prefix =
+        input->show_prompt && input->prompt && input->prompt_len > 0;
+
+    int first_row = 1;
+    size_t pos = line_start;
+    do {
+        snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", *row);
+        dynamic_buffer_append_str(out, pos_buf);
+        dynamic_buffer_append_str(out, EL_TO_END);
+
+        if (first_row && line_index == 0) {
+            if (show_prefix)
+                emit_styled_or_legacy(out, prompt_style_for(input),
+                                      input->prompt_color, input->prompt);
+        } else if (show_prefix) {
+            render_continuation_prompt(input, out);
+        }
+
+        /* Emit the next chunk of content_width codepoints (or the rest of
+         * the line when wrapping is disabled/degenerate). */
+        size_t chunk_end = line_end;
+        if (content_w > 0)
+            chunk_end = pos + tui_utf8_byte_offset(input->text + pos,
+                                                   line_end - pos, content_w);
+        if (chunk_end > pos)
+            render_text_range(input, out, pos, chunk_end);
+        pos = chunk_end;
+        (*row)++;
+        first_row = 0;
+    } while (pos < line_end && content_w > 0);
+}
+
 /* Render prompt and visible text slice to output buffer */
 static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
 {
@@ -1257,6 +1308,32 @@ static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out
         }
         render_text_range(input, out, byte_start, byte_end);
     }
+}
+
+/* Erase rows left over from a previous, taller absolute-positioning frame.
+ *
+ * After an absolute-mode render has drawn rows [terminal_row, next_row - 1],
+ * any rows within the previous frame's extent but beyond the current one are
+ * blanked. The runtime does not clear stale alt-screen rows, so the component
+ * owns cleanup of its own area — this matters most for soft-wrap, where a
+ * single backspace across a wrap boundary removes a whole visual row. */
+static void erase_surplus_rows(TuiTextInput *input, DynamicBuffer *out,
+                               int next_row)
+{
+    int cur = next_row - input->terminal_row;
+    if (cur < 0)
+        cur = 0;
+
+    if (input->last_render_rows > cur) {
+        char pos_buf[32];
+        int end = input->terminal_row + input->last_render_rows;
+        for (int r = next_row; r < end; r++) {
+            snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", r);
+            dynamic_buffer_append_str(out, pos_buf);
+            dynamic_buffer_append_str(out, EL_TO_END);
+        }
+    }
+    input->last_render_rows = cur;
 }
 
 /* Render text input to output buffer.
@@ -1278,68 +1355,99 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
 
     char pos_buf[32];
 
-    if (!input->multiline) {
-        /* Single-line mode */
+    /* view() records the rows it drew so a later, shorter frame can erase
+     * leftover rows. The pointer is const-qualified for callers, but the
+     * component owns this bookkeeping field. */
+    TuiTextInput *mutable_input = (TuiTextInput *)input;
 
-        if (input->terminal_row > 0) {
-            /* Absolute positioning mode */
-            int input_row = input->terminal_row;
+    if (input->terminal_row > 0) {
+        /* Absolute-positioning mode: draw rows [terminal_row, next_row - 1],
+         * then blank any surplus rows from a taller previous frame. */
+        int next_row = input->terminal_row;
 
-            /* Input line */
-            snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", input_row);
-            dynamic_buffer_append_str(out, pos_buf);
-            dynamic_buffer_append_str(out, EL_TO_END);
-
-            render_prompt_and_text(input, out);
-            /* Cursor placement is handled by the runtime via cursor(). */
-        } else {
-            /* Legacy relative positioning mode (terminal_row not set) */
-
-            /* Just clear and render on current line */
-            dynamic_buffer_append_str(out, "\r");
-            dynamic_buffer_append_str(out, EL_TO_END);
-
-            render_prompt_and_text(input, out);
-            /* Cursor placement: relative mode has no absolute coordinate
-             * frame; cursor() abstains and the cursor naturally lands at
-             * the end of what we just wrote. */
-        }
-    } else if (input->terminal_row > 0) {
-        /* Multi-line mode with absolute positioning */
-        int content_start_row = input->terminal_row;
-
-        /* Render each line with absolute positioning */
-        int current_line = 0;
-        size_t line_start = 0;
-        for (size_t i = 0; i <= input->text_len; i++) {
-            if (i == input->text_len || input->text[i] == '\n') {
-                int row = content_start_row + current_line;
-                snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", row);
+        if (!input->multiline) {
+            /* Single-line mode */
+            if (input->soft_wrap && input->terminal_width > 0) {
+                /* Soft-wrap single-line content across visual rows. */
+                render_wrapped_line_absolute(input, out, 0, input->text_len, 0,
+                                             &next_row);
+            } else {
+                /* One row, horizontally scrolled by offset/offset_right. */
+                snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H",
+                         input->terminal_row);
                 dynamic_buffer_append_str(out, pos_buf);
                 dynamic_buffer_append_str(out, EL_TO_END);
-
-                /* Prompt or indentation (TuiStyle > legacy prompt_color) */
-                if (current_line == 0 && input->show_prompt && input->prompt &&
-                    input->prompt_len > 0) {
-                    emit_styled_or_legacy(out, prompt_style_for(input),
-                                          input->prompt_color, input->prompt);
-                } else if (current_line > 0 && input->show_prompt && input->prompt &&
-                           input->prompt_len > 0) {
-                    render_continuation_prompt(input, out);
-                }
-
-                /* Line content (selection-aware), with scroll window / clip */
-                size_t r_start, r_end;
-                get_line_render_range(input, line_start, i, current_line,
-                                      &r_start, &r_end);
-                if (r_end > r_start)
-                    render_text_range(input, out, r_start, r_end);
-
-                current_line++;
-                line_start = i + 1;
+                render_prompt_and_text(input, out);
+                next_row = input->terminal_row + 1;
             }
+        } else if (input->soft_wrap && input->terminal_width > 0) {
+            /* Multi-line soft-wrap: each logical line consumes as many visual
+             * rows as it needs; later rows align under the text column. This
+             * matches tui_textinput_cursor_pos() and tui_textinput_get_height(). */
+            int current_line = 0;
+            size_t line_start = 0;
+            for (size_t i = 0; i <= input->text_len; i++) {
+                if (i == input->text_len || input->text[i] == '\n') {
+                    render_wrapped_line_absolute(input, out, line_start, i,
+                                                 current_line, &next_row);
+                    current_line++;
+                    line_start = i + 1;
+                }
+            }
+        } else {
+            /* Multi-line: one visual row per logical line (horizontal scroll). */
+            int current_line = 0;
+            size_t line_start = 0;
+            for (size_t i = 0; i <= input->text_len; i++) {
+                if (i == input->text_len || input->text[i] == '\n') {
+                    int row = input->terminal_row + current_line;
+                    snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", row);
+                    dynamic_buffer_append_str(out, pos_buf);
+                    dynamic_buffer_append_str(out, EL_TO_END);
+
+                    /* Prompt or indentation (TuiStyle > legacy prompt_color) */
+                    if (current_line == 0 && input->show_prompt && input->prompt &&
+                        input->prompt_len > 0) {
+                        emit_styled_or_legacy(out, prompt_style_for(input),
+                                              input->prompt_color, input->prompt);
+                    } else if (current_line > 0 && input->show_prompt && input->prompt &&
+                               input->prompt_len > 0) {
+                        render_continuation_prompt(input, out);
+                    }
+
+                    /* Line content (selection-aware), with scroll window / clip */
+                    size_t r_start, r_end;
+                    get_line_render_range(input, line_start, i, current_line,
+                                          &r_start, &r_end);
+                    if (r_end > r_start)
+                        render_text_range(input, out, r_start, r_end);
+
+                    current_line++;
+                    line_start = i + 1;
+                }
+            }
+            next_row = input->terminal_row + current_line;
         }
+
+        erase_surplus_rows(mutable_input, out, next_row);
         /* Cursor placement is handled by the runtime via cursor(). */
+        return;
+    }
+
+    /* Legacy relative positioning (terminal_row not set). No absolute frame,
+     * so there is no surplus-row bookkeeping to do. */
+    mutable_input->last_render_rows = 0;
+
+    if (!input->multiline) {
+        /* Single-line mode */
+        /* Just clear and render on current line */
+        dynamic_buffer_append_str(out, "\r");
+        dynamic_buffer_append_str(out, EL_TO_END);
+
+        render_prompt_and_text(input, out);
+        /* Cursor placement: relative mode has no absolute coordinate frame;
+         * cursor() abstains and the cursor naturally lands at the end of what
+         * we just wrote. */
     } else {
         /* Multi-line mode: relative positioning (legacy) */
         /* Clear current line, then render prompt + text per line */
@@ -1739,8 +1847,12 @@ void tui_textinput_set_terminal_width(TuiTextInput *input, int width)
 /* Set terminal row for absolute positioning */
 void tui_textinput_set_terminal_row(TuiTextInput *input, int row)
 {
-    if (input)
+    if (input) {
         input->terminal_row = row;
+        /* The old row frame no longer applies; forget the previous frame's
+         * extent so surplus-row cleanup never targets a stale location. */
+        input->last_render_rows = 0;
+    }
 }
 
 /* Get render height in rows */
