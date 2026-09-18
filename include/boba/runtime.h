@@ -39,54 +39,76 @@ typedef struct TuiTranscript TuiTranscript;
 /* Callback for commands the runtime doesn't handle natively */
 typedef void (*TuiCmdHandler)(TuiCmd *cmd, void *user_data);
 
-/* ---- External FD subscriptions (Elm subscriptions, C idiom) ----
+/* ---- I/O sources (Elm subscriptions, C idiom) ----
  *
- * The app declares its live external fds BEFORE EVERY WAIT via a fill
+ * The app declares its live I/O sources BEFORE EVERY WAIT via a fill
  * callback; the runtime reconciles the diff (rebinds what changed).
  * Interest/connection changes need no register/unregister call — just
  * return a different set next time. This is Elm's
  * `subscriptions : Model -> Sub Msg` spelled as a pull callback:
- * "model, what do you want now". */
+ * "model, what do you want now".
+ *
+ * A SOURCE is (handle, kind, flags). The kind says what `handle`
+ * names and therefore HOW the platform can wait on it; the POSIX loop
+ * treats every source as a pollable descriptor, so only Windows
+ * consults the kind. This is the seam that lets an app hand the loop
+ * something that is NOT a socket — a pipe's readiness event, say —
+ * without the loop knowing how that readiness is produced. */
 
-/* Per-fd interest flags. */
-#define TUI_FD_READ  (1u << 0) /* readable / EOF (a closed peer IS readable) */
-#define TUI_FD_WRITE (1u << 1) /* pending connect finished (writable =   \
+/* What `handle` names. */
+#define TUI_SRC_FD     0 /* a POSIX file descriptor (poll) */
+#define TUI_SRC_SOCKET 1 /* a Windows SOCKET (WSAEventSelect readiness) */
+#define TUI_SRC_HANDLE 2 /* a Windows waitable HANDLE (signaled = ready) */
+
+/* Per-source interest flags. */
+#define TUI_IO_READ  (1u << 0) /* readable / EOF (a closed peer IS readable) */
+#define TUI_IO_WRITE (1u << 1) /* pending connect finished (writable =   \
                                 * completion signal), or send buffer has \
                                 * room again */
 
-#ifndef TUI_EXTERNAL_FD_MAX
-#define TUI_EXTERNAL_FD_MAX 32
+#ifndef TUI_IO_SOURCE_MAX
+#define TUI_IO_SOURCE_MAX 32
 #endif
 
-/* One declared external fd + what to wait for on it. */
-typedef struct TuiExternalFd
+/* One declared I/O source: the object to wait on, what to wait for,
+ * and how the platform should wait. */
+typedef struct TuiIoSource
 {
-    int fd;         /* -1 = no entry (rest of struct ignored) */
-    unsigned flags; /* TUI_FD_READ / TUI_FD_WRITE / both */
-} TuiExternalFd;
+    intptr_t handle; /* fd / SOCKET / HANDLE; < 0 = no entry (rest of
+                      * struct ignored). POSIX: an int fd. */
+    unsigned flags;  /* TUI_IO_READ / TUI_IO_WRITE / both */
+    int kind;        /* TUI_SRC_FD / TUI_SRC_SOCKET / TUI_SRC_HANDLE
+                      * (0 = TUI_SRC_FD, so a zero-initialized struct is
+                      * a plain descriptor) */
+} TuiIoSource;
 
-/* Fill `out` with the fds to wait on this cycle, at most `cap`.
+/* Fill `out` with the sources to wait on this cycle, at most `cap`.
  * Return the number filled (<= cap). Called before EVERY wait: the
  * app re-declares its live set each cycle — connections or interests
  * that went away simply stop being returned; new ones appear. This is
- * the subscriptions function (see above). Zero = no external fds.
+ * the subscriptions function (see above). Zero = nothing to wait on.
  *
  * Consumer obligations:
  * - Spurious wakeups are allowed; re-check state (getsockopt(SO_ERROR)
  *   after connect completes, EAGAIN-safe reads/writes).
- * - Clear TUI_FD_WRITE when drained: a perpetually-writable idle fd
+ * - Clear TUI_IO_WRITE when drained: a perpetually-writable idle source
  *   with WRITE declared busy-loops the runtime.
- * - Do not declare the same fd twice across slots (undefined).
- * - EOF is readable — a closed peer must be dispatched READ. */
-typedef size_t (*TuiFillExternalFds)(TuiExternalFd *out, size_t cap,
-                                     void *user_data);
+ * - Do not declare the same handle twice across slots (undefined).
+ * - EOF is readable — a closed peer must be dispatched READ.
+ * - TUI_SRC_HANDLE sources must be auto-reset events (or events the app
+ *   resets itself): the loop resets nothing it did not create. A
+ *   manual-reset event left signaled wakes the loop forever. */
+typedef size_t (*TuiFillIoSources)(TuiIoSource *out, size_t cap,
+                                   void *user_data);
 
-/* Dispatched once PER fd with activity, carrying everything that fired
- * on that fd. `ready` contains only bits the app declared for that fd
- * (a failed connect is dispatched READ|WRITE so the app's write path
- * learns of it). Runs on the loop thread only; reach update() via
+/* Dispatched once PER source with activity, carrying everything that
+ * fired on that source. `ready` contains only bits the app declared
+ * for that source (a failed connect is dispatched READ|WRITE so the
+ * app's write path learns of it). `handle` is the same value the fill
+ * returned. Runs on the loop thread only; reach update() via
  * tui_runtime_post from inside. */
-typedef void (*TuiOnExternalReady)(int fd, unsigned ready, void *user_data);
+typedef void (*TuiOnIoReady)(intptr_t handle, unsigned ready,
+                             void *user_data);
 
 /* Callback: called every tick (wait timeout, ~100ms) */
 typedef void (*TuiOnTick)(void *user_data);
@@ -134,8 +156,8 @@ typedef struct TuiRuntimeConfig
     void *cmd_handler_data;    /* Callback context */
 
     /* Event loop callbacks (used by tui_runtime_run) */
-    TuiFillExternalFds fill_external_fds;    /* Declare fds to wait on (per wait) */
-    TuiOnExternalReady on_external_ready;    /* Per-fd: (fd, ready bits) fired */
+    TuiFillIoSources fill_io_sources;        /* Declare I/O sources (per wait) */
+    TuiOnIoReady on_io_ready;                /* Per-source: (handle, bits) fired */
     TuiOnTick on_tick;                       /* Tick (~100ms timeout) */
     TuiGetTickTimeoutMs get_tick_timeout_ms; /* Dynamic tick timeout */
     TuiOnResize on_resize;                   /* Terminal resized */
@@ -194,16 +216,19 @@ struct TuiRuntime
     DWORD orig_output_mode; /* Saved console output mode */
     int is_pty;             /* 1 = ConPTY/pipe, 0 = real console */
     HANDLE wakeup_event;    /* Event object for waking WaitForMultipleObjects */
-    /* External-FD subscription pool: one WSAEVENT per slot, reused
-     * across waits. Each cycle the fill callback declares up to
-     * TUI_EXTERNAL_FD_MAX (fd, flags) slots; a slot whose (fd, flags)
-     * differs from last cycle is rebound via WSAEventSelect (the
-     * rebind is the reconcile diff). FD_CLOSE is always armed so a
+    /* I/O-source subscription pool: one WSAEVENT per socket slot,
+     * reused across waits. Each cycle the fill callback declares up to
+     * TUI_IO_SOURCE_MAX sources; the runtime waits on a socket slot's
+     * WSAEVENT (bound via WSAEventSelect) or, for a TUI_SRC_HANDLE
+     * source, on the app's own (auto-reset) handle directly. A socket
+     * slot whose (handle, flags) differs from last cycle is rebound —
+     * the rebind is the reconcile diff. FD_CLOSE is always armed so a
      * failed connect can't be missed. */
-    HANDLE ext_events[TUI_EXTERNAL_FD_MAX];
-    int ext_fds[TUI_EXTERNAL_FD_MAX];        /* Last fd bound per slot (-1 = unbound) */
-    unsigned ext_flags[TUI_EXTERNAL_FD_MAX]; /* Last flags bound per slot */
-    int ext_count;                           /* Slots bound last cycle (0 = none) */
+    HANDLE io_events[TUI_IO_SOURCE_MAX];
+    intptr_t io_handles[TUI_IO_SOURCE_MAX]; /* Last handle bound per slot */
+    unsigned io_flags[TUI_IO_SOURCE_MAX];   /* Last flags bound per slot */
+    int io_kinds[TUI_IO_SOURCE_MAX];        /* Kind bound per slot */
+    int io_count;                           /* Slots bound last cycle (0 = none) */
     /* Stdin reader thread: ReadFile on a console handle blocks for
      * non-key events (focus, resize) even when WaitForMultipleObjects
      * signals it. A background thread does the blocking read and

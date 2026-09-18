@@ -140,16 +140,16 @@ static TuiComponent noop_component = {
  * ======================================================================== */
 
 /* Dummy callbacks for config storage tests */
-static size_t dummy_fill_fds(TuiExternalFd *out, size_t cap, void *data)
+static size_t dummy_fill_fds(TuiIoSource *out, size_t cap, void *data)
 {
     (void)data;
     (void)out;
     (void)cap;
     return 0;
 }
-static void dummy_on_ready(int fd, unsigned ready, void *data)
+static void dummy_on_ready(intptr_t handle, unsigned ready, void *data)
 {
-    (void)fd;
+    (void)handle;
     (void)ready;
     (void)data;
 }
@@ -169,8 +169,8 @@ static void test_config_stores_callbacks(void)
 
     TuiRuntimeConfig cfg = {
         .output = stdout,
-        .fill_external_fds = dummy_fill_fds,
-        .on_external_ready = dummy_on_ready,
+        .fill_io_sources = dummy_fill_fds,
+        .on_io_ready = dummy_on_ready,
         .on_tick = dummy_on_tick,
         .on_resize = dummy_on_resize,
         .on_stdin_processed = dummy_on_stdin,
@@ -181,8 +181,8 @@ static void test_config_stores_callbacks(void)
     assert(rt != NULL);
 
     /* Verify callbacks are stored in config */
-    assert(rt->config.fill_external_fds == dummy_fill_fds);
-    assert(rt->config.on_external_ready == dummy_on_ready);
+    assert(rt->config.fill_io_sources == dummy_fill_fds);
+    assert(rt->config.on_io_ready == dummy_on_ready);
     assert(rt->config.on_tick == dummy_on_tick);
     assert(rt->config.on_resize == dummy_on_resize);
     assert(rt->config.on_stdin_processed == dummy_on_stdin);
@@ -307,8 +307,8 @@ static void test_null_callbacks_in_config(void)
 {
     TuiRuntimeConfig cfg = {
         .output = stdout,
-        .fill_external_fds = NULL,
-        .on_external_ready = NULL,
+        .fill_io_sources = NULL,
+        .on_io_ready = NULL,
         .on_tick = NULL,
         .on_resize = NULL,
         .on_stdin_processed = NULL,
@@ -317,7 +317,7 @@ static void test_null_callbacks_in_config(void)
 
     TuiRuntime *rt = tui_runtime_create(&noop_component, NULL, &cfg);
     assert(rt != NULL);
-    assert(rt->config.fill_external_fds == NULL);
+    assert(rt->config.fill_io_sources == NULL);
     assert(rt->config.event_data == NULL);
 
     tui_runtime_free(rt);
@@ -957,7 +957,7 @@ static void test_post_wakes_event_loop(void)
 
 /* Fill callback returning 0 entries — the "no external fds" default.
  * The runtime must tolerate a filler that declares nothing. */
-static size_t fill_zero(TuiExternalFd *out, size_t cap, void *data)
+static size_t fill_zero(TuiIoSource *out, size_t cap, void *data)
 {
     (void)out;
     (void)cap;
@@ -967,32 +967,32 @@ static size_t fill_zero(TuiExternalFd *out, size_t cap, void *data)
 
 /* Fill callback returning exactly 1 entry. */
 static int s_fill_one_fd = 51;
-static size_t fill_one(TuiExternalFd *out, size_t cap, void *data)
+static size_t fill_one(TuiIoSource *out, size_t cap, void *data)
 {
     (void)data;
     assert(cap >= 1);
-    out[0].fd = s_fill_one_fd;
-    out[0].flags = TUI_FD_READ;
+    out[0].handle = s_fill_one_fd;
+    out[0].flags = TUI_IO_READ;
     return 1;
 }
 
 /* Fill callback returning N (3) entries. */
-static size_t fill_three(TuiExternalFd *out, size_t cap, void *data)
+static size_t fill_three(TuiIoSource *out, size_t cap, void *data)
 {
     (void)data;
     assert(cap >= 3);
-    out[0].fd = 60;
-    out[0].flags = TUI_FD_READ;
-    out[1].fd = 61;
-    out[1].flags = TUI_FD_WRITE;
-    out[2].fd = 62;
-    out[2].flags = TUI_FD_READ | TUI_FD_WRITE;
+    out[0].handle = 60;
+    out[0].flags = TUI_IO_READ;
+    out[1].handle = 61;
+    out[1].flags = TUI_IO_WRITE;
+    out[2].handle = 62;
+    out[2].flags = TUI_IO_READ | TUI_IO_WRITE;
     return 3;
 }
 
 /* Fill callback that returns MORE than cap — the runtime must clamp.
  * (Defensive contract: consumer bugs shouldn't corrupt the wait set.) */
-static size_t fill_overflow(TuiExternalFd *out, size_t cap, void *data)
+static size_t fill_overflow(TuiIoSource *out, size_t cap, void *data)
 {
     (void)out;
     (void)data;
@@ -1014,8 +1014,8 @@ static void test_fill_zero_in_run(void)
     TuiRuntimeConfig cfg = {
         .raw_mode = 0,
         .output = devnull,
-        .fill_external_fds = fill_zero,
-        .on_external_ready = dummy_on_ready,
+        .fill_io_sources = fill_zero,
+        .on_io_ready = dummy_on_ready,
         .on_tick = tick_post_callback,
     };
     TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
@@ -1050,7 +1050,7 @@ static void test_fill_overflow_clamps(void)
         TuiRuntimeConfig cfg = {
             .raw_mode = 0,
             .output = devnull,
-            .fill_external_fds = fill_overflow,
+            .fill_io_sources = fill_overflow,
             .on_tick = tick_post_callback,
         };
         TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
@@ -1185,8 +1185,8 @@ static void test_fill_three_in_run(void)
         TuiRuntimeConfig cfg = {
             .raw_mode = 0,
             .output = devnull,
-            .fill_external_fds = fill_three,
-            .on_external_ready = dummy_on_ready,
+            .fill_io_sources = fill_three,
+            .on_io_ready = dummy_on_ready,
             .on_tick = tick_post_callback,
         };
         TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
@@ -1267,7 +1267,7 @@ static void two_sock_server_child(int listen_fd)
     _exit(0);
 }
 
-static size_t two_sock_fill(TuiExternalFd *out, size_t cap, void *data)
+static size_t two_sock_fill(TuiIoSource *out, size_t cap, void *data)
 {
     (void)data;
     s_two_fill_calls++;
@@ -1276,29 +1276,30 @@ static size_t two_sock_fill(TuiExternalFd *out, size_t cap, void *data)
      * (awaiting the echo). B: READ the whole time. */
     if (!s_two.a_sent) {
         if (n < cap) {
-            out[n].fd = s_two.a_fd;
-            out[n].flags = TUI_FD_WRITE;
+            out[n].handle = s_two.a_fd;
+            out[n].flags = TUI_IO_WRITE;
             n++;
         }
     } else if (!s_two.a_read_back) {
         if (n < cap) {
-            out[n].fd = s_two.a_fd;
-            out[n].flags = TUI_FD_READ;
+            out[n].handle = s_two.a_fd;
+            out[n].flags = TUI_IO_READ;
             n++;
         }
     }
     if (!s_two.b_read && n < cap) {
-        out[n].fd = s_two.b_fd;
-        out[n].flags = TUI_FD_READ;
+        out[n].handle = s_two.b_fd;
+        out[n].flags = TUI_IO_READ;
         n++;
     }
     return n;
 }
 
-static void two_sock_ready(int fd, unsigned ready, void *data)
+static void two_sock_ready(intptr_t handle, unsigned ready, void *data)
 {
+    int fd = (int)handle;
     (void)data;
-    if (fd == s_two.a_fd && (ready & TUI_FD_WRITE)) {
+    if (fd == s_two.a_fd && (ready & TUI_IO_WRITE)) {
         if (s_two.a_write_ready)
             return; /* spurious wakeup — allowed, ignore */
         int soerr = -1;
@@ -1309,13 +1310,13 @@ static void two_sock_ready(int fd, unsigned ready, void *data)
         /* Connect completed: send the payload. */
         ssize_t n = send(fd, "x", 1, 0);
         s_two.a_sent = (n == 1);
-    } else if (fd == s_two.a_fd && (ready & TUI_FD_READ)) {
+    } else if (fd == s_two.a_fd && (ready & TUI_IO_READ)) {
         if (s_two.a_sent && !s_two.a_read_back) {
             char c = 0;
             ssize_t n = recv(fd, &c, 1, 0);
             s_two.a_read_back = (n == 1 && c == 'x');
         }
-    } else if (fd == s_two.b_fd && (ready & TUI_FD_READ)) {
+    } else if (fd == s_two.b_fd && (ready & TUI_IO_READ)) {
         if (!s_two.b_read) {
             char c = 0;
             ssize_t n = recv(fd, &c, 1, 0);
@@ -1400,8 +1401,8 @@ static void test_two_socket_subscriptions(void)
     TuiRuntimeConfig cfg = {
         .raw_mode = 0,
         .output = devnull,
-        .fill_external_fds = two_sock_fill,
-        .on_external_ready = two_sock_ready,
+        .fill_io_sources = two_sock_fill,
+        .on_io_ready = two_sock_ready,
         .on_tick = two_sock_tick, /* deadlock guard only */
     };
     TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
@@ -1440,6 +1441,126 @@ static void test_two_socket_subscriptions(void)
     fclose(devnull);
 }
 #endif /* !_WIN32 */
+
+#ifdef _WIN32
+/* ========================================================================
+ * TUI_SRC_HANDLE sources: a waitable HANDLE waited on directly
+ * ======================================================================== */
+
+/* A TUI_SRC_HANDLE source is put straight into the
+ * WaitForMultipleObjects set. The loop cannot know what the handle
+ * means, so a signaled (auto-reset) event IS the readiness edge: the
+ * loop hands the app the bits it declared. Here the tick signals the
+ * event — exactly where an app's pipe-reader thread would. */
+#define HSRC_MSG_TYPE (TUI_MSG_CUSTOM_BASE + 201)
+
+static TuiRuntime *s_hsrc_runtime;
+static HANDLE s_hsrc_event;
+static int s_hsrc_hits;
+static int s_hsrc_tick_count;
+
+typedef struct
+{
+    TuiModel base;
+} HsrcModel;
+
+static TuiInitResult hsrc_init(void *config)
+{
+    (void)config;
+    HsrcModel *m = calloc(1, sizeof(HsrcModel));
+    m->base.type = 996;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+static TuiUpdateResult hsrc_update(TuiModel *model, TuiMsg msg)
+{
+    (void)model;
+    if (msg.type == HSRC_MSG_TYPE)
+        return tui_update_result(tui_cmd_quit());
+    return tui_update_result_none();
+}
+
+static TuiComponent hsrc_component = {
+    .init = hsrc_init,
+    .update = hsrc_update,
+    .view = test_view,
+    .free = test_free,
+};
+
+static size_t hsrc_fill(TuiIoSource *out, size_t cap, void *data)
+{
+    (void)data;
+    if (cap < 1)
+        return 0;
+    out[0].handle = (intptr_t)s_hsrc_event;
+    out[0].flags = TUI_IO_READ;
+    out[0].kind = TUI_SRC_HANDLE;
+    return 1;
+}
+
+static void hsrc_ready(intptr_t handle, unsigned ready, void *data)
+{
+    (void)data;
+    assert((HANDLE)handle == s_hsrc_event);
+    assert(ready & TUI_IO_READ);
+    s_hsrc_hits++;
+    tui_runtime_post(s_hsrc_runtime, tui_msg_custom(HSRC_MSG_TYPE, NULL));
+}
+
+static void hsrc_tick(void *data)
+{
+    (void)data;
+    if (s_hsrc_hits == 0)
+        SetEvent(s_hsrc_event);
+    /* Deadlock guard: a broken dispatch must not hang the suite. */
+    if (++s_hsrc_tick_count > 50)
+        tui_runtime_post(s_hsrc_runtime, tui_msg_custom(HSRC_MSG_TYPE, NULL));
+}
+
+static void test_handle_source_dispatch(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    /* Hand the runtime a stdin that never EOFs: a pipe whose write end
+     * we hold open. Without this the reader thread sees ReadFile fail
+     * (no console when stdin is not a terminal) and the loop quits on
+     * the first iteration, before any source can fire. */
+    HANDLE rd = NULL, wr = NULL;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, FALSE };
+    assert(CreatePipe(&rd, &wr, &sa, 0));
+    HANDLE old_stdin = GetStdHandle(STD_INPUT_HANDLE);
+    SetStdHandle(STD_INPUT_HANDLE, rd);
+
+    s_hsrc_event = CreateEvent(NULL, FALSE /* auto-reset */, FALSE, NULL);
+    assert(s_hsrc_event != NULL);
+    s_hsrc_hits = 0;
+    s_hsrc_tick_count = 0;
+
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .fill_io_sources = hsrc_fill,
+        .on_io_ready = hsrc_ready,
+        .on_tick = hsrc_tick,
+    };
+    TuiRuntime *rt = tui_runtime_create(&hsrc_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_hsrc_runtime = rt;
+
+    assert(tui_runtime_run(rt) == 0);
+    assert(s_hsrc_hits == 1);
+
+    SetStdHandle(STD_INPUT_HANDLE, old_stdin);
+    CloseHandle(rd);
+    CloseHandle(wr);
+    CloseHandle(s_hsrc_event);
+    s_hsrc_event = NULL;
+    s_hsrc_runtime = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+#endif /* _WIN32 */
 
 /* ========================================================================
  * TuiView / flush tests
@@ -2715,6 +2836,10 @@ int main(void)
     RUN_TEST(test_fill_overflow_clamps);
     RUN_TEST(test_fill_three_in_run);
     RUN_TEST(test_two_socket_subscriptions);
+#endif
+
+#ifdef _WIN32
+    RUN_TEST(test_handle_source_dispatch);
 #endif
 
     /* TuiRenderMode tests (cross-platform — no fmemopen needed) */

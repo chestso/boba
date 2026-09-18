@@ -104,9 +104,9 @@ tui_runtime_free(rt);
 
 The runtime handles SIGWINCH (resize), SIGINT, stdin polling, and external-FD
 subscriptions via `TuiRuntimeConfig` callbacks (`on_tick`, `on_resize`,
-`fill_external_fds`, `on_external_ready`, `on_stdin_processed`,
-`get_tick_timeout_ms`): declare up to `TUI_EXTERNAL_FD_MAX` (32) sockets
-per wait with per-fd read/write interest, re-declared before every wait
+`fill_io_sources`, `on_io_ready`, `on_stdin_processed`,
+`get_tick_timeout_ms`): declare up to `TUI_IO_SOURCE_MAX` (32) I/O
+sources per wait with per-source read/write interest, re-declared before every wait
 (Elm subscriptions in C idiom — no register/unregister lifecycle).
 
 On Windows, the event loop uses `WaitForMultipleObjects` with a `CreateEvent` wakeup
@@ -628,37 +628,43 @@ same use cases through runtime config callbacks:
 | ------------------------------ | ---------------------------------------------------------------- |
 | `Time.every 1000 Tick`         | `on_tick` + `get_tick_timeout_ms`                                |
 | Window resize                  | Automatic `TUI_MSG_WINDOW_SIZE` + `on_resize`                    |
-| Ports / external event sources | `fill_external_fds` + `on_external_ready`                        |
+| Ports / external event sources | `fill_io_sources` + `on_io_ready`                                |
 | Post-input hooks               | `on_stdin_processed`                                             |
 | Any external source            | `tui_runtime_post()` from callbacks, threads, or signal handlers |
 
-External FDs follow the Elm subscriptions model directly — the fill callback is
+I/O sources follow the Elm subscriptions model directly — the fill callback is
 the subscriptions function in C idiom:
 
 - **A function of app state, evaluated before every wait.** Like Elm's
   `subscriptions : Model -> Sub Msg` called after every update,
-  `fill_external_fds(out, cap, data)` is a callback the app defines once at
+  `fill_io_sources(out, cap, data)` is a callback the app defines once at
   startup; the runtime invokes it before every wait and it returns what the
-  app currently wants: an array of `{fd, TUI_FD_READ | TUI_FD_WRITE}` entries
-  (up to `TUI_EXTERNAL_FD_MAX` = 32). It is the _runtime_ that re-evaluates it
-  each cycle — the app isn't asked to do anything per loop. Interest or
-  connection changes need no subscribe/unsubscribe call — just return a
-  different set next time; the runtime reconciles the diff between waits
-  (Unix: poll(2), POLLOUT first-class; Windows: a per-slot WSAEVENT pool +
-  rebind diff).
+  app currently wants: an array of
+  `{handle, flags, kind}` entries — `kind` saying what `handle` names
+  (`TUI_SRC_FD` on POSIX; `TUI_SRC_SOCKET` or `TUI_SRC_HANDLE` on Windows)
+  and `flags` the interest (`TUI_IO_READ` / `TUI_IO_WRITE`) — up to
+  `TUI_IO_SOURCE_MAX` = 32. It is the _runtime_ that re-evaluates it each
+  cycle — the app isn't asked to do anything per loop. Interest or connection
+  changes need no subscribe/unsubscribe call — just return a different set
+  next time; the runtime reconciles the diff between waits (Unix: poll(2),
+  POLLOUT first-class, every source a descriptor; Windows: a per-slot
+  WSAEVENT pool + rebind diff for sockets, a direct
+  `WaitForMultipleObjects` slot for `TUI_SRC_HANDLE` sources).
 
-- **One dispatch per fd with activity.** `on_external_ready(fd, ready, data)`
-  fires once per fd with everything that fired, `ready` masked to the bits the
-  app declared (a failed connect arrives as `READ|WRITE`). Spurious wakeups
-  are allowed — re-check state (`getsockopt(SO_ERROR)` after connect
-  completes, EAGAIN-safe reads/writes). Clear `TUI_FD_WRITE` when drained; a
-  perpetually-writable idle fd with WRITE declared busy-loops the runtime.
+- **One dispatch per source with activity.** `on_io_ready(handle, ready, data)`
+  fires once per source with everything that fired, `ready` masked to the bits
+  the app declared (a failed connect arrives as `READ|WRITE`). Spurious
+  wakeups are allowed — re-check state (`getsockopt(SO_ERROR)` after connect
+  completes, EAGAIN-safe reads/writes). Clear `TUI_IO_WRITE` when drained; a
+  perpetually-writable idle source with WRITE declared busy-loops the runtime.
+  A `TUI_SRC_HANDLE` source must be an auto-reset event (or one the app resets
+  itself) — a manual-reset event left signaled spins the loop.
 
 - **C already has event loop primitives.** Callbacks compose directly with
   `poll()`, signal handlers, and threads. Keep the distinction clear: the
   _wait_ is event-driven — a blocking `poll(2)` with no busy-looping (or a
   blocking `WaitForMultipleObjects` on Windows) sits at the heart of the loop.
-  Only the _subscriptions_ are pull-based: `fill_external_fds` re-declares
+  Only the _subscriptions_ are pull-based: `fill_io_sources` re-declares
   the wanted set each cycle rather than mutating a registered pool, so state
   changes flow through the returned array with no subscribe/unsubscribe
   lifecycle. A declarative `Sub` value layer would need value
@@ -674,37 +680,37 @@ typedef struct { int fd; unsigned bits; } FdReady;
 
 /* Model-derived interest: what do we want to wait on? */
 static size_t
-fill_external_fds(TuiExternalFd *out, size_t cap, void *user_data)
+fill_io_sources(TuiIoSource *out, size_t cap, void *user_data)
 {
     App *app = user_data;
     size_t n = 0;
-    if (app->sock >= 0)                          /* only when connected */
-        out[n++] = (TuiExternalFd){ app->sock, TUI_FD_READ };
-    if (app->want_write)                          /* drop WRITE once drained */
-        out[n++] = (TuiExternalFd){ app->sock, TUI_FD_WRITE };
+    if (app->sock >= 0)     /* only when connected; TUI_SRC_FD on POSIX */
+        out[n++] = (TuiIoSource){ app->sock, TUI_IO_READ, TUI_SRC_FD };
+    if (app->want_write)    /* drop WRITE once drained */
+        out[n++] = (TuiIoSource){ app->sock, TUI_IO_WRITE, TUI_SRC_FD };
     return n;
 }
 
 /* Per-fd dispatch; forward into the model as a custom message */
 static void
-on_external_ready(int fd, unsigned ready, void *user_data)
+on_io_ready(intptr_t handle, unsigned ready, void *user_data)
 {
     App *app = user_data;
     FdReady *ev = malloc(sizeof *ev);
-    ev->fd = fd;
-    ev->bits = ready & (TUI_FD_READ | TUI_FD_WRITE);
+    ev->fd = (int)handle;
+    ev->bits = ready & (TUI_IO_READ | TUI_IO_WRITE);
     tui_runtime_post(app->rt, tui_msg_custom(TUI_MSG_CUSTOM_BASE, ev));
 }
 
 /* Wire up once at startup */
-cfg.fill_external_fds   = fill_external_fds;
-cfg.on_external_ready   = on_external_ready;
+cfg.fill_io_sources     = fill_io_sources;
+cfg.on_io_ready         = on_io_ready;
 cfg.get_tick_timeout_ms = get_tick_timeout_ms;   /* e.g. 500ms */
 ```
 
 The app writes the callbacks once; `tui_runtime_run()` re-invokes
-`fill_external_fds` before every wait, dispatching `on_external_ready` per fd
-that fires. The returned `TuiExternalFd` array is filled in place by the
+`fill_io_sources` before every wait, dispatching `on_io_ready` per source
+that fires. The returned `TuiIoSource` array is filled in place by the
 callback and consumed by the runtime; nothing is registered or unregistered.
 
 ### Input Parsing

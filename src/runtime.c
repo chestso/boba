@@ -1360,20 +1360,22 @@ int tui_runtime_run(TuiRuntime *runtime)
          * subscriptions in C idiom: re-declared every cycle, the
          * runtime waits on whatever the app currently wants — no
          * register/unregister lifecycle). */
-        TuiExternalFd ext[TUI_EXTERNAL_FD_MAX];
+        TuiIoSource ext[TUI_IO_SOURCE_MAX];
         size_t ext_n = 0;
-        nfds_t ext_idx[TUI_EXTERNAL_FD_MAX]; /* poll index per filled entry */
-        if (runtime->config.fill_external_fds) {
-            ext_n = runtime->config.fill_external_fds(
-                ext, TUI_EXTERNAL_FD_MAX, runtime->config.event_data);
-            if (ext_n > TUI_EXTERNAL_FD_MAX)
-                ext_n = TUI_EXTERNAL_FD_MAX;
+        nfds_t ext_idx[TUI_IO_SOURCE_MAX]; /* poll index per filled entry */
+        if (runtime->config.fill_io_sources) {
+            ext_n = runtime->config.fill_io_sources(
+                ext, TUI_IO_SOURCE_MAX, runtime->config.event_data);
+            if (ext_n > TUI_IO_SOURCE_MAX)
+                ext_n = TUI_IO_SOURCE_MAX;
         }
 
         /* Wait core: poll(2) — array-native for the subscription
          * slots, POLLOUT first-class, no FD_SETSIZE ceiling.
-         * Slots: stdin, wakeup pipe, one per declared fd. */
-        struct pollfd fds[2 + TUI_EXTERNAL_FD_MAX];
+         * Slots: stdin, wakeup pipe, one per declared source.  On
+         * POSIX every source is a descriptor (TUI_SRC_FD); a source
+         * of any other kind is not waitable here and is skipped. */
+        struct pollfd fds[2 + TUI_IO_SOURCE_MAX];
         nfds_t n_fds = 0;
 
         fds[n_fds].fd = STDIN_FILENO;
@@ -1391,13 +1393,13 @@ int tui_runtime_run(TuiRuntime *runtime)
 
         for (size_t i = 0; i < ext_n; i++) {
             ext_idx[i] = (nfds_t)-1;
-            if (ext[i].fd < 0)
+            if (ext[i].handle < 0 || ext[i].kind != TUI_SRC_FD)
                 continue;
-            fds[n_fds].fd = ext[i].fd;
+            fds[n_fds].fd = (int)ext[i].handle;
             fds[n_fds].events = 0;
-            if (ext[i].flags & TUI_FD_READ)
+            if (ext[i].flags & TUI_IO_READ)
                 fds[n_fds].events |= POLLIN;
-            if (ext[i].flags & TUI_FD_WRITE)
+            if (ext[i].flags & TUI_IO_WRITE)
                 fds[n_fds].events |= POLLOUT;
             fds[n_fds].revents = 0;
             ext_idx[i] = n_fds++;
@@ -1449,7 +1451,7 @@ int tui_runtime_run(TuiRuntime *runtime)
          * requested (failed connect): dispatch READ|WRITE so the
          * app's write path learns of it. `ready` bits delivered are
          * masked to what the app declared for the fd. */
-        if (ready > 0 && runtime->config.on_external_ready && ext_n > 0) {
+        if (ready > 0 && runtime->config.on_io_ready && ext_n > 0) {
             for (size_t i = 0; i < ext_n; i++) {
                 if (ext_idx[i] == (nfds_t)-1)
                     continue;
@@ -1458,16 +1460,16 @@ int tui_runtime_run(TuiRuntime *runtime)
                  * AND was declared. */
                 unsigned fired = 0;
                 if (rev & (POLLERR | POLLHUP | POLLNVAL))
-                    fired = TUI_FD_READ | TUI_FD_WRITE;
+                    fired = TUI_IO_READ | TUI_IO_WRITE;
                 else {
                     if (rev & POLLIN)
-                        fired |= TUI_FD_READ;
+                        fired |= TUI_IO_READ;
                     if (rev & POLLOUT)
-                        fired |= TUI_FD_WRITE;
+                        fired |= TUI_IO_WRITE;
                 }
                 if (fired)
-                    runtime->config.on_external_ready(
-                        ext[i].fd, fired & ext[i].flags,
+                    runtime->config.on_io_ready(
+                        ext[i].handle, fired & ext[i].flags,
                         runtime->config.event_data);
             }
         }
@@ -1541,14 +1543,17 @@ int tui_runtime_run(TuiRuntime *runtime)
     runtime->stdin_buf_len = 0;
     runtime->stdin_eof = 0;
 
-    /* External-FD pool: one WSAEVENT per slot, created once and
-     * reused for the runtime's lifetime (rebound per cycle). */
-    for (int i = 0; i < TUI_EXTERNAL_FD_MAX; i++) {
-        runtime->ext_events[i] = WSACreateEvent();
-        runtime->ext_fds[i] = -1;
-        runtime->ext_flags[i] = 0;
+    /* I/O-source pool: one WSAEVENT per socket slot, created once and
+     * reused for the runtime's lifetime (rebound per cycle). A
+     * TUI_SRC_HANDLE source is waited on directly, so it uses no slot
+     * event. */
+    for (int i = 0; i < TUI_IO_SOURCE_MAX; i++) {
+        runtime->io_events[i] = WSACreateEvent();
+        runtime->io_handles[i] = -1;
+        runtime->io_flags[i] = 0;
+        runtime->io_kinds[i] = -1;
     }
-    runtime->ext_count = 0;
+    runtime->io_count = 0;
 
     /* Start terminal mode */
     tui_runtime_start(runtime);
@@ -1559,12 +1564,12 @@ int tui_runtime_run(TuiRuntime *runtime)
                                          runtime, 0, NULL);
 
     while (runtime->running) {
-        /* Budget: stdin + wakeup + TUI_EXTERNAL_FD_MAX slots = 34
+        /* Budget: stdin + wakeup + TUI_IO_SOURCE_MAX slots = 34
          * handles, well under MAXIMUM_WAIT_OBJECTS (64). */
-        HANDLE handles[2 + TUI_EXTERNAL_FD_MAX];
+        HANDLE handles[2 + TUI_IO_SOURCE_MAX];
         DWORD n_handles = 0;
         DWORD idx_stdin, idx_wakeup;
-        DWORD idx_ext[TUI_EXTERNAL_FD_MAX];
+        DWORD idx_ext[TUI_IO_SOURCE_MAX];
 
         handles[n_handles] = runtime->stdin_event;
         idx_stdin = n_handles++;
@@ -1576,77 +1581,96 @@ int tui_runtime_run(TuiRuntime *runtime)
             idx_wakeup = (DWORD)-1;
         }
 
-        /* Fill the external-fd subscriptions for this wait, then
-         * reconcile: a slot whose (fd, flags) changed since last
-         * cycle is rebound via WSAEventSelect. App-array reordering
-         * just triggers extra rebinds — correct, negligible. */
-        TuiExternalFd ext[TUI_EXTERNAL_FD_MAX];
+        /* Fill the I/O-source subscriptions for this wait, then
+         * reconcile: a socket slot whose (handle, flags, kind) changed
+         * since last cycle is rebound via WSAEventSelect. A
+         * TUI_SRC_HANDLE source is waited on directly — no binding,
+         * no slot event. App-array reordering just triggers extra
+         * rebinds — correct, negligible. */
+        TuiIoSource ext[TUI_IO_SOURCE_MAX];
         size_t ext_n = 0;
-        if (runtime->config.fill_external_fds) {
-            ext_n = runtime->config.fill_external_fds(
-                ext, TUI_EXTERNAL_FD_MAX, runtime->config.event_data);
-            if (ext_n > TUI_EXTERNAL_FD_MAX)
-                ext_n = TUI_EXTERNAL_FD_MAX;
+        if (runtime->config.fill_io_sources) {
+            ext_n = runtime->config.fill_io_sources(
+                ext, TUI_IO_SOURCE_MAX, runtime->config.event_data);
+            if (ext_n > TUI_IO_SOURCE_MAX)
+                ext_n = TUI_IO_SOURCE_MAX;
         }
 
         for (size_t i = 0; i < ext_n; i++) {
             idx_ext[i] = (DWORD)-1;
-            if (ext[i].fd < 0)
+            if (ext[i].handle < 0)
                 continue;
-            if (ext[i].fd != runtime->ext_fds[i] ||
-                ext[i].flags != runtime->ext_flags[i]) {
+
+            if (ext[i].kind != TUI_SRC_SOCKET) {
+                /* A waitable HANDLE (or, on Windows, an FD the app
+                 * wrapped): wait on it directly. The wait set's
+                 * auto-reset semantics clear the event when it fires,
+                 * so the app must re-declare it while work remains. */
+                runtime->io_handles[i] = ext[i].handle;
+                runtime->io_flags[i] = ext[i].flags;
+                runtime->io_kinds[i] = ext[i].kind;
+                idx_ext[i] = n_handles;
+                handles[n_handles++] = (HANDLE)ext[i].handle;
+                continue;
+            }
+
+            if (ext[i].handle != runtime->io_handles[i] ||
+                ext[i].flags != runtime->io_flags[i] ||
+                ext[i].kind != runtime->io_kinds[i]) {
                 /* Rebind. WSAEventSelect implicitly flips the socket
                  * non-blocking — nevermore's async connect does that
                  * anyway; documented, not fought. FD_CLOSE is always
                  * armed so a failed connect can't be missed. */
                 long mask = FD_CLOSE;
-                if (ext[i].flags & TUI_FD_READ)
+                if (ext[i].flags & TUI_IO_READ)
                     mask |= FD_READ;
-                if (ext[i].flags & TUI_FD_WRITE)
+                if (ext[i].flags & TUI_IO_WRITE)
                     mask |= FD_WRITE | FD_CONNECT;
 
-                WSAEventSelect((SOCKET)ext[i].fd,
-                               runtime->ext_events[i], mask);
-                runtime->ext_fds[i] = ext[i].fd;
-                runtime->ext_flags[i] = ext[i].flags;
+                WSAEventSelect((SOCKET)ext[i].handle,
+                               runtime->io_events[i], mask);
+                runtime->io_handles[i] = ext[i].handle;
+                runtime->io_flags[i] = ext[i].flags;
+                runtime->io_kinds[i] = ext[i].kind;
 
                 /* Data may have arrived between connect and this
                  * first binding. Drain any already-pending data. */
-                if (WaitForSingleObject(runtime->ext_events[i], 0) ==
+                if (WaitForSingleObject(runtime->io_events[i], 0) ==
                     WAIT_OBJECT_0) {
                     WSANETWORKEVENTS ne;
-                    WSAEnumNetworkEvents((SOCKET)ext[i].fd,
-                                         runtime->ext_events[i], &ne);
+                    WSAEnumNetworkEvents((SOCKET)ext[i].handle,
+                                         runtime->io_events[i], &ne);
                     unsigned ready = 0;
                     if (ne.lNetworkEvents & FD_READ)
-                        ready |= TUI_FD_READ;
+                        ready |= TUI_IO_READ;
                     if (ne.lNetworkEvents & (FD_WRITE | FD_CONNECT))
-                        ready |= TUI_FD_WRITE;
+                        ready |= TUI_IO_WRITE;
                     if (ne.lNetworkEvents & FD_CLOSE)
-                        ready |= TUI_FD_READ | TUI_FD_WRITE;
-                    if (runtime->config.on_external_ready && ready)
-                        runtime->config.on_external_ready(
-                            ext[i].fd, ready & ext[i].flags,
+                        ready |= TUI_IO_READ | TUI_IO_WRITE;
+                    if (runtime->config.on_io_ready && ready)
+                        runtime->config.on_io_ready(
+                            ext[i].handle, ready & ext[i].flags,
                             runtime->config.event_data);
                 }
             }
             idx_ext[i] = n_handles;
-            handles[n_handles++] = runtime->ext_events[i];
+            handles[n_handles++] = runtime->io_events[i];
         }
-        runtime->ext_count = (int)ext_n;
+        runtime->io_count = (int)ext_n;
 
         /* Retire slots that went away from the declaration (the fill
-         * array shrank). NOTE: do NOT dissociate here when the old fd
-         * merely moved to another slot — WSAEventSelect(fd, ev, 0)
-         * drops the fd's association entirely, which would undo the
+         * array shrank). NOTE: do NOT dissociate here when the old
+         * socket merely moved to another slot — WSAEventSelect(fd, ev,
+         * 0) drops the fd's association entirely, which would undo the
          * fresh binding in the slot it moved to. Only clear the
-         * bookkeeping; a socket that is closed by the app releases
-         * its association on close. A retired fd that stays open
-         * keeps its (never-again-signaled) event association, which
-         * is harmless: nothing waits on that slot. */
-        for (int i = (int)ext_n; i < TUI_EXTERNAL_FD_MAX; i++) {
-            runtime->ext_fds[i] = -1;
-            runtime->ext_flags[i] = 0;
+         * bookkeeping; a socket that is closed by the app releases its
+         * association on close. A retired socket that stays open keeps
+         * its (never-again-signaled) event association, which is
+         * harmless: nothing waits on that slot. */
+        for (int i = (int)ext_n; i < TUI_IO_SOURCE_MAX; i++) {
+            runtime->io_handles[i] = -1;
+            runtime->io_flags[i] = 0;
+            runtime->io_kinds[i] = -1;
         }
 
         /* Compute timeout (100ms default) */
@@ -1694,30 +1718,39 @@ int tui_runtime_run(TuiRuntime *runtime)
             tui_runtime_drain(runtime);
             tui_runtime_flush(runtime);
         } else if (wait != WAIT_TIMEOUT && wait < WAIT_OBJECT_0 + n_handles) {
-            /* External slot signaled — find which one, re-arm, map
-             * network events to ready bits, dispatch PER fd.
-             * WSAEnumNetworkEvents clears the internal network event
-             * record and re-arms the event object. Using WSAResetEvent
-             * alone would leave the internal record uncleared, causing
-             * subsequent data arrivals to NOT re-trigger the event. */
+            /* An I/O slot signaled — find which one and dispatch PER
+             * source. A socket slot maps its network events to ready
+             * bits (WSAEnumNetworkEvents clears the internal network
+             * event record and re-arms the event object; WSAResetEvent
+             * alone would leave the record uncleared, so later data
+             * arrivals would NOT re-trigger). A HANDLE slot is
+             * auto-reset by the wait itself, so its declared bits are
+             * the ready set. */
             for (size_t i = 0; i < ext_n; i++) {
                 if (idx_ext[i] == (DWORD)-1 ||
                     wait != WAIT_OBJECT_0 + idx_ext[i])
                     continue;
-                WSANETWORKEVENTS ne;
-                WSAEnumNetworkEvents((SOCKET)ext[i].fd,
-                                     runtime->ext_events[i], &ne);
-                unsigned ready = 0;
-                if (ne.lNetworkEvents & FD_READ)
-                    ready |= TUI_FD_READ;
-                if (ne.lNetworkEvents & (FD_WRITE | FD_CONNECT))
-                    ready |= TUI_FD_WRITE;
-                if (ne.lNetworkEvents & FD_CLOSE)
-                    ready |= TUI_FD_READ | TUI_FD_WRITE;
-                if (runtime->config.on_external_ready && ready)
-                    runtime->config.on_external_ready(
-                        ext[i].fd, ready & ext[i].flags,
-                        runtime->config.event_data);
+                if (ext[i].kind == TUI_SRC_SOCKET) {
+                    WSANETWORKEVENTS ne;
+                    WSAEnumNetworkEvents((SOCKET)ext[i].handle,
+                                         runtime->io_events[i], &ne);
+                    unsigned ready = 0;
+                    if (ne.lNetworkEvents & FD_READ)
+                        ready |= TUI_IO_READ;
+                    if (ne.lNetworkEvents & (FD_WRITE | FD_CONNECT))
+                        ready |= TUI_IO_WRITE;
+                    if (ne.lNetworkEvents & FD_CLOSE)
+                        ready |= TUI_IO_READ | TUI_IO_WRITE;
+                    if (runtime->config.on_io_ready && ready)
+                        runtime->config.on_io_ready(
+                            ext[i].handle, ready & ext[i].flags,
+                            runtime->config.event_data);
+                } else {
+                    if (runtime->config.on_io_ready && ext[i].flags)
+                        runtime->config.on_io_ready(
+                            ext[i].handle, ext[i].flags,
+                            runtime->config.event_data);
+                }
                 break;
             }
         }
@@ -1753,15 +1786,15 @@ int tui_runtime_run(TuiRuntime *runtime)
         runtime->wakeup_event = NULL;
     }
 
-    for (int i = 0; i < TUI_EXTERNAL_FD_MAX; i++) {
-        if (runtime->ext_events[i]) {
-            WSACloseEvent(runtime->ext_events[i]);
-            runtime->ext_events[i] = NULL;
+    for (int i = 0; i < TUI_IO_SOURCE_MAX; i++) {
+        if (runtime->io_events[i]) {
+            WSACloseEvent(runtime->io_events[i]);
+            runtime->io_events[i] = NULL;
         }
-        runtime->ext_fds[i] = -1;
-        runtime->ext_flags[i] = 0;
+        runtime->io_handles[i] = -1;
+        runtime->io_flags[i] = 0;
     }
-    runtime->ext_count = 0;
+    runtime->io_count = 0;
 
     if (runtime->stdin_event) {
         CloseHandle(runtime->stdin_event);
