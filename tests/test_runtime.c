@@ -1551,6 +1551,13 @@ static void test_handle_source_dispatch(void)
     assert(tui_runtime_run(rt) == 0);
     assert(s_hsrc_hits == 1);
 
+    /* Closing rd here is the assertion that run() released its stdin
+     * reader thread: the thread parks in a blocking ReadFile(rd), and on
+     * real Windows CloseHandle on a pipe with a pending synchronous read
+     * waits for that I/O — with wr still open below, it never completes.
+     * This is where the suite hung for 20 minutes in CI until the runtime
+     * cancelled the read on teardown (2026-09-22); wine cancels the IRP
+     * on close instead, which is why it never showed locally. */
     SetStdHandle(STD_INPUT_HANDLE, old_stdin);
     CloseHandle(rd);
     CloseHandle(wr);

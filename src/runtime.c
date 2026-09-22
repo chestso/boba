@@ -1770,7 +1770,17 @@ int tui_runtime_run(TuiRuntime *runtime)
         tui_runtime_probe_check(runtime);
     }
 
-    /* Teardown: stop reader thread */
+    /* Teardown: stop the reader thread. It is normally parked in a
+     * blocking ReadFile, which stdin_done cannot interrupt — the thread
+     * only looks at that event after a read returns — so cancel the
+     * pending I/O first. Without this the thread outlives the runtime and
+     * keeps the app's stdin handle busy: whoever closes that handle next
+     * blocks in CloseHandle until the pipe's write end goes away (the
+     * 2026-09-22 Windows CI hang: test_handle_source_dispatch sat in
+     * CloseHandle(rd) forever, reader still in ReadFile at line 130 and
+     * the test's write end still open). */
+    if (runtime->stdin_thread)
+        CancelSynchronousIo(runtime->stdin_thread);
     SetEvent(runtime->stdin_done);
     if (runtime->stdin_thread) {
         WaitForSingleObject(runtime->stdin_thread, 2000);
