@@ -78,17 +78,30 @@ if [ "$secs" -gt 0 ]; then
 			echo ""
 			echo "=== WATCHDOG: test still running after ${secs}s: $* (pid $pid) ==="
 			echo "=== WATCHDOG: stack snapshot (each boxed), then kill ==="
+			# The debuggers attach by NATIVE pid: under MSYS2 $! is a
+			# Cygwin pid and `gdb -p` answers "error 87: The parameter
+			# is incorrect" (the 2026-09-22 MSYS2 run, where the
+			# snapshot came up empty for exactly that reason). ps -W's
+			# WINPID column is the translation. Gated on MSYSTEM, not
+			# on ps's exit status: GNU ps accepts -W as a no-op and
+			# would hand back a TTY name to attach to.
+			diag_pid=$pid
+			if [ -n "${MSYSTEM:-}" ]; then
+				win_pid=$(ps -W 2>/dev/null |
+					awk -v p="$pid" '$1 == p { print $4; exit }')
+				[ -n "$win_pid" ] && diag_pid=$win_pid
+			fi
 			if command -v sample >/dev/null 2>&1; then
-				diag 5 sample "$pid" 1 2>&1 || true
+				diag 5 sample "$diag_pid" 1 2>&1 || true
 				kill -CONT "$pid" 2>/dev/null || true
 			fi
 			if command -v lldb >/dev/null 2>&1; then
-				diag 8 lldb -p "$pid" -b \
+				diag 8 lldb -p "$diag_pid" -b \
 					-o "thread backtrace all" -o "detach" 2>&1 || true
 				kill -CONT "$pid" 2>/dev/null || true
 			fi
 			if command -v gdb >/dev/null 2>&1; then
-				diag 8 gdb -p "$pid" -batch -ex "thread apply all bt" 2>&1 || true
+				diag 8 gdb -p "$diag_pid" -batch -ex "thread apply all bt" 2>&1 || true
 				kill -CONT "$pid" 2>/dev/null || true
 			fi
 			# Kill chain: each signal, then a bounded settle, so the
