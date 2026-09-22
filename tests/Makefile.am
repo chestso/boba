@@ -7,6 +7,14 @@ check_PROGRAMS = $(UNIT_TESTS)
 AM_CPPFLAGS = -I$(top_srcdir)/include
 LDADD = $(top_builddir)/src/libboba.a $(SOCKET_LIBS)
 
+# The unit tests assert() their expectations, so they must be built with
+# assertions enabled whatever the build mode. A release-shaped tree (the
+# monorepo's RELEASE=1 sets CFLAGS='-O3 -DNDEBUG', as does
+# --enable-release) would otherwise compile every assertion out and a
+# green `make check` would verify nothing. GNU make's `override` appends
+# after CFLAGS, so -UNDEBUG wins over the -DNDEBUG that came in.
+override CFLAGS += -UNDEBUG
+
 test_ansi_SOURCES = test_ansi.c
 test_textinput_SOURCES = test_textinput.c
 test_viewport_SOURCES = test_viewport.c

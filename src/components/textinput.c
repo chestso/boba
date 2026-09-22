@@ -19,6 +19,59 @@ static int is_word_char(const TuiTextInput *input, char c)
     return c != ' ' && c != '\t'; /* fallback when word_chars not set */
 }
 
+/* --- Display columns --------------------------------------------------
+ *
+ * Every horizontal metric in this component — the gutter/prompt widths, the
+ * cursor's column, the wrap budget and the horizontal scroll window — is in
+ * terminal DISPLAY COLUMNS (cells): a CJK or emoji cluster is one codepoint
+ * but two cells, a combining mark none. Counting bytes or codepoints instead
+ * (which this file used to do) shifts every derived column by the number of
+ * wide clusters in the measured run. viewport.c measures the same way.
+ *
+ * Byte offsets stay the string-level unit (cursor_byte, render ranges,
+ * tui_utf8_byte_offset lookups); fit_cols is the bridge between the two.
+ *
+ * The input buffer is measured with tui_utf8_display_width_n (its bytes are
+ * literal glyphs); the gutter spans and the prompt / continuation prompt are
+ * pre-rendered strings that may carry their own SGR, so they go through
+ * tui_utf8_display_width_ansi — the same call viewport.c and list_popup.c
+ * make on rendered text. */
+
+/* Byte offset of the end of the longest prefix of text[0..len) that fits in
+ * `cols` display columns. Zero when `cols <= 0`; otherwise at least one
+ * cluster is consumed, so a chunk walk always progresses, and a cluster wider
+ * than `cols` is taken whole — a row never splits a grapheme cluster. */
+static size_t fit_cols(const char *text, size_t len, int cols)
+{
+    if (cols <= 0)
+        return 0;
+
+    size_t pos = 0;
+    int used = 0;
+    int consumed = 0;
+    while (pos < len) {
+        size_t clen = 0;
+        int w = tui_next_cluster(text + pos, len - pos, &clen);
+        if (clen < 1)
+            clen = 1; /* invalid tail: consume a byte to progress */
+        if (consumed && used + w > cols)
+            break;
+        used += w;
+        consumed = 1;
+        pos += clen;
+    }
+    return pos;
+}
+
+/* Display width of a rendered prompt string — NULL is zero, and any SGR the
+ * string carries itself is not a column. */
+static int prompt_cols(const char *prompt)
+{
+    if (!prompt)
+        return 0;
+    return (int)tui_utf8_display_width_ansi(prompt, strlen(prompt));
+}
+
 /* Display width of the prompt rendered on a given logical line:
  * line 0 uses the main prompt; later lines use the continuation prompt or
  * fall back to spaces of width prompt_len (matches render_continuation_prompt).
@@ -58,7 +111,8 @@ static void cursor_line_bounds(const TuiTextInput *input, size_t *out_start,
 }
 
 /* Adjust horizontal scroll offset so cursor stays visible on its line.
- * offset/offset_right are codepoint indices within the cursor's logical line. */
+ * offset/offset_right are display-column offsets within the cursor's logical
+ * line. */
 static void handle_overflow(TuiTextInput *input)
 {
     size_t line_start, line_end;
@@ -68,7 +122,7 @@ static void handle_overflow(TuiTextInput *input)
     int prompt_width = line_prompt_width(input, (int)input->cursor_row);
     int content_width = input->terminal_width - prompt_width;
 
-    int total = tui_utf8_codepoint_count(input->text + line_start, line_bytes);
+    int total = tui_utf8_display_width_n(input->text + line_start, line_bytes);
 
     if (content_width <= 0 || input->terminal_width == 0) {
         input->offset = 0;
@@ -76,8 +130,7 @@ static void handle_overflow(TuiTextInput *input)
         return;
     }
 
-    int cursor_cp = tui_utf8_cp_index(input->text + line_start,
-                                      input->cursor_byte - line_start);
+    int cursor_col = (int)input->cursor_col;
 
     if (total <= content_width) {
         /* Everything fits */
@@ -86,15 +139,15 @@ static void handle_overflow(TuiTextInput *input)
         return;
     }
 
-    if (cursor_cp < input->offset) {
+    if (cursor_col < input->offset) {
         /* Cursor scrolled left of window */
-        input->offset = cursor_cp;
+        input->offset = cursor_col;
         input->offset_right = input->offset + content_width;
         if (input->offset_right > total)
             input->offset_right = total;
-    } else if (cursor_cp >= input->offset_right) {
+    } else if (cursor_col >= input->offset_right) {
         /* Cursor scrolled right of window */
-        input->offset_right = cursor_cp + 1;
+        input->offset_right = cursor_col + 1;
         input->offset = input->offset_right - content_width;
         if (input->offset < 0)
             input->offset = 0;
@@ -110,18 +163,16 @@ static void handle_overflow(TuiTextInput *input)
 static void recalculate_cursor_position(TuiTextInput *input)
 {
     input->cursor_row = 0;
-    input->cursor_col = 0;
 
-    size_t col = 0;
+    size_t line_start = 0;
     for (size_t i = 0; i < input->cursor_byte && i < input->text_len; i++) {
         if (input->text[i] == '\n') {
             input->cursor_row++;
-            col = 0;
-        } else {
-            col++;
+            line_start = i + 1;
         }
     }
-    input->cursor_col = col;
+    input->cursor_col = (size_t)tui_utf8_display_width_n(
+        input->text + line_start, input->cursor_byte - line_start);
 
     /* Adjust horizontal scroll so cursor stays visible (single- and multi-line).
      * Skip when soft_wrap is on — wrapping replaces scrolling. */
@@ -359,7 +410,8 @@ static size_t line_length(const char *text, size_t len, size_t start)
     return end - start;
 }
 
-/* Move cursor up one line */
+/* Move cursor up one line, keeping the cursor's character index within the
+ * line (clamped to a shorter line's length). */
 static void cursor_up(TuiTextInput *input)
 {
     if (input->cursor_row == 0)
@@ -371,16 +423,19 @@ static void cursor_up(TuiTextInput *input)
     size_t prev_line_len =
         line_length(input->text, input->text_len, prev_line_start);
 
-    /* Move to same column or end of line if shorter */
-    size_t col = input->cursor_col;
-    if (col > prev_line_len)
-        col = prev_line_len;
+    size_t cur_line_start =
+        find_line_start(input->text, input->text_len, (int)input->cursor_row);
+    int cp = tui_utf8_cp_index(input->text + cur_line_start,
+                               input->cursor_byte - cur_line_start);
 
-    input->cursor_byte = prev_line_start + col;
+    input->cursor_byte =
+        prev_line_start +
+        tui_utf8_byte_offset(input->text + prev_line_start, prev_line_len, cp);
     recalculate_cursor_position(input);
 }
 
-/* Move cursor down one line */
+/* Move cursor down one line, keeping the cursor's character index within the
+ * line (clamped to a shorter line's length). */
 static void cursor_down(TuiTextInput *input)
 {
     /* Find next line */
@@ -396,12 +451,14 @@ static void cursor_down(TuiTextInput *input)
     size_t next_line_len =
         line_length(input->text, input->text_len, next_line_start);
 
-    /* Move to same column or end of line if shorter */
-    size_t col = input->cursor_col;
-    if (col > next_line_len)
-        col = next_line_len;
+    size_t cur_line_start =
+        find_line_start(input->text, input->text_len, (int)input->cursor_row);
+    int cp = tui_utf8_cp_index(input->text + cur_line_start,
+                               input->cursor_byte - cur_line_start);
 
-    input->cursor_byte = next_line_start + col;
+    input->cursor_byte =
+        next_line_start +
+        tui_utf8_byte_offset(input->text + next_line_start, next_line_len, cp);
     recalculate_cursor_position(input);
 }
 
@@ -735,7 +792,7 @@ TuiTextInput *tui_textinput_create(const TuiTextInputConfig *config)
     if (config) {
         input->prompt = config->prompt;
         if (input->prompt) {
-            input->prompt_len = tui_utf8_codepoint_count(input->prompt, strlen(input->prompt));
+            input->prompt_len = prompt_cols(input->prompt);
         }
         input->width = config->width;
         input->height = config->height;
@@ -1235,7 +1292,8 @@ static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
 }
 
 /* Compute byte range to render for a logical line.
- * Cursor's line: applies horizontal scroll window (offset/offset_right).
+ * Cursor's line: applies horizontal scroll window (offset/offset_right, in
+ * display columns).
  * Other lines: clipped to fit within terminal_width minus the line's prompt. */
 static void get_line_render_range(const TuiTextInput *input, size_t line_start,
                                   size_t line_end, int line_index,
@@ -1245,10 +1303,9 @@ static void get_line_render_range(const TuiTextInput *input, size_t line_start,
 
     if (line_index == (int)input->cursor_row && input->terminal_width > 0 &&
         input->offset_right > input->offset) {
-        size_t s = tui_utf8_byte_offset(input->text + line_start, line_bytes,
-                                        input->offset);
-        size_t e = tui_utf8_byte_offset(input->text + line_start, line_bytes,
-                                        input->offset_right);
+        size_t s = fit_cols(input->text + line_start, line_bytes, input->offset);
+        size_t e =
+            fit_cols(input->text + line_start, line_bytes, input->offset_right);
         *out_start = line_start + s;
         *out_end = line_start + e;
         return;
@@ -1261,8 +1318,8 @@ static void get_line_render_range(const TuiTextInput *input, size_t line_start,
             *out_start = line_start;
             *out_end = line_start;
         } else {
-            size_t e = tui_utf8_byte_offset(input->text + line_start, line_bytes,
-                                            content_width);
+            size_t e =
+                fit_cols(input->text + line_start, line_bytes, content_width);
             *out_start = line_start;
             *out_end = line_start + e;
         }
@@ -1313,12 +1370,12 @@ static void render_wrapped_line_absolute(const TuiTextInput *input,
             render_gutter(input, out);
         }
 
-        /* Emit the next chunk of content_width codepoints (or the rest of
-         * the line when wrapping is disabled/degenerate). */
+        /* Emit the next chunk of content_width display columns (or the rest
+         * of the line when wrapping is disabled/degenerate). */
         size_t chunk_end = line_end;
         if (content_w > 0)
-            chunk_end = pos + tui_utf8_byte_offset(input->text + pos,
-                                                   line_end - pos, content_w);
+            chunk_end = pos + fit_cols(input->text + pos, line_end - pos,
+                                       content_w);
         if (chunk_end > pos)
             render_text_range(input, out, pos, chunk_end);
         pos = chunk_end;
@@ -1374,12 +1431,12 @@ static void render_wrapped_line_relative(const TuiTextInput *input,
         }
         first_chunk = 0;
 
-        /* Emit the next chunk of content_width codepoints (or the rest of
-         * the line when wrapping is disabled/degenerate). */
+        /* Emit the next chunk of content_width display columns (or the rest
+         * of the line when wrapping is disabled/degenerate). */
         size_t chunk_end = line_end;
         if (content_w > 0)
-            chunk_end = pos + tui_utf8_byte_offset(input->text + pos,
-                                                   line_end - pos, content_w);
+            chunk_end = pos + fit_cols(input->text + pos, line_end - pos,
+                                       content_w);
         if (chunk_end > pos)
             render_text_range(input, out, pos, chunk_end);
         pos = chunk_end;
@@ -1720,7 +1777,8 @@ int tui_textinput_line_count(const TuiTextInput *input)
 }
 
 /* Count visual rows for a single logical line (soft-wrap aware).
- * When soft_wrap is off, always 1. When on, ceil(codepoints / content_width). */
+ * When soft_wrap is off, always 1. When on, the line is walked in
+ * content_width display-column chunks, exactly as the renderer paints it. */
 static int line_visual_rows(const TuiTextInput *input, size_t line_start,
                             size_t line_end, int line_index)
 {
@@ -1732,11 +1790,13 @@ static int line_visual_rows(const TuiTextInput *input, size_t line_start,
     if (content_w <= 0)
         return 1;
 
-    int cps = tui_utf8_codepoint_count(input->text + line_start,
-                                       line_end - line_start);
-    if (cps == 0)
-        return 1;
-    return (cps + content_w - 1) / content_w; /* ceil division */
+    int rows = 0;
+    size_t pos = line_start;
+    do {
+        pos += fit_cols(input->text + pos, line_end - pos, content_w);
+        rows++;
+    } while (pos < line_end);
+    return rows ? rows : 1;
 }
 
 /* Count total visual rows across all logical lines (soft-wrap aware). */
@@ -1900,7 +1960,7 @@ void tui_textinput_set_prompt(TuiTextInput *input, const char *prompt)
     if (!input)
         return;
     input->prompt = prompt;
-    input->prompt_len = prompt ? tui_utf8_codepoint_count(prompt, strlen(prompt)) : 0;
+    input->prompt_len = prompt_cols(prompt);
 }
 
 /* Set the continuation prompt string */
@@ -1910,8 +1970,7 @@ void tui_textinput_set_continuation_prompt(TuiTextInput *input,
     if (!input)
         return;
     input->continuation_prompt = prompt;
-    input->continuation_prompt_len =
-        prompt ? tui_utf8_codepoint_count(prompt, strlen(prompt)) : 0;
+    input->continuation_prompt_len = prompt_cols(prompt);
 }
 
 /* Set the gutter (ordered run of styled spans, left of the prompt).
@@ -1959,7 +2018,7 @@ void tui_textinput_set_gutter(TuiTextInput *input, const TuiSpan *spans,
         copy[len] = '\0';
         input->gutter_text[i] = copy;
         input->gutter_style[i] = spans[i].style;
-        total += tui_utf8_codepoint_count(copy, len);
+        total += (int)tui_utf8_display_width_ansi(copy, len);
         input->n_gutter = (int)i + 1;
     }
     input->gutter_width = total;
@@ -2080,35 +2139,46 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
                 if (line_content_w <= 0)
                     line_content_w = 1;
 
-                int line_cps = tui_utf8_codepoint_count(
-                    input->text + line_start, i - line_start);
-
                 if (line_idx == (int)input->cursor_row) {
-                    /* Found cursor's logical line */
-                    int cursor_cp = tui_utf8_cp_index(
-                        input->text + line_start,
-                        input->cursor_byte - line_start);
-                    /* A cursor at the end of a line that exactly fills its
-                     * last visual row sits at that row's end — not at the
-                     * start of a fresh, empty row. Folding by the raw count
-                     * would report a phantom extra row, which in inline mode
-                     * walks the tracked cursor-up one row too far each
-                     * frame. */
-                    int eff_cp = cursor_cp;
-                    if (eff_cp > 0 && eff_cp == line_cps &&
-                        eff_cp % line_content_w == 0)
-                        eff_cp -= 1;
-                    int wrap_row = eff_cp / line_content_w;
-                    int wrap_col = eff_cp % line_content_w;
+                    /* Found the cursor's logical line: walk the same chunks
+                     * the renderer paints so the reported row/column lands on
+                     * the glyph the cursor is on. */
+                    size_t pos = line_start;
+                    int wrap_row = 0;
+                    int wrap_col = 0;
+                    for (;;) {
+                        size_t chunk =
+                            fit_cols(input->text + pos, i - pos, line_content_w);
+                        if (input->cursor_byte < pos + chunk ||
+                            pos + chunk >= i) {
+                            size_t upto =
+                                input->cursor_byte > pos
+                                    ? input->cursor_byte - pos
+                                    : 0;
+                            if (upto > chunk)
+                                upto = chunk;
+                            wrap_col =
+                                tui_utf8_display_width_n(input->text + pos, upto);
+                            /* A cursor at the very end of a line whose last
+                             * visual row is exactly full sits at that row's
+                             * end — not at the start of a fresh, empty row.
+                             * Folding by the raw width would report a phantom
+                             * extra row, which in inline mode walks the
+                             * tracked cursor-up one row too far each frame. */
+                            if (input->cursor_byte >= i && wrap_col > 0 &&
+                                wrap_col == line_content_w)
+                                wrap_col -= 1;
+                            break;
+                        }
+                        pos += chunk;
+                        wrap_row++;
+                    }
                     int row = base_row + visual_row + wrap_row;
                     int col = line_prompt_w + wrap_col + 1;
                     return tui_cursor_at(row, col);
                 }
 
-                visual_row += (line_cps == 0)
-                                  ? 1
-                                  : (line_cps + line_content_w - 1) /
-                                        line_content_w;
+                visual_row += line_visual_rows(input, line_start, i, line_idx);
                 line_start = i + 1;
                 line_idx++;
             }
@@ -2118,8 +2188,7 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
 
     if (!input->multiline) {
         int prompt_width = line_prompt_width(input, 0);
-        int cursor_cp = tui_utf8_cp_index(input->text, input->cursor_byte);
-        int col = prompt_width + (cursor_cp - input->offset) + 1;
+        int col = prompt_width + ((int)input->cursor_col - input->offset) + 1;
         return tui_cursor_at(base_row, col);
     }
 

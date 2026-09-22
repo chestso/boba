@@ -38,8 +38,8 @@ typedef struct TuiTextInput
     size_t text_cap; /* Allocated capacity */
 
     size_t cursor_byte; /* Cursor position in bytes */
-    size_t cursor_col;  /* Visual column (0-indexed) */
-    size_t cursor_row;  /* Visual row (0-indexed) */
+    size_t cursor_col;  /* Cursor's display column in its logical line */
+    size_t cursor_row;  /* Logical line index (0-indexed) */
 
     /* Selection mark. When has_mark is set, the active region is
      * [min(mark_byte, cursor_byte), max(mark_byte, cursor_byte)). Motion
@@ -51,8 +51,8 @@ typedef struct TuiTextInput
     int width;         /* Max width (0 = unlimited) */
     int height;        /* Max visible height (0 = grow to fit) */
     int scroll_offset; /* Vertical scroll position (first visible line) */
-    int offset;        /* Horizontal scroll: left edge (codepoint index) */
-    int offset_right;  /* Horizontal scroll: right edge (codepoint index) */
+    int offset;        /* Horizontal scroll: left edge (display column) */
+    int offset_right;  /* Horizontal scroll: right edge (display column) */
 
     const char *prompt;              /* Optional prompt string (not owned) */
     int prompt_len;                  /* Cached prompt display width */

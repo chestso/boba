@@ -26,9 +26,6 @@ int tui_utf8_encode(uint32_t cp, char buf[5]);
  * Returns byte offset of the previous character start. */
 size_t tui_utf8_prev_char(const char *text, size_t pos);
 
-/* Count total codepoints in a UTF-8 string of len bytes. */
-int tui_utf8_codepoint_count(const char *text, size_t len);
-
 /* Return byte offset of the Nth codepoint (0-indexed).
  * If cp_index >= total codepoints, returns text_len. */
 size_t tui_utf8_byte_offset(const char *text, size_t text_len, int cp_index);
@@ -50,6 +47,10 @@ int tui_cluster_width(const uint32_t *cps, uint32_t len);
  * character cannot be decoded. This is the column-safe unit: a caller
  * that emits or wraps by *bytes never splits a base from its modifiers. */
 int tui_next_cluster(const char *utf8, size_t len, size_t *bytes);
+
+/* Calculate display width (terminal columns) of a UTF-8 byte range.
+ * Cluster-aware. Does not skip ANSI escape sequences. */
+int tui_utf8_display_width_n(const char *text, size_t len);
 
 /* Calculate display width (terminal columns) of a NUL-terminated UTF-8 string.
  * Cluster-aware. Does not skip ANSI escape sequences. */

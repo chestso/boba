@@ -81,17 +81,6 @@ size_t tui_utf8_prev_char(const char *text, size_t pos)
     return pos;
 }
 
-int tui_utf8_codepoint_count(const char *text, size_t len)
-{
-    int count = 0;
-    size_t i = 0;
-    while (i < len) {
-        i += tui_utf8_char_len(text + i);
-        count++;
-    }
-    return count;
-}
-
 size_t tui_utf8_byte_offset(const char *text, size_t text_len, int cp_index)
 {
     size_t offset = 0;
@@ -252,22 +241,28 @@ int tui_next_cluster(const char *utf8, size_t len, size_t *bytes)
 
 /* --- Display width ---------------------------------------------------- */
 
-int tui_utf8_display_width(const char *str)
+int tui_utf8_display_width_n(const char *text, size_t len)
 {
-    if (!str)
+    if (!text)
         return 0;
-    size_t len = strlen(str);
     size_t i = 0;
     int width = 0;
     while (i < len) {
         size_t bytes = 0;
-        int w = tui_next_cluster(str + i, len - i, &bytes);
+        int w = tui_next_cluster(text + i, len - i, &bytes);
         if (bytes == 0)
             break;
         width += w;
         i += bytes;
     }
     return width;
+}
+
+int tui_utf8_display_width(const char *str)
+{
+    if (!str)
+        return 0;
+    return tui_utf8_display_width_n(str, strlen(str));
 }
 
 size_t tui_utf8_display_width_ansi(const char *text, size_t len)

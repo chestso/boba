@@ -153,6 +153,20 @@ static void test_string_width(void)
                                   "b") == 2);
 }
 
+static void test_string_width_n(void)
+{
+    const char *s = "\xE2\x9A\xA1" /* ⚡ (2 cells) */
+                    "ab";
+    assert(tui_utf8_display_width_n(s, strlen(s)) == 4);
+    assert(tui_utf8_display_width_n(s, 0) == 0);
+    assert(tui_utf8_display_width_n(NULL, 3) == 0);
+    /* A range that stops inside a cluster measures only whole clusters:
+     * the truncated tail contributes nothing. */
+    assert(tui_utf8_display_width_n(s, 1) == 0);
+    assert(tui_utf8_display_width_n(s, 3) == 2);
+    assert(tui_utf8_display_width_n(s, 4) == 3);
+}
+
 static void test_string_width_ansi(void)
 {
     const char *sgr = "\x1b[31m"
@@ -178,6 +192,7 @@ int main(void)
     RUN_TEST(test_cluster_width);
     RUN_TEST(test_next_cluster_advance);
     RUN_TEST(test_string_width);
+    RUN_TEST(test_string_width_n);
     RUN_TEST(test_string_width_ansi);
     printf("test_unicode: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

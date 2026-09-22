@@ -1740,6 +1740,158 @@ static void test_gutter_multiple_styled_spans(void)
     tui_textinput_free(input);
 }
 
+/* ---------- wide cluster (display column) tests ---------- */
+
+/* Insert a single codepoint (not a byte) — how a terminal delivers a
+ * multi-byte character. */
+static void send_rune(TuiTextInput *input, uint32_t cp)
+{
+    tui_textinput_update(input, tui_msg_char(cp, 0));
+}
+
+/* A wide cluster in the gutter (nevermore's "ctx 12k/128k ⚡4k" gauge) is one
+ * codepoint but two cells. Measuring the gutter in codepoints put every
+ * derived column — the cursor's included — one cell left of the text. */
+static void test_wide_cluster_gutter_cursor_column(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+
+    TuiSpan spans[1];
+    spans[0].text = "\xE2\x9A\xA1 "; /* ⚡ + space: 2 codepoints, 3 cells */
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_gutter(input, spans, 1);
+
+    send_string(input, "cmd");
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.col == 3 + 2 + 3 + 1); /* gutter + prompt + text + 1-index */
+
+    tui_textinput_free(input);
+}
+
+/* The gutter's cell width is the wrap budget, so a wide cluster leaves one
+ * fewer column of content per row. */
+static void test_wide_cluster_gutter_wraps_by_cells(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_prompt(input, "> "); /* 2 */
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_soft_wrap(input, 1);
+
+    TuiSpan spans[1];
+    spans[0].text = "\xE2\x9A\xA1"; /* 2 cells -> content width = 6 */
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_gutter(input, spans, 1);
+
+    send_string(input, "abcdefghijklm"); /* 13 cells -> ceil(13/6) = 3 rows */
+    assert(tui_textinput_get_height(input) == 3);
+
+    tui_textinput_free(input);
+}
+
+/* Same for the prompt itself. */
+static void test_wide_cluster_prompt_cursor_column(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "\xE2\x9A\xA1 "); /* 3 cells */
+
+    send_string(input, "cmd");
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.col == 3 + 3 + 1); /* prompt + text + 1-index */
+
+    tui_textinput_free(input);
+}
+
+/* A wide cluster typed into the buffer is measured in cells too, and one that
+ * would cross the wrap budget moves whole to the next visual row — the
+ * cursor follows it there. */
+static void test_wide_cluster_input_soft_wrap_cursor(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
+    tui_textinput_set_soft_wrap(input, 1);
+
+    send_string(input, "abcdefg"); /* 7 cells: ⚡ would make 9 > 8 */
+    send_rune(input, 0x26A1);
+    assert(tui_textinput_get_height(input) == 2);
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+    assert(strstr(data, "> abcdefg") != NULL);
+    assert(strstr(data, "  \xE2\x9A\xA1") != NULL); /* continuation + ⚡ */
+
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.row == 2);
+    assert(c.col == 2 + 2 + 1); /* continuation prompt + ⚡ + 1-index */
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* Without soft wrap the row is a scroll window; the window's edges are
+ * display columns, so a row never overflows the width and the cursor's
+ * column counts the wide cluster it sits behind. */
+static void test_wide_cluster_input_scroll_window(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_terminal_width(input, 10); /* content width = 10 */
+    send_string(input, "0123456789abcdefghij");  /* 20 cells */
+    send_rune(input, 0x26A1);                    /* + 2 = 22 cells */
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    /* The cursor sits at the window's right edge, so the window opens at
+     * column 13 (22 - 10 + 1) and holds 9 cells — "defghij" plus the whole
+     * emoji. A codepoint-counted window would open one cell earlier, at
+     * "cdefghij" (the emoji's two cells counted as one). */
+    assert(strstr(data, "\r\033[Kdefghij\xE2\x9A\xA1") != NULL);
+
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.col == 22 - 13 + 1);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* Moving between logical lines keeps the cursor's character index — a
+ * display column is not a byte offset into the line (counting bytes landed
+ * the cursor inside a multi-byte character). */
+static void test_wide_cluster_vertical_motion_keeps_character(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+
+    send_string(input, "ab");
+    TuiUpdateResult r =
+        tui_textinput_update(input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_rune(input, 0x26A1); /* 3 bytes, one character */
+    send_string(input, "x");
+
+    /* Back to line 0, then down: character index 2 of line 1 is past "⚡". */
+    send_key(input, TUI_KEY_UP);
+    assert(tui_textinput_cursor(input) == 2);
+    send_key(input, TUI_KEY_DOWN);
+    assert(tui_textinput_cursor(input) == 3 + 3 + 1);
+
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -1841,6 +1993,13 @@ int main(void)
     RUN_TEST(test_gutter_width_affects_wrap);
     RUN_TEST(test_gutter_cursor_column_offset);
     RUN_TEST(test_gutter_multiple_styled_spans);
+
+    RUN_TEST(test_wide_cluster_gutter_cursor_column);
+    RUN_TEST(test_wide_cluster_gutter_wraps_by_cells);
+    RUN_TEST(test_wide_cluster_prompt_cursor_column);
+    RUN_TEST(test_wide_cluster_input_soft_wrap_cursor);
+    RUN_TEST(test_wide_cluster_input_scroll_window);
+    RUN_TEST(test_wide_cluster_vertical_motion_keeps_character);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
