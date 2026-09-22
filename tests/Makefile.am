@@ -15,6 +15,24 @@ LDADD = $(top_builddir)/src/libboba.a $(SOCKET_LIBS)
 # after CFLAGS, so -UNDEBUG wins over the -DNDEBUG that came in.
 override CFLAGS += -UNDEBUG
 
+# Per-test runtime cap (house rule: a unit test is ms-fast, so a hang is
+# a bug, not a condition to wait out). The watchdog wraps every test:
+# BOBA_TEST_TIMEOUT seconds (default 10), then a stack snapshot into the
+# .log and a core-dumping kill, so a hung test FAILS loudly, naming
+# itself, instead of stalling the workflow until the job's own timeout
+# cancels it with nothing to read (the 2026-09-22 MSYS2 run: the Windows
+# job sat in `make check` past its 20-minute cap and the live log was not
+# fetchable, so which test hung was unknowable). The START/END pairs in
+# test-progress.log - uploaded as a CI artifact - answer that even when
+# no debugger is installed. BOBA_TEST_TIMEOUT=0 turns the cap off for
+# interactive debugging.
+#
+# LOG_COMPILER is what the parallel harness uses for the suffix-less unit
+# binaries. The tmux e2e scripts are `.sh` tests and go through
+# SH_LOG_COMPILER instead — see the TEST_EXTENSIONS block below, where
+# that variable already lives (automake defaults it to plain $(SHELL)).
+LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
+
 test_ansi_SOURCES = test_ansi.c
 test_textinput_SOURCES = test_textinput.c
 test_viewport_SOURCES = test_viewport.c
@@ -46,10 +64,20 @@ TESTS = $(UNIT_TESTS)
 endif
 
 TEST_EXTENSIONS = .sh
-SH_LOG_COMPILER = $(SHELL)
+# The tmux e2e scripts run under the same watchdog, with a longer cap:
+# each one starts a tmux server and a TUI app. $(SHELL) is automake's
+# default for `.sh` tests and the wrapper keeps that shape.
+SH_LOG_COMPILER = env BOBA_TEST_TIMEOUT=30 $(SHELL) \
+	$(top_srcdir)/scripts/test-watchdog.sh
 
 AM_TESTS_ENVIRONMENT = \
     TMUX_BIN_DIR="$(abs_builddir)/apps"; \
     export TMUX_BIN_DIR;
 
 EXTRA_DIST = tmux/lib.sh $(TMUX_TESTS)
+
+# The watchdog appends START/END pairs to test-progress.log by default
+# (a hang is diagnosable from CI artifacts). It is a generated file; list
+# it so `make clean`/`make distclean` removes it and distcheck's
+# distcleancheck passes.
+CLEANFILES = test-progress.log

@@ -12,6 +12,7 @@ EXTRA_DIST = \
     build-aux/git-version.sh \
     scripts/build-ucrt64.sh \
     scripts/sync-unicode-tables.sh \
+    scripts/test-watchdog.sh \
     README.md \
     TODO.md \
     NEWS \
