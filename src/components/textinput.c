@@ -21,16 +21,18 @@ static int is_word_char(const TuiTextInput *input, char c)
 
 /* Display width of the prompt rendered on a given logical line:
  * line 0 uses the main prompt; later lines use the continuation prompt or
- * fall back to spaces of width prompt_len (matches render_continuation_prompt). */
+ * fall back to spaces of width prompt_len (matches render_continuation_prompt).
+ * The gutter (if any) is always present, on every row, and is included. */
 static int line_prompt_width(const TuiTextInput *input, int line_index)
 {
+    int w = input->gutter_width;
     if (!input->show_prompt || !input->prompt || input->prompt_len <= 0)
-        return 0;
+        return w;
     if (line_index == 0)
-        return input->prompt_len;
+        return w + input->prompt_len;
     if (input->continuation_prompt && input->continuation_prompt_len > 0)
-        return input->continuation_prompt_len;
-    return input->prompt_len;
+        return w + input->continuation_prompt_len;
+    return w + input->prompt_len;
 }
 
 /* Byte range of the logical line containing the cursor */
@@ -761,6 +763,12 @@ void tui_textinput_free(TuiTextInput *input)
     free(input->kill_buf);
     free(input->word_chars);
     free(input->snap_buf);
+    if (input->gutter_text) {
+        for (int i = 0; i < input->n_gutter; i++)
+            free(input->gutter_text[i]);
+        free(input->gutter_text);
+    }
+    free(input->gutter_style);
     undo_free(input);
     free(input);
 }
@@ -1130,10 +1138,36 @@ static void emit_styled_or_legacy(DynamicBuffer *out, const TuiStyle *style,
     }
 }
 
-/* Render continuation prompt or space-padding for lines after the first */
+/* Render the gutter spans (if any) to `out`. The gutter sits LEFT of the
+ * prompt on every input row. */
+static void render_gutter(const TuiTextInput *input, DynamicBuffer *out)
+{
+    for (int i = 0; i < input->n_gutter; i++) {
+        const char *t = input->gutter_text[i];
+        if (!t || !*t)
+            continue;
+        if (style_has_styling(&input->gutter_style[i])) {
+            TuiStyle s = input->gutter_style[i];
+            s.inline_ = 1; /* spans are inline: box model ignored */
+            char *rendered = tui_style_render(&s, t);
+            if (rendered) {
+                dynamic_buffer_append_str(out, rendered);
+                free(rendered);
+            }
+        } else {
+            dynamic_buffer_append_str(out, t);
+        }
+    }
+}
+
+/* Render continuation prompt or space-padding for lines after the first.
+ * The gutter (if any) leads every row, so it is emitted first; the
+ * space-padding fallback is widened by the gutter's display width to keep
+ * continuation rows aligned under the prompt column. */
 static void render_continuation_prompt(const TuiTextInput *input,
                                        DynamicBuffer *out)
 {
+    render_gutter(input, out);
     if (input->continuation_prompt && input->continuation_prompt_len > 0) {
         emit_styled_or_legacy(out, prompt_style_for(input),
                               input->prompt_color, input->continuation_prompt);
@@ -1269,11 +1303,14 @@ static void render_wrapped_line_absolute(const TuiTextInput *input,
         dynamic_buffer_append_str(out, EL_TO_END);
 
         if (first_row && line_index == 0) {
+            render_gutter(input, out);
             if (show_prefix)
                 emit_styled_or_legacy(out, prompt_style_for(input),
                                       input->prompt_color, input->prompt);
         } else if (show_prefix) {
             render_continuation_prompt(input, out);
+        } else {
+            render_gutter(input, out);
         }
 
         /* Emit the next chunk of content_width codepoints (or the rest of
@@ -1326,11 +1363,14 @@ static void render_wrapped_line_relative(const TuiTextInput *input,
         *first_row = 0;
 
         if (first_chunk && line_index == 0) {
+            render_gutter(input, out);
             if (show_prefix)
                 emit_styled_or_legacy(out, prompt_style_for(input),
                                       input->prompt_color, input->prompt);
         } else if (show_prefix) {
             render_continuation_prompt(input, out);
+        } else {
+            render_gutter(input, out);
         }
         first_chunk = 0;
 
@@ -1349,6 +1389,7 @@ static void render_wrapped_line_relative(const TuiTextInput *input,
 /* Render prompt and visible text slice to output buffer */
 static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
 {
+    render_gutter(input, out);
     if (input->show_prompt && input->prompt && input->prompt_len > 0) {
         emit_styled_or_legacy(out, prompt_style_for(input),
                               input->prompt_color, input->prompt);
@@ -1461,14 +1502,24 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                     dynamic_buffer_append_str(out, pos_buf);
                     dynamic_buffer_append_str(out, EL_TO_END);
 
-                    /* Prompt or indentation (TuiStyle > legacy prompt_color) */
+                    /* Gutter + prompt/indentation (TuiStyle > legacy prompt_color).
+                     * The gutter leads every row; the prompt only on line 0. */
+                    render_gutter(input, out);
                     if (current_line == 0 && input->show_prompt && input->prompt &&
                         input->prompt_len > 0) {
                         emit_styled_or_legacy(out, prompt_style_for(input),
                                               input->prompt_color, input->prompt);
                     } else if (current_line > 0 && input->show_prompt && input->prompt &&
                                input->prompt_len > 0) {
-                        render_continuation_prompt(input, out);
+                        /* continuation prompt, minus the already-emitted gutter */
+                        if (input->continuation_prompt && input->continuation_prompt_len > 0) {
+                            emit_styled_or_legacy(out, prompt_style_for(input),
+                                                  input->prompt_color,
+                                                  input->continuation_prompt);
+                        } else {
+                            for (int j = 0; j < input->prompt_len; j++)
+                                dynamic_buffer_append(out, " ", 1);
+                        }
                     }
 
                     /* Line content (selection-aware), with scroll window / clip */
@@ -1535,7 +1586,10 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
             return;
         }
 
-        /* Output prompt if set and shown (TuiStyle > legacy prompt_color) */
+        /* Gutter + prompt if set and shown (TuiStyle > legacy prompt_color).
+         * Continuation rows (below) emit their own gutter via
+         * render_continuation_prompt. */
+        render_gutter(input, out);
         if (input->show_prompt && input->prompt && input->prompt_len > 0) {
             emit_styled_or_legacy(out, prompt_style_for(input),
                                   input->prompt_color, input->prompt);
@@ -1860,6 +1914,57 @@ void tui_textinput_set_continuation_prompt(TuiTextInput *input,
         prompt ? tui_utf8_codepoint_count(prompt, strlen(prompt)) : 0;
 }
 
+/* Set the gutter (ordered run of styled spans, left of the prompt).
+ * Copies the span texts and styles; recomputes the total display width
+ * used by wrapping and cursor math. NULL / n_spans == 0 clears. */
+void tui_textinput_set_gutter(TuiTextInput *input, const TuiSpan *spans,
+                              size_t n_spans)
+{
+    if (!input)
+        return;
+
+    /* Release the previous gutter. */
+    if (input->gutter_text) {
+        for (int i = 0; i < input->n_gutter; i++)
+            free(input->gutter_text[i]);
+        free(input->gutter_text);
+        free(input->gutter_style);
+    }
+    input->gutter_text = NULL;
+    input->gutter_style = NULL;
+    input->n_gutter = 0;
+    input->gutter_width = 0;
+
+    if (!spans || n_spans == 0)
+        return;
+
+    input->gutter_text = (char **)calloc(n_spans, sizeof(char *));
+    input->gutter_style = (TuiStyle *)calloc(n_spans, sizeof(TuiStyle));
+    if (!input->gutter_text || !input->gutter_style) {
+        free(input->gutter_text);
+        free(input->gutter_style);
+        input->gutter_text = NULL;
+        input->gutter_style = NULL;
+        return;
+    }
+
+    int total = 0;
+    for (size_t i = 0; i < n_spans; i++) {
+        const char *t = spans[i].text ? spans[i].text : "";
+        size_t len = spans[i].len ? spans[i].len : strlen(t);
+        char *copy = (char *)malloc(len + 1);
+        if (!copy)
+            continue;
+        memcpy(copy, t, len);
+        copy[len] = '\0';
+        input->gutter_text[i] = copy;
+        input->gutter_style[i] = spans[i].style;
+        total += tui_utf8_codepoint_count(copy, len);
+        input->n_gutter = (int)i + 1;
+    }
+    input->gutter_width = total;
+}
+
 /* Set echo mode */
 void tui_textinput_set_echo_mode(TuiTextInput *input, int mode)
 {
@@ -1958,9 +2063,8 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
 
     /* Soft-wrap mode: compute visual row/col across wrapped lines */
     if (input->soft_wrap && input->terminal_width > 0) {
-        int prompt_w = (input->show_prompt && input->prompt)
-                           ? input->prompt_len
-                           : 0;
+        /* Gutter is always on row 0; line 0 carries the main prompt. */
+        int prompt_w = line_prompt_width(input, 0);
         int content_w = input->terminal_width - prompt_w;
         if (content_w <= 0)
             content_w = 1;
@@ -2013,8 +2117,7 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
     }
 
     if (!input->multiline) {
-        int prompt_width =
-            (input->show_prompt && input->prompt) ? input->prompt_len : 0;
+        int prompt_width = line_prompt_width(input, 0);
         int cursor_cp = tui_utf8_cp_index(input->text, input->cursor_byte);
         int col = prompt_width + (cursor_cp - input->offset) + 1;
         return tui_cursor_at(base_row, col);

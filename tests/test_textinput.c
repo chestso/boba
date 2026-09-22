@@ -1620,6 +1620,126 @@ static void test_soft_wrap_cursor_exact_wrap_boundary(void)
     tui_textinput_free(input);
 }
 
+/* ---------- gutter tests ---------- */
+
+/* The gutter renders LEFT of the prompt on the input row. */
+static void test_gutter_renders_left_of_prompt(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+
+    TuiSpan spans[1];
+    spans[0].text = "ctx 12k/128k ";
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_gutter(input, spans, 1);
+
+    send_string(input, "cmd");
+
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    assert(strstr(data, "ctx 12k/128k > cmd") != NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* Clearing the gutter removes it. */
+static void test_gutter_clear(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    TuiTextInputConfig cfg = { .prompt = "> " };
+    (void)cfg;
+
+    TuiSpan spans[1];
+    spans[0].text = "ZZ";
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_gutter(input, spans, 1);
+    tui_textinput_set_gutter(input, NULL, 0);
+
+    send_string(input, "cmd");
+
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+    assert(strstr(data, "ZZ") == NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* The gutter's display width is folded into the wrap arithmetic. */
+static void test_gutter_width_affects_wrap(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_prompt(input, "> "); /* 2 */
+    tui_textinput_set_terminal_width(input, 10);
+    tui_textinput_set_soft_wrap(input, 1);
+
+    TuiSpan spans[1];
+    spans[0].text = "AB"; /* 2 -> content width = 10 - 2 - 2 = 6 */
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_gutter(input, spans, 1);
+
+    send_string(input, "abcdefghijklmno"); /* 15 chars -> ceil(15/6) = 3 rows */
+    assert(tui_textinput_get_height(input) == 3);
+
+    tui_textinput_free(input);
+}
+
+/* Cursor column includes the gutter's width. */
+static void test_gutter_cursor_column_offset(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+
+    TuiSpan spans[1];
+    spans[0].text = "AB"; /* 2 */
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_gutter(input, spans, 1);
+
+    send_string(input, "cmd"); /* cursor at 3 */
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.col == 2 + 2 + 3 + 1); /* gutter + prompt + cursors + 1-index */
+
+    tui_textinput_free(input);
+}
+
+/* Multiple spans, each with its own style, all render. */
+static void test_gutter_multiple_styled_spans(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+
+    TuiSpan spans[2];
+    spans[0].text = "spinner ";
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    spans[1].text = "ctx";
+    spans[1].len = 0;
+    spans[1].style = tui_style_bold(tui_style_new(), 1);
+    tui_textinput_set_gutter(input, spans, 2);
+
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+    assert(strstr(data, "spinner ") != NULL);
+    assert(strstr(data, "ctx") != NULL);
+    /* The second span is bold. */
+    assert(strstr(data, "\033[1m") != NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
 /* ---------- main ---------- */
 
 int main(void)
@@ -1715,6 +1835,12 @@ int main(void)
     RUN_TEST(test_soft_wrap_relative_splits_into_rows);
     RUN_TEST(test_soft_wrap_relative_rows_match_height);
     RUN_TEST(test_soft_wrap_cursor_exact_wrap_boundary);
+
+    RUN_TEST(test_gutter_renders_left_of_prompt);
+    RUN_TEST(test_gutter_clear);
+    RUN_TEST(test_gutter_width_affects_wrap);
+    RUN_TEST(test_gutter_cursor_column_offset);
+    RUN_TEST(test_gutter_multiple_styled_spans);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

@@ -17,6 +17,17 @@
 #include "../msg.h"
 #include "../style.h"
 
+/* One styled span of inline text. Used by the gutter (below), but
+ * general: an ordered run of spans is how a frame element carries
+ * multiple styles on one run. Only inline styling applies — a span's
+ * box model (padding/margin/border) is ignored. */
+typedef struct TuiSpan
+{
+    const char *text; /* borrowed UTF-8 */
+    size_t len;       /* 0 => strlen(text) */
+    TuiStyle style;   /* inline styling */
+} TuiSpan;
+
 /* Text input model */
 typedef struct TuiTextInput
 {
@@ -47,6 +58,17 @@ typedef struct TuiTextInput
     int prompt_len;                  /* Cached prompt display width */
     const char *continuation_prompt; /* Prompt for continuation lines (not owned) */
     int continuation_prompt_len;     /* Cached continuation prompt display width */
+
+    /* Optional gutter: an ordered run of styled spans rendered LEFT of
+     * the prompt on every input row (status chrome — e.g. a spinner +
+     * "ctx 12k/128k"). Owned copies; NULL/n_gutter=0 = none. Its display
+     * width (gutter_width) is folded into the prompt width for wrapping
+     * and cursor math, so a gutter never overflows the row or misplaces
+     * the cursor. Set via tui_textinput_set_gutter. */
+    char **gutter_text;     /* per-span owned text */
+    TuiStyle *gutter_style; /* per-span style */
+    int n_gutter;
+    int gutter_width; /* total display width */
 
     int focused;           /* Whether component has focus */
     int multiline;         /* Allow multiple lines (Enter inserts newline) */
@@ -242,6 +264,18 @@ void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s);
  */
 void tui_textinput_set_continuation_prompt(TuiTextInput *input,
                                            const char *prompt);
+
+/* Set the gutter: an ordered run of styled spans rendered LEFT of the
+ * prompt on every input row (status chrome). The input copies the span
+ * texts and styles, so the caller's arrays may be transient. Its display
+ * width is accounted for in soft-wrap and cursor placement. Pass NULL /
+ * n_spans == 0 to clear.
+ *
+ * Unlike the prompt (whose continuation lines are space-padded to the
+ * prompt width), continuation rows repeat the gutter verbatim so a
+ * wrapped line's chrome stays aligned. */
+void tui_textinput_set_gutter(TuiTextInput *input, const TuiSpan *spans,
+                              size_t n_spans);
 
 /* Set echo mode: 0 = normal, 1 = masked (show * per codepoint) */
 void tui_textinput_set_echo_mode(TuiTextInput *input, int mode);
