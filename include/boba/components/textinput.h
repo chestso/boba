@@ -17,7 +17,7 @@
 #include "../msg.h"
 #include "../style.h"
 
-/* One styled span of inline text. Used by the gutter (below), but
+/* One styled span of inline text. Used by the status line (below), but
  * general: an ordered run of spans is how a frame element carries
  * multiple styles on one run. Only inline styling applies — a span's
  * box model (padding/margin/border) is ignored. */
@@ -59,17 +59,16 @@ typedef struct TuiTextInput
     const char *continuation_prompt; /* Prompt for continuation lines (not owned) */
     int continuation_prompt_len;     /* Cached continuation prompt display width */
 
-    /* Optional gutter: an ordered run of styled spans rendered LEFT of
-     * the prompt on the input row (status chrome — e.g. a spinner +
-     * "ctx 12k/128k"). Owned copies; NULL/n_gutter=0 = none. Its display
-     * width (gutter_width) is folded into the prompt width for wrapping
-     * and cursor math, so a gutter never overflows the row or misplaces
-     * the cursor; continuation rows pad that width rather than repeating
-     * the spans. Set via tui_textinput_set_gutter. */
-    char **gutter_text;     /* per-span owned text */
-    TuiStyle *gutter_style; /* per-span style */
-    int n_gutter;
-    int gutter_width; /* total display width */
+    /* Optional status line: an ordered run of styled spans rendered as a
+     * FULL ROW above the prompt (status chrome — e.g. a spinner + "ctx
+     * 12k/128k"). Owned copies; NULL/n_status == 0 = none. While set the
+     * input's rows start one row lower (height and cursor math include
+     * it), and the prompt column never depends on the status content —
+     * the status row is not part of any wrap or cursor arithmetic. Set
+     * via tui_textinput_set_status_line. */
+    char **status_text;     /* per-span owned text */
+    TuiStyle *status_style; /* per-span style */
+    int n_status;
 
     int focused;           /* Whether component has focus */
     int multiline;         /* Allow multiple lines (Enter inserts newline) */
@@ -266,18 +265,19 @@ void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s);
 void tui_textinput_set_continuation_prompt(TuiTextInput *input,
                                            const char *prompt);
 
-/* Set the gutter: an ordered run of styled spans rendered LEFT of the
- * prompt on the input row (status chrome). The input copies the span
- * texts and styles, so the caller's arrays may be transient. Its display
- * width is accounted for in soft-wrap and cursor placement. Pass NULL /
- * n_spans == 0 to clear.
+/* Set the status line: an ordered run of styled spans rendered as a full
+ * row ABOVE the prompt. The input copies the span texts and styles, so
+ * the caller's arrays may be transient. While set, the input's rows start
+ * one row lower: tui_textinput_get_height() and the cursor position
+ * include the status row, but no wrap or cursor arithmetic depends on its
+ * content — the prompt column never moves when the status changes. Pass
+ * NULL / n_spans == 0 to clear.
  *
- * The gutter is painted on the input row only: continuation rows (wrapped
- * rows and later logical lines) reserve its display width as blank padding
- * instead of repeating the spans, so a spinner never multiplies per row and
- * the text column stays aligned. */
-void tui_textinput_set_gutter(TuiTextInput *input, const TuiSpan *spans,
-                              size_t n_spans);
+ * In relative (inline) mode the status row is the frame's first row,
+ * separated from the input rows by "\r\n" + EL. In absolute mode it is
+ * painted at terminal_row and the input rows follow at terminal_row + 1. */
+void tui_textinput_set_status_line(TuiTextInput *input, const TuiSpan *spans,
+                                   size_t n_spans);
 
 /* Set echo mode: 0 = normal, 1 = masked (show * per codepoint) */
 void tui_textinput_set_echo_mode(TuiTextInput *input, int mode);

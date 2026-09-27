@@ -21,7 +21,7 @@ static int is_word_char(const TuiTextInput *input, char c)
 
 /* --- Display columns --------------------------------------------------
  *
- * Every horizontal metric in this component — the gutter/prompt widths, the
+ * Every horizontal metric in this component — the prompt width, the
  * cursor's column, the wrap budget and the horizontal scroll window — is in
  * terminal DISPLAY COLUMNS (cells): a CJK or emoji cluster is one codepoint
  * but two cells, a combining mark none. Counting bytes or codepoints instead
@@ -32,10 +32,11 @@ static int is_word_char(const TuiTextInput *input, char c)
  * tui_utf8_byte_offset lookups); fit_cols is the bridge between the two.
  *
  * The input buffer is measured with tui_utf8_display_width_n (its bytes are
- * literal glyphs); the gutter spans and the prompt / continuation prompt are
- * pre-rendered strings that may carry their own SGR, so they go through
+ * literal glyphs); the prompt / continuation prompt are pre-rendered strings
+ * that may carry their own SGR, so they go through
  * tui_utf8_display_width_ansi — the same call viewport.c and list_popup.c
- * make on rendered text. */
+ * make on rendered text. The status line's width is never measured at
+ * all: it is its own row, outside every input metric. */
 
 /* Byte offset of the end of the longest prefix of text[0..len) that fits in
  * `cols` display columns. Zero when `cols <= 0`; otherwise at least one
@@ -75,17 +76,23 @@ static int prompt_cols(const char *prompt)
 /* Display width of the prompt rendered on a given logical line:
  * line 0 uses the main prompt; later lines use the continuation prompt or
  * fall back to spaces of width prompt_len (matches render_continuation_prompt).
- * The gutter (if any) is always present, on every row, and is included. */
+ * The status line, when set, is its own row and is NOT part of this — the
+ * prompt column never depends on the status content. */
 static int line_prompt_width(const TuiTextInput *input, int line_index)
 {
-    int w = input->gutter_width;
     if (!input->show_prompt || !input->prompt || input->prompt_len <= 0)
-        return w;
+        return 0;
     if (line_index == 0)
-        return w + input->prompt_len;
+        return input->prompt_len;
     if (input->continuation_prompt && input->continuation_prompt_len > 0)
-        return w + input->continuation_prompt_len;
-    return w + input->prompt_len;
+        return input->continuation_prompt_len;
+    return input->prompt_len;
+}
+
+/* Rows the status line occupies: 0 or 1. */
+static int status_rows(const TuiTextInput *input)
+{
+    return input->n_status > 0 ? 1 : 0;
 }
 
 /* Byte range of the logical line containing the cursor */
@@ -820,12 +827,12 @@ void tui_textinput_free(TuiTextInput *input)
     free(input->kill_buf);
     free(input->word_chars);
     free(input->snap_buf);
-    if (input->gutter_text) {
-        for (int i = 0; i < input->n_gutter; i++)
-            free(input->gutter_text[i]);
-        free(input->gutter_text);
+    if (input->status_text) {
+        for (int i = 0; i < input->n_status; i++)
+            free(input->status_text[i]);
+        free(input->status_text);
     }
-    free(input->gutter_style);
+    free(input->status_style);
     undo_free(input);
     free(input);
 }
@@ -1195,16 +1202,18 @@ static void emit_styled_or_legacy(DynamicBuffer *out, const TuiStyle *style,
     }
 }
 
-/* Render the gutter spans (if any) to `out`. The gutter sits LEFT of the
- * prompt on the input row. */
-static void render_gutter(const TuiTextInput *input, DynamicBuffer *out)
+/* Render the status line's spans (if any) to `out`. The caller owns the
+ * row: it positions (absolute mode) or separates (relative mode) the row
+ * and clears its tail — the status content is not part of any width
+ * arithmetic, so it may simply overflow into the EL. */
+static void render_status_line(const TuiTextInput *input, DynamicBuffer *out)
 {
-    for (int i = 0; i < input->n_gutter; i++) {
-        const char *t = input->gutter_text[i];
+    for (int i = 0; i < input->n_status; i++) {
+        const char *t = input->status_text[i];
         if (!t || !*t)
             continue;
-        if (style_has_styling(&input->gutter_style[i])) {
-            TuiStyle s = input->gutter_style[i];
+        if (style_has_styling(&input->status_style[i])) {
+            TuiStyle s = input->status_style[i];
             s.inline_ = 1; /* spans are inline: box model ignored */
             char *rendered = tui_style_render(&s, t);
             if (rendered) {
@@ -1217,25 +1226,12 @@ static void render_gutter(const TuiTextInput *input, DynamicBuffer *out)
     }
 }
 
-/* Blank columns where the gutter would be, for continuation rows. The
- * gutter is status chrome (e.g. a spinner + gauge): it belongs to the input
- * row only, so repeating it per wrapped/logical row would multiply the
- * spinner. Its width is still reserved so the text column stays aligned
- * under the prompt. */
-static void render_gutter_pad(const TuiTextInput *input, DynamicBuffer *out)
-{
-    for (int i = 0; i < input->gutter_width; i++)
-        dynamic_buffer_append(out, " ", 1);
-}
-
-/* Render continuation prompt or space-padding for lines after the first.
- * The gutter's width is padded (not the spans re-emitted); the
- * space-padding fallback is widened by that width to keep continuation
- * rows aligned under the prompt column. */
+/* Render continuation prompt or space-padding for lines after the first:
+ * the continuation prompt when one is set, otherwise spaces of the main
+ * prompt's width, so continuation rows align under the text column. */
 static void render_continuation_prompt(const TuiTextInput *input,
                                        DynamicBuffer *out)
 {
-    render_gutter_pad(input, out);
     if (input->continuation_prompt && input->continuation_prompt_len > 0) {
         emit_styled_or_legacy(out, prompt_style_for(input),
                               input->prompt_color, input->continuation_prompt);
@@ -1371,14 +1367,11 @@ static void render_wrapped_line_absolute(const TuiTextInput *input,
         dynamic_buffer_append_str(out, EL_TO_END);
 
         if (first_row && line_index == 0) {
-            render_gutter(input, out);
             if (show_prefix)
                 emit_styled_or_legacy(out, prompt_style_for(input),
                                       input->prompt_color, input->prompt);
         } else if (show_prefix) {
             render_continuation_prompt(input, out);
-        } else {
-            render_gutter_pad(input, out);
         }
 
         /* Emit the next chunk of content_width display columns (or the rest
@@ -1431,14 +1424,11 @@ static void render_wrapped_line_relative(const TuiTextInput *input,
         *first_row = 0;
 
         if (first_chunk && line_index == 0) {
-            render_gutter(input, out);
             if (show_prefix)
                 emit_styled_or_legacy(out, prompt_style_for(input),
                                       input->prompt_color, input->prompt);
         } else if (show_prefix) {
             render_continuation_prompt(input, out);
-        } else {
-            render_gutter_pad(input, out);
         }
         first_chunk = 0;
 
@@ -1457,7 +1447,6 @@ static void render_wrapped_line_relative(const TuiTextInput *input,
 /* Render prompt and visible text slice to output buffer */
 static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
 {
-    render_gutter(input, out);
     if (input->show_prompt && input->prompt && input->prompt_len > 0) {
         emit_styled_or_legacy(out, prompt_style_for(input),
                               input->prompt_color, input->prompt);
@@ -1527,8 +1516,20 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
 
     if (input->terminal_row > 0) {
         /* Absolute-positioning mode: draw rows [terminal_row, next_row - 1],
-         * then blank any surplus rows from a taller previous frame. */
+         * then blank any surplus rows from a taller previous frame. The
+         * status line (when set) owns terminal_row; the input rows follow
+         * at terminal_row + status_rows. */
+        int row0 = input->terminal_row + status_rows(input);
         int next_row = input->terminal_row;
+
+        if (status_rows(input)) {
+            snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H",
+                     input->terminal_row);
+            dynamic_buffer_append_str(out, pos_buf);
+            dynamic_buffer_append_str(out, EL_TO_END);
+            render_status_line(input, out);
+            next_row = row0;
+        }
 
         if (!input->multiline) {
             /* Single-line mode */
@@ -1538,12 +1539,11 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                                              &next_row);
             } else {
                 /* One row, horizontally scrolled by offset/offset_right. */
-                snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H",
-                         input->terminal_row);
+                snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", row0);
                 dynamic_buffer_append_str(out, pos_buf);
                 dynamic_buffer_append_str(out, EL_TO_END);
                 render_prompt_and_text(input, out);
-                next_row = input->terminal_row + 1;
+                next_row = row0 + 1;
             }
         } else if (input->soft_wrap && input->terminal_width > 0) {
             /* Multi-line soft-wrap: each logical line consumes as many visual
@@ -1565,37 +1565,29 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
             size_t line_start = 0;
             for (size_t i = 0; i <= input->text_len; i++) {
                 if (i == input->text_len || input->text[i] == '\n') {
-                    int row = input->terminal_row + current_line;
+                    int row = row0 + current_line;
                     snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", row);
                     dynamic_buffer_append_str(out, pos_buf);
                     dynamic_buffer_append_str(out, EL_TO_END);
 
-                    /* Gutter + prompt/indentation (TuiStyle > legacy prompt_color).
-                     * The gutter (status chrome) leads the input row only; the
-                     * prompt only on line 0. Continuation rows pad the gutter's
-                     * width so the text column stays aligned. */
-                    if (current_line == 0) {
-                        render_gutter(input, out);
-                        if (input->show_prompt && input->prompt &&
-                            input->prompt_len > 0) {
+                    /* Prompt/indentation (TuiStyle > legacy prompt_color):
+                     * the main prompt on line 0, the continuation prompt on
+                     * later lines, so the text column stays aligned. */
+                    if (input->show_prompt && input->prompt &&
+                        input->prompt_len > 0) {
+                        if (current_line == 0) {
                             emit_styled_or_legacy(out, prompt_style_for(input),
                                                   input->prompt_color,
                                                   input->prompt);
-                        }
-                    } else {
-                        render_gutter_pad(input, out);
-                        if (input->show_prompt && input->prompt &&
-                            input->prompt_len > 0) {
-                            if (input->continuation_prompt &&
-                                input->continuation_prompt_len > 0) {
-                                emit_styled_or_legacy(
-                                    out, prompt_style_for(input),
-                                    input->prompt_color,
-                                    input->continuation_prompt);
-                            } else {
-                                for (int j = 0; j < input->prompt_len; j++)
-                                    dynamic_buffer_append(out, " ", 1);
-                            }
+                        } else if (input->continuation_prompt &&
+                                   input->continuation_prompt_len > 0) {
+                            emit_styled_or_legacy(
+                                out, prompt_style_for(input),
+                                input->prompt_color,
+                                input->continuation_prompt);
+                        } else {
+                            for (int j = 0; j < input->prompt_len; j++)
+                                dynamic_buffer_append(out, " ", 1);
                         }
                     }
 
@@ -1610,7 +1602,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                     line_start = i + 1;
                 }
             }
-            next_row = input->terminal_row + current_line;
+            next_row = row0 + current_line;
         }
 
         erase_surplus_rows(mutable_input, out, next_row);
@@ -1622,12 +1614,18 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
      * so there is no surplus-row bookkeeping to do. */
     mutable_input->last_render_rows = 0;
 
+    /* The frame's first row: cleared, and carrying the status line when one
+     * is set — the input rows then start one row below. */
+    dynamic_buffer_append_str(out, "\r");
+    dynamic_buffer_append_str(out, EL_TO_END);
+    if (status_rows(input)) {
+        render_status_line(input, out);
+        dynamic_buffer_append_str(out, "\r\n");
+        dynamic_buffer_append_str(out, EL_TO_END);
+    }
+
     if (!input->multiline) {
         /* Single-line mode */
-        /* Just clear and render on current line */
-        dynamic_buffer_append_str(out, "\r");
-        dynamic_buffer_append_str(out, EL_TO_END);
-
         if (input->soft_wrap && input->terminal_width > 0) {
             /* Soft-wrap: emit the line across explicit rows so the runtime's
              * newline-counted frame height matches the painted rows. */
@@ -1642,10 +1640,6 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
          * we just wrote. */
     } else {
         /* Multi-line mode: relative positioning (legacy) */
-        /* Clear current line, then render prompt + text per line */
-        dynamic_buffer_append_str(out, "\r");
-        dynamic_buffer_append_str(out, EL_TO_END);
-
         if (input->soft_wrap && input->terminal_width > 0) {
             /* Soft-wrap each logical line across explicit rows, matching
              * tui_textinput_cursor_pos() and tui_textinput_get_height(). */
@@ -1663,10 +1657,8 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
             return;
         }
 
-        /* Gutter + prompt if set and shown (TuiStyle > legacy prompt_color).
-         * Continuation rows (below) pad the gutter's width via
-         * render_continuation_prompt. */
-        render_gutter(input, out);
+        /* Prompt if set and shown (TuiStyle > legacy prompt_color).
+         * Continuation rows (below) emit their own continuation prompt. */
         if (input->show_prompt && input->prompt && input->prompt_len > 0) {
             emit_styled_or_legacy(out, prompt_style_for(input),
                                   input->prompt_color, input->prompt);
@@ -1688,11 +1680,8 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                         dynamic_buffer_append_str(out, "\r\n");
                         dynamic_buffer_append_str(out, EL_TO_END);
                         if (input->show_prompt && input->prompt &&
-                            input->prompt_len > 0) {
+                            input->prompt_len > 0)
                             render_continuation_prompt(input, out);
-                        } else {
-                            render_gutter_pad(input, out);
-                        }
                     }
                     current_line++;
                     line_start = i + 1;
@@ -1995,41 +1984,40 @@ void tui_textinput_set_continuation_prompt(TuiTextInput *input,
     input->continuation_prompt_len = prompt_cols(prompt);
 }
 
-/* Set the gutter (ordered run of styled spans, left of the prompt).
- * Copies the span texts and styles; recomputes the total display width
- * used by wrapping and cursor math. NULL / n_spans == 0 clears. */
-void tui_textinput_set_gutter(TuiTextInput *input, const TuiSpan *spans,
-                              size_t n_spans)
+/* Set the status line (ordered run of styled spans, a full row above the
+ * prompt). Copies the span texts and styles; the row's height (0 or 1)
+ * joins the component's height and cursor math. NULL / n_spans == 0
+ * clears. */
+void tui_textinput_set_status_line(TuiTextInput *input, const TuiSpan *spans,
+                                   size_t n_spans)
 {
     if (!input)
         return;
 
-    /* Release the previous gutter. */
-    if (input->gutter_text) {
-        for (int i = 0; i < input->n_gutter; i++)
-            free(input->gutter_text[i]);
-        free(input->gutter_text);
-        free(input->gutter_style);
+    /* Release the previous status line. */
+    if (input->status_text) {
+        for (int i = 0; i < input->n_status; i++)
+            free(input->status_text[i]);
+        free(input->status_text);
+        free(input->status_style);
     }
-    input->gutter_text = NULL;
-    input->gutter_style = NULL;
-    input->n_gutter = 0;
-    input->gutter_width = 0;
+    input->status_text = NULL;
+    input->status_style = NULL;
+    input->n_status = 0;
 
     if (!spans || n_spans == 0)
         return;
 
-    input->gutter_text = (char **)calloc(n_spans, sizeof(char *));
-    input->gutter_style = (TuiStyle *)calloc(n_spans, sizeof(TuiStyle));
-    if (!input->gutter_text || !input->gutter_style) {
-        free(input->gutter_text);
-        free(input->gutter_style);
-        input->gutter_text = NULL;
-        input->gutter_style = NULL;
+    input->status_text = (char **)calloc(n_spans, sizeof(char *));
+    input->status_style = (TuiStyle *)calloc(n_spans, sizeof(TuiStyle));
+    if (!input->status_text || !input->status_style) {
+        free(input->status_text);
+        free(input->status_style);
+        input->status_text = NULL;
+        input->status_style = NULL;
         return;
     }
 
-    int total = 0;
     for (size_t i = 0; i < n_spans; i++) {
         const char *t = spans[i].text ? spans[i].text : "";
         size_t len = spans[i].len ? spans[i].len : strlen(t);
@@ -2038,12 +2026,10 @@ void tui_textinput_set_gutter(TuiTextInput *input, const TuiSpan *spans,
             continue;
         memcpy(copy, t, len);
         copy[len] = '\0';
-        input->gutter_text[i] = copy;
-        input->gutter_style[i] = spans[i].style;
-        total += (int)tui_utf8_display_width_ansi(copy, len);
-        input->n_gutter = (int)i + 1;
+        input->status_text[i] = copy;
+        input->status_style[i] = spans[i].style;
+        input->n_status = (int)i + 1;
     }
-    input->gutter_width = total;
 }
 
 /* Set echo mode */
@@ -2127,10 +2113,12 @@ int tui_textinput_get_height(const TuiTextInput *input)
 {
     if (!input)
         return 1;
+    /* The status line, when set, is one row above the input rows. */
+    int rows = status_rows(input);
     if (!input->multiline)
-        return input->soft_wrap ? total_visual_rows(input) : 1;
-    return input->soft_wrap ? total_visual_rows(input)
-                            : tui_textinput_line_count(input);
+        return rows + (input->soft_wrap ? total_visual_rows(input) : 1);
+    return rows + (input->soft_wrap ? total_visual_rows(input)
+                                    : tui_textinput_line_count(input));
 }
 
 /* Report cursor position for the runtime. Mirrors the arithmetic the old
@@ -2140,11 +2128,16 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
     if (!input || !input->focused)
         return tui_cursor_hidden();
 
-    int base_row = input->terminal_row > 0 ? input->terminal_row : 1;
+    /* base_row is the input's first row: below the status line when one is
+     * set (absolute mode paints the status at terminal_row; relative mode's
+     * frame row 1 is the status row). */
+    int base_row =
+        (input->terminal_row > 0 ? input->terminal_row : 1) + status_rows(input);
 
     /* Soft-wrap mode: compute visual row/col across wrapped lines */
     if (input->soft_wrap && input->terminal_width > 0) {
-        /* Gutter is always on row 0; line 0 carries the main prompt. */
+        /* The status line (when set) is the frame's first row; line 0
+         * carries the main prompt. */
         int prompt_w = line_prompt_width(input, 0);
         int content_w = input->terminal_width - prompt_w;
         if (content_w <= 0)

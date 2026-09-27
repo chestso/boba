@@ -1620,10 +1620,11 @@ static void test_soft_wrap_cursor_exact_wrap_boundary(void)
     tui_textinput_free(input);
 }
 
-/* ---------- gutter tests ---------- */
+/* ---------- status line tests ---------- */
 
-/* The gutter renders LEFT of the prompt on the input row. */
-static void test_gutter_renders_left_of_prompt(void)
+/* The status line renders as its OWN row above the prompt: the frame's
+ * first row carries the spans, the prompt starts the next row. */
+static void test_status_line_renders_above_prompt(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
@@ -1633,7 +1634,7 @@ static void test_gutter_renders_left_of_prompt(void)
     spans[0].text = "ctx 12k/128k ";
     spans[0].len = 0;
     spans[0].style = tui_style_new();
-    tui_textinput_set_gutter(input, spans, 1);
+    tui_textinput_set_status_line(input, spans, 1);
 
     send_string(input, "cmd");
 
@@ -1641,14 +1642,16 @@ static void test_gutter_renders_left_of_prompt(void)
     tui_textinput_view(input, buf);
     const char *data = dynamic_buffer_data(buf);
 
-    assert(strstr(data, "ctx 12k/128k > cmd") != NULL);
+    /* One row of status, a row separator, then the prompt row. */
+    assert(strstr(data, "ctx 12k/128k \r\n\033[K> cmd") != NULL);
+    assert(tui_textinput_get_height(input) == 2);
 
     dynamic_buffer_destroy(buf);
     tui_textinput_free(input);
 }
 
-/* Clearing the gutter removes it. */
-static void test_gutter_clear(void)
+/* Clearing the status line removes the row. */
+static void test_status_line_clear(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     TuiTextInputConfig cfg = { .prompt = "> " };
@@ -1658,8 +1661,8 @@ static void test_gutter_clear(void)
     spans[0].text = "ZZ";
     spans[0].len = 0;
     spans[0].style = tui_style_new();
-    tui_textinput_set_gutter(input, spans, 1);
-    tui_textinput_set_gutter(input, NULL, 0);
+    tui_textinput_set_status_line(input, spans, 1);
+    tui_textinput_set_status_line(input, NULL, 0);
 
     send_string(input, "cmd");
 
@@ -1667,13 +1670,15 @@ static void test_gutter_clear(void)
     tui_textinput_view(input, buf);
     const char *data = dynamic_buffer_data(buf);
     assert(strstr(data, "ZZ") == NULL);
+    assert(tui_textinput_get_height(input) == 1);
 
     dynamic_buffer_destroy(buf);
     tui_textinput_free(input);
 }
 
-/* The gutter's display width is folded into the wrap arithmetic. */
-static void test_gutter_width_affects_wrap(void)
+/* The status line's width does NOT shrink the input's wrap budget: it is
+ * its own row, so a wide status never costs the typed line any columns. */
+static void test_status_line_width_not_in_wrap_budget(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_prompt(input, "> "); /* 2 */
@@ -1681,42 +1686,43 @@ static void test_gutter_width_affects_wrap(void)
     tui_textinput_set_soft_wrap(input, 1);
 
     TuiSpan spans[1];
-    spans[0].text = "AB"; /* 2 -> content width = 10 - 2 - 2 = 6 */
+    spans[0].text = "ABCDEFGH"; /* 8 cells — would halve the row if counted */
     spans[0].len = 0;
     spans[0].style = tui_style_new();
-    tui_textinput_set_gutter(input, spans, 1);
+    tui_textinput_set_status_line(input, spans, 1);
 
-    send_string(input, "abcdefghijklmno"); /* 15 chars -> ceil(15/6) = 3 rows */
-    assert(tui_textinput_get_height(input) == 3);
+    send_string(input, "abcdefghijklmno");        /* 15 chars, budget 8 -> 2 rows */
+    assert(tui_textinput_get_height(input) == 3); /* status + 2 */
 
     tui_textinput_free(input);
 }
 
-/* Cursor column includes the gutter's width. */
-static void test_gutter_cursor_column_offset(void)
+/* The cursor row lands BELOW the status line; its column is the prompt's
+ * alone. */
+static void test_status_line_cursor_below_it(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
     tui_textinput_set_prompt(input, "> ");
 
     TuiSpan spans[1];
-    spans[0].text = "AB"; /* 2 */
+    spans[0].text = "AB"; /* 2 cells — must not move the cursor column */
     spans[0].len = 0;
     spans[0].style = tui_style_new();
-    tui_textinput_set_gutter(input, spans, 1);
+    tui_textinput_set_status_line(input, spans, 1);
 
     send_string(input, "cmd"); /* cursor at 3 */
     TuiCursor c = tui_textinput_cursor_pos(input);
     assert(c.visible == 1);
-    assert(c.col == 2 + 2 + 3 + 1); /* gutter + prompt + cursors + 1-index */
+    assert(c.row == 2);         /* status row + input row */
+    assert(c.col == 2 + 3 + 1); /* prompt + text + 1-index */
 
     tui_textinput_free(input);
 }
 
-/* The gutter is status chrome: it paints once on the input row and its
- * width is blank-padded on continuation rows, so a spinner never multiplies
- * down a multi-row input while the text column stays aligned. */
-static void test_gutter_not_repeated_on_continuation_rows(void)
+/* The status line paints ONCE, on the frame's first row: a multi-row input
+ * never repeats it, and continuation rows indent only by the prompt. */
+static void test_status_line_not_repeated_on_continuation_rows(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
@@ -1728,7 +1734,7 @@ static void test_gutter_not_repeated_on_continuation_rows(void)
     spans[0].text = "SPN "; /* 4 cells */
     spans[0].len = 0;
     spans[0].style = tui_style_new();
-    tui_textinput_set_gutter(input, spans, 1);
+    tui_textinput_set_status_line(input, spans, 1);
 
     send_string(input, "ab");
     TuiUpdateResult r = tui_textinput_update(
@@ -1741,21 +1747,53 @@ static void test_gutter_not_repeated_on_continuation_rows(void)
     tui_textinput_view(input, buf);
     const char *data = dynamic_buffer_data(buf);
 
-    /* Input row: gutter + prompt + first line. */
-    assert(strstr(data, "SPN > ab") != NULL);
-    /* Continuation row: gutter-width blank pad (4) + continuation prompt +
-     * second line — the gutter spans are NOT re-emitted. */
-    assert(strstr(data, "    .. cd") != NULL);
+    /* The frame's rows: status, prompt + first line, continuation + second. */
+    assert(strstr(data, "SPN \r\n\033[K> ab") != NULL);
+    assert(strstr(data, ".. cd") != NULL);
     const char *first = strstr(data, "SPN ");
     assert(first != NULL);
     assert(strstr(first + 1, "SPN ") == NULL);
+    assert(tui_textinput_get_height(input) == 3);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
+/* In absolute mode the status line owns terminal_row and the input rows
+ * follow one row lower. */
+static void test_status_line_absolute_positions_input_below(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_terminal_row(input, 5);
+
+    TuiSpan spans[1];
+    spans[0].text = "ST ";
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_status_line(input, spans, 1);
+
+    send_string(input, "cmd");
+
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    /* The status row is placed at 5; the prompt row at 6. */
+    assert(strstr(data, "\033[5;1H\033[KST ") != NULL);
+    assert(strstr(data, "\033[6;1H\033[K> cmd") != NULL);
+
+    TuiCursor c = tui_textinput_cursor_pos(input);
+    assert(c.visible == 1);
+    assert(c.row == 6);
 
     dynamic_buffer_destroy(buf);
     tui_textinput_free(input);
 }
 
 /* Multiple spans, each with its own style, all render. */
-static void test_gutter_multiple_styled_spans(void)
+static void test_status_line_multiple_styled_spans(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
@@ -1767,7 +1805,7 @@ static void test_gutter_multiple_styled_spans(void)
     spans[1].text = "ctx";
     spans[1].len = 0;
     spans[1].style = tui_style_bold(tui_style_new(), 1);
-    tui_textinput_set_gutter(input, spans, 2);
+    tui_textinput_set_status_line(input, spans, 2);
 
     DynamicBuffer *buf = dynamic_buffer_create(256);
     tui_textinput_view(input, buf);
@@ -1790,51 +1828,8 @@ static void send_rune(TuiTextInput *input, uint32_t cp)
     tui_textinput_update(input, tui_msg_char(cp, 0));
 }
 
-/* A wide cluster in the gutter (nevermore's "ctx 12k/128k ⚡4k" gauge) is one
- * codepoint but two cells. Measuring the gutter in codepoints put every
- * derived column — the cursor's included — one cell left of the text. */
-static void test_wide_cluster_gutter_cursor_column(void)
-{
-    TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
-    tui_textinput_set_prompt(input, "> ");
-
-    TuiSpan spans[1];
-    spans[0].text = "\xE2\x9A\xA1 "; /* ⚡ + space: 2 codepoints, 3 cells */
-    spans[0].len = 0;
-    spans[0].style = tui_style_new();
-    tui_textinput_set_gutter(input, spans, 1);
-
-    send_string(input, "cmd");
-    TuiCursor c = tui_textinput_cursor_pos(input);
-    assert(c.visible == 1);
-    assert(c.col == 3 + 2 + 3 + 1); /* gutter + prompt + text + 1-index */
-
-    tui_textinput_free(input);
-}
-
-/* The gutter's cell width is the wrap budget, so a wide cluster leaves one
- * fewer column of content per row. */
-static void test_wide_cluster_gutter_wraps_by_cells(void)
-{
-    TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_prompt(input, "> "); /* 2 */
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_soft_wrap(input, 1);
-
-    TuiSpan spans[1];
-    spans[0].text = "\xE2\x9A\xA1"; /* 2 cells -> content width = 6 */
-    spans[0].len = 0;
-    spans[0].style = tui_style_new();
-    tui_textinput_set_gutter(input, spans, 1);
-
-    send_string(input, "abcdefghijklm"); /* 13 cells -> ceil(13/6) = 3 rows */
-    assert(tui_textinput_get_height(input) == 3);
-
-    tui_textinput_free(input);
-}
-
-/* Same for the prompt itself. */
+/* A wide cluster in the prompt is one codepoint but two cells; the prompt
+ * variants below carry that coverage (the status line is width-irrelevant). */
 static void test_wide_cluster_prompt_cursor_column(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -2029,15 +2024,14 @@ int main(void)
     RUN_TEST(test_soft_wrap_relative_rows_match_height);
     RUN_TEST(test_soft_wrap_cursor_exact_wrap_boundary);
 
-    RUN_TEST(test_gutter_renders_left_of_prompt);
-    RUN_TEST(test_gutter_clear);
-    RUN_TEST(test_gutter_width_affects_wrap);
-    RUN_TEST(test_gutter_cursor_column_offset);
-    RUN_TEST(test_gutter_not_repeated_on_continuation_rows);
-    RUN_TEST(test_gutter_multiple_styled_spans);
+    RUN_TEST(test_status_line_renders_above_prompt);
+    RUN_TEST(test_status_line_clear);
+    RUN_TEST(test_status_line_width_not_in_wrap_budget);
+    RUN_TEST(test_status_line_cursor_below_it);
+    RUN_TEST(test_status_line_not_repeated_on_continuation_rows);
+    RUN_TEST(test_status_line_absolute_positions_input_below);
+    RUN_TEST(test_status_line_multiple_styled_spans);
 
-    RUN_TEST(test_wide_cluster_gutter_cursor_column);
-    RUN_TEST(test_wide_cluster_gutter_wraps_by_cells);
     RUN_TEST(test_wide_cluster_prompt_cursor_column);
     RUN_TEST(test_wide_cluster_input_soft_wrap_cursor);
     RUN_TEST(test_wide_cluster_input_scroll_window);
