@@ -60,11 +60,12 @@ typedef struct TuiTextInput
     int continuation_prompt_len;     /* Cached continuation prompt display width */
 
     /* Optional gutter: an ordered run of styled spans rendered LEFT of
-     * the prompt on every input row (status chrome — e.g. a spinner +
+     * the prompt on the input row (status chrome — e.g. a spinner +
      * "ctx 12k/128k"). Owned copies; NULL/n_gutter=0 = none. Its display
      * width (gutter_width) is folded into the prompt width for wrapping
      * and cursor math, so a gutter never overflows the row or misplaces
-     * the cursor. Set via tui_textinput_set_gutter. */
+     * the cursor; continuation rows pad that width rather than repeating
+     * the spans. Set via tui_textinput_set_gutter. */
     char **gutter_text;     /* per-span owned text */
     TuiStyle *gutter_style; /* per-span style */
     int n_gutter;
@@ -266,14 +267,15 @@ void tui_textinput_set_continuation_prompt(TuiTextInput *input,
                                            const char *prompt);
 
 /* Set the gutter: an ordered run of styled spans rendered LEFT of the
- * prompt on every input row (status chrome). The input copies the span
+ * prompt on the input row (status chrome). The input copies the span
  * texts and styles, so the caller's arrays may be transient. Its display
  * width is accounted for in soft-wrap and cursor placement. Pass NULL /
  * n_spans == 0 to clear.
  *
- * Unlike the prompt (whose continuation lines are space-padded to the
- * prompt width), continuation rows repeat the gutter verbatim so a
- * wrapped line's chrome stays aligned. */
+ * The gutter is painted on the input row only: continuation rows (wrapped
+ * rows and later logical lines) reserve its display width as blank padding
+ * instead of repeating the spans, so a spinner never multiplies per row and
+ * the text column stays aligned. */
 void tui_textinput_set_gutter(TuiTextInput *input, const TuiSpan *spans,
                               size_t n_spans);
 

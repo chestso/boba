@@ -1196,7 +1196,7 @@ static void emit_styled_or_legacy(DynamicBuffer *out, const TuiStyle *style,
 }
 
 /* Render the gutter spans (if any) to `out`. The gutter sits LEFT of the
- * prompt on every input row. */
+ * prompt on the input row. */
 static void render_gutter(const TuiTextInput *input, DynamicBuffer *out)
 {
     for (int i = 0; i < input->n_gutter; i++) {
@@ -1217,14 +1217,25 @@ static void render_gutter(const TuiTextInput *input, DynamicBuffer *out)
     }
 }
 
+/* Blank columns where the gutter would be, for continuation rows. The
+ * gutter is status chrome (e.g. a spinner + gauge): it belongs to the input
+ * row only, so repeating it per wrapped/logical row would multiply the
+ * spinner. Its width is still reserved so the text column stays aligned
+ * under the prompt. */
+static void render_gutter_pad(const TuiTextInput *input, DynamicBuffer *out)
+{
+    for (int i = 0; i < input->gutter_width; i++)
+        dynamic_buffer_append(out, " ", 1);
+}
+
 /* Render continuation prompt or space-padding for lines after the first.
- * The gutter (if any) leads every row, so it is emitted first; the
- * space-padding fallback is widened by the gutter's display width to keep
- * continuation rows aligned under the prompt column. */
+ * The gutter's width is padded (not the spans re-emitted); the
+ * space-padding fallback is widened by that width to keep continuation
+ * rows aligned under the prompt column. */
 static void render_continuation_prompt(const TuiTextInput *input,
                                        DynamicBuffer *out)
 {
-    render_gutter(input, out);
+    render_gutter_pad(input, out);
     if (input->continuation_prompt && input->continuation_prompt_len > 0) {
         emit_styled_or_legacy(out, prompt_style_for(input),
                               input->prompt_color, input->continuation_prompt);
@@ -1367,7 +1378,7 @@ static void render_wrapped_line_absolute(const TuiTextInput *input,
         } else if (show_prefix) {
             render_continuation_prompt(input, out);
         } else {
-            render_gutter(input, out);
+            render_gutter_pad(input, out);
         }
 
         /* Emit the next chunk of content_width display columns (or the rest
@@ -1427,7 +1438,7 @@ static void render_wrapped_line_relative(const TuiTextInput *input,
         } else if (show_prefix) {
             render_continuation_prompt(input, out);
         } else {
-            render_gutter(input, out);
+            render_gutter_pad(input, out);
         }
         first_chunk = 0;
 
@@ -1560,22 +1571,31 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                     dynamic_buffer_append_str(out, EL_TO_END);
 
                     /* Gutter + prompt/indentation (TuiStyle > legacy prompt_color).
-                     * The gutter leads every row; the prompt only on line 0. */
-                    render_gutter(input, out);
-                    if (current_line == 0 && input->show_prompt && input->prompt &&
-                        input->prompt_len > 0) {
-                        emit_styled_or_legacy(out, prompt_style_for(input),
-                                              input->prompt_color, input->prompt);
-                    } else if (current_line > 0 && input->show_prompt && input->prompt &&
-                               input->prompt_len > 0) {
-                        /* continuation prompt, minus the already-emitted gutter */
-                        if (input->continuation_prompt && input->continuation_prompt_len > 0) {
+                     * The gutter (status chrome) leads the input row only; the
+                     * prompt only on line 0. Continuation rows pad the gutter's
+                     * width so the text column stays aligned. */
+                    if (current_line == 0) {
+                        render_gutter(input, out);
+                        if (input->show_prompt && input->prompt &&
+                            input->prompt_len > 0) {
                             emit_styled_or_legacy(out, prompt_style_for(input),
                                                   input->prompt_color,
-                                                  input->continuation_prompt);
-                        } else {
-                            for (int j = 0; j < input->prompt_len; j++)
-                                dynamic_buffer_append(out, " ", 1);
+                                                  input->prompt);
+                        }
+                    } else {
+                        render_gutter_pad(input, out);
+                        if (input->show_prompt && input->prompt &&
+                            input->prompt_len > 0) {
+                            if (input->continuation_prompt &&
+                                input->continuation_prompt_len > 0) {
+                                emit_styled_or_legacy(
+                                    out, prompt_style_for(input),
+                                    input->prompt_color,
+                                    input->continuation_prompt);
+                            } else {
+                                for (int j = 0; j < input->prompt_len; j++)
+                                    dynamic_buffer_append(out, " ", 1);
+                            }
                         }
                     }
 
@@ -1644,7 +1664,7 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
         }
 
         /* Gutter + prompt if set and shown (TuiStyle > legacy prompt_color).
-         * Continuation rows (below) emit their own gutter via
+         * Continuation rows (below) pad the gutter's width via
          * render_continuation_prompt. */
         render_gutter(input, out);
         if (input->show_prompt && input->prompt && input->prompt_len > 0) {
@@ -1670,6 +1690,8 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
                         if (input->show_prompt && input->prompt &&
                             input->prompt_len > 0) {
                             render_continuation_prompt(input, out);
+                        } else {
+                            render_gutter_pad(input, out);
                         }
                     }
                     current_line++;

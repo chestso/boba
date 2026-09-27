@@ -1713,6 +1713,47 @@ static void test_gutter_cursor_column_offset(void)
     tui_textinput_free(input);
 }
 
+/* The gutter is status chrome: it paints once on the input row and its
+ * width is blank-padded on continuation rows, so a spinner never multiplies
+ * down a multi-row input while the text column stays aligned. */
+static void test_gutter_not_repeated_on_continuation_rows(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_prompt(input, "> ");
+    tui_textinput_set_continuation_prompt(input, ".. ");
+
+    TuiSpan spans[1];
+    spans[0].text = "SPN "; /* 4 cells */
+    spans[0].len = 0;
+    spans[0].style = tui_style_new();
+    tui_textinput_set_gutter(input, spans, 1);
+
+    send_string(input, "ab");
+    TuiUpdateResult r = tui_textinput_update(
+        input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_string(input, "cd");
+
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_textinput_view(input, buf);
+    const char *data = dynamic_buffer_data(buf);
+
+    /* Input row: gutter + prompt + first line. */
+    assert(strstr(data, "SPN > ab") != NULL);
+    /* Continuation row: gutter-width blank pad (4) + continuation prompt +
+     * second line — the gutter spans are NOT re-emitted. */
+    assert(strstr(data, "    .. cd") != NULL);
+    const char *first = strstr(data, "SPN ");
+    assert(first != NULL);
+    assert(strstr(first + 1, "SPN ") == NULL);
+
+    dynamic_buffer_destroy(buf);
+    tui_textinput_free(input);
+}
+
 /* Multiple spans, each with its own style, all render. */
 static void test_gutter_multiple_styled_spans(void)
 {
@@ -1992,6 +2033,7 @@ int main(void)
     RUN_TEST(test_gutter_clear);
     RUN_TEST(test_gutter_width_affects_wrap);
     RUN_TEST(test_gutter_cursor_column_offset);
+    RUN_TEST(test_gutter_not_repeated_on_continuation_rows);
     RUN_TEST(test_gutter_multiple_styled_spans);
 
     RUN_TEST(test_wide_cluster_gutter_cursor_column);
