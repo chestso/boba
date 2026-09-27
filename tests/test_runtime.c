@@ -1577,6 +1577,8 @@ static void test_handle_source_dispatch(void)
 
 /* Component whose view() returns a configurable TuiView. */
 static TuiView s_view_to_return = { 0 };
+/* Optional content the stub appends before returning its view. */
+static const char *s_view_content = NULL;
 
 static TuiInitResult view_stub_init(void *config)
 {
@@ -1589,6 +1591,8 @@ static TuiInitResult view_stub_init(void *config)
 static TuiView view_stub_view(const TuiModel *model, DynamicBuffer *out)
 {
     (void)model;
+    if (s_view_content)
+        dynamic_buffer_append_str(out, s_view_content);
     s_view_to_return.layer = out;
     return s_view_to_return;
 }
@@ -1604,6 +1608,7 @@ static void reset_view_stub(void)
 {
     TuiView empty = { 0 };
     s_view_to_return = empty;
+    s_view_content = NULL;
 }
 
 /* --- TuiRenderMode tests --- */
@@ -2681,6 +2686,52 @@ static void test_inline_resize_triggers_repaint(void)
     fclose(fp);
 }
 
+/* A terminal WIDTH change reflows the drawn frame: the old frame must be
+ * erased reflow-aware (its physical extent changed), not by the recorded
+ * row count, or its top rows are stranded — the "duplicated status line"
+ * that reflowing terminals (kitty, portty) show and xterm does not. */
+static void test_inline_width_change_erases_reflowed_frame(void)
+{
+    char outbuf[8192];
+    memset(outbuf, 0, sizeof(outbuf));
+    FILE *fp = fmemopen(outbuf, sizeof(outbuf), "w");
+    assert(fp != NULL);
+
+    TuiRuntimeConfig cfg = { .output = fp };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    /* Frame 1 at 40 cols: a 40-cell row, then a short row; cursor on row 2. */
+    reset_view_stub();
+    s_view_content = "0000000000000000000000000000000000000000\n\xe2\x9d\xaf hi";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(2, 4);
+    rt->term_width = 40;
+    tui_runtime_flush(rt);
+    fflush(fp);
+    size_t pos1 = ftell(fp);
+
+    /* Frame 2 after a shrink to 20: the first row reflows to TWO physical
+     * rows, so the old frame now spans 3 rows and the cursor sits on
+     * physical row 2 (after the two reflowed rows). */
+    reset_view_stub();
+    s_view_content = "00\n\xe2\x9d\xaf hi";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(2, 4);
+    rt->term_width = 20;
+    tui_runtime_flush(rt);
+    fflush(fp);
+
+    const char *out2 = outbuf + pos1;
+    /* Up 2 to the reflowed frame's top, erase all 3 physical rows, return
+     * to the top. */
+    assert(strstr(out2, "\x1b[2A") != NULL);
+    assert(strstr(out2, "\r\x1b[K\x1b[1B\r\x1b[K\x1b[1B\r\x1b[K") != NULL);
+
+    tui_runtime_free(rt);
+    fclose(fp);
+}
+
 /* ========================================================================
  * Terminal capability probe through the real event loop
  * ======================================================================== */
@@ -2888,6 +2939,7 @@ int main(void)
     RUN_TEST(test_start_inline_no_decsc);
     RUN_TEST(test_start_resets_inline_lines_rendered);
     RUN_TEST(test_inline_resize_triggers_repaint);
+    RUN_TEST(test_inline_width_change_erases_reflowed_frame);
     RUN_TEST(test_probe_resolves_in_loop);
     RUN_TEST(test_probe_silent_loop_resolves_on_exit);
 #endif

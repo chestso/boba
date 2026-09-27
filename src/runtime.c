@@ -468,6 +468,9 @@ void tui_runtime_free(TuiRuntime *runtime)
     if (runtime->view_buf)
         dynamic_buffer_destroy(runtime->view_buf);
 
+    if (runtime->inline_last_frame)
+        dynamic_buffer_destroy(runtime->inline_last_frame);
+
     if (runtime->parser)
         tui_input_parser_free(runtime->parser);
 
@@ -650,6 +653,9 @@ void tui_runtime_quit(TuiRuntime *runtime)
 /* Start terminal mode. Just guards idempotent start/stop and saves
  * cursor state for restoration. Actual mode bytes (alt-screen, mouse,
  * etc.) are emitted by tui_runtime_flush based on the first View. */
+/* Invalidate the stored inline frame (defined with the inline helpers). */
+static void inline_forget_frame(TuiRuntime *runtime);
+
 void tui_runtime_start(TuiRuntime *runtime)
 {
     if (!runtime || runtime->started)
@@ -662,6 +668,7 @@ void tui_runtime_start(TuiRuntime *runtime)
         runtime_write(runtime, DECSC);
     else
         runtime->inline_lines_rendered = 0;
+    inline_forget_frame(runtime);
     fflush(runtime->output);
     runtime->started = 1;
 }
@@ -717,6 +724,17 @@ void tui_runtime_stop(TuiRuntime *runtime)
     runtime->started = 0;
 }
 
+/* Invalidate the stored inline frame: its drawn bytes are no longer on
+ * screen (erased, finished, or left behind by a mode switch), so a later
+ * width change must not try to erase them. Keeps the buffer's allocation
+ * (memory-reuse). */
+static void inline_forget_frame(TuiRuntime *runtime)
+{
+    if (runtime->inline_last_frame)
+        dynamic_buffer_clear(runtime->inline_last_frame);
+    runtime->inline_last_width = 0;
+}
+
 /* Finish inline mode: move cursor past all rendered content so
  * application output appears below the input. The cursor may be on
  * any row (e.g. the user moved it up); we cursor-down to the last
@@ -748,6 +766,7 @@ void tui_runtime_finish_inline(TuiRuntime *runtime)
     runtime->inline_cursor_row = 0;
     runtime->inline_partial_open = 0;
     runtime->inline_partial_cols = 0;
+    inline_forget_frame(runtime);
 
     fflush(fp);
 }
@@ -807,6 +826,9 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
     }
 
     runtime->inline_cursor_row = 0;
+    /* The frame's bytes are erased; a later width change must not try to
+     * erase them again. */
+    inline_forget_frame(runtime);
 
     fflush(fp);
 }
@@ -924,6 +946,71 @@ void tui_runtime_transcript_orphan(TuiRuntime *runtime)
     runtime->inline_partial_cols = 0;
 }
 
+/* Erase the previously-drawn inline frame after a terminal WIDTH change.
+ *
+ * The terminal re-wrapped (reflowed) the frame's drawn lines to the new
+ * width, so the frame now spans a different number of PHYSICAL rows than
+ * the last flush recorded at the old width (kitty and portty reflow;
+ * xterm leaves clipped lines alone). Recompute the extent from the stored
+ * frame bytes and wipe it, leaving the cursor at the frame's top row,
+ * col 0, so the paint that follows starts on a clean frame top. Without
+ * this the cursor-up lands a row or two INTO the reflowed old frame and
+ * its top rows are stranded on screen (the "duplicated status line"). */
+static void inline_clear_reflowed(TuiRuntime *runtime)
+{
+    FILE *fp = runtime->output;
+    const char *data = dynamic_buffer_data(runtime->inline_last_frame);
+    size_t len = dynamic_buffer_len(runtime->inline_last_frame);
+    int w = runtime->term_width > 1 ? runtime->term_width : 80;
+
+    int cursor_row = runtime->inline_cursor_row; /* old visual row */
+    int cursor_col = runtime->inline_last_cursor_col;
+
+    /* Walk the frame's lines (one visual row per stored line): sum each
+     * line's reflowed physical rows, and the physical row the cursor sits
+     * on (lines above it, plus its sub-row once its own line re-wraps). */
+    int phys_before_cursor = 0, phys_total = 0;
+    int rownum = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || data[i] == '\n') {
+            int cells = (int)tui_utf8_display_width_ansi(data + start,
+                                                         i - start);
+            int rows = cells <= 0 ? 1 : (cells + w - 1) / w;
+            if (rownum < cursor_row)
+                phys_before_cursor += rows;
+            phys_total += rows;
+            rownum++;
+            start = i + 1;
+        }
+    }
+    if (phys_total <= 0)
+        return;
+    int sub = cursor_col > 1 ? (cursor_col - 1) / w : 0;
+    int phys_cursor = phys_before_cursor + sub;
+    if (phys_cursor > phys_total - 1)
+        phys_cursor = phys_total - 1;
+
+    char buf[16];
+    if (phys_cursor > 0) {
+        ansi_format_cursor_up(buf, sizeof(buf), phys_cursor);
+        fputs(buf, fp);
+    }
+    /* Cursor-DOWN, never a line feed: at the screen bottom a feed scrolls
+     * (same reason clear_inline uses CUD). */
+    for (int r = 0; r < phys_total; r++) {
+        fputs("\r", fp);
+        fputs(EL_TO_END, fp);
+        if (r + 1 < phys_total) {
+            ansi_format_cursor_down(buf, sizeof(buf), 1);
+            fputs(buf, fp);
+        }
+    }
+    ansi_format_cursor_up(buf, sizeof(buf), phys_total - 1);
+    fputs(buf, fp);
+    fputs("\r", fp);
+}
+
 /* Render view, reconcile terminal mode against the View's declarations,
  * and write the resulting bytes.
  *
@@ -993,10 +1080,25 @@ void tui_runtime_flush(TuiRuntime *runtime)
         int prev_lines = runtime->inline_lines_rendered;
         int prev_cursor_row = runtime->inline_cursor_row;
 
+        /* A terminal WIDTH change since the last inline paint reflowed the
+         * old frame's drawn lines (kitty/portty rewrap; xterm does not), so
+         * its physical extent no longer matches the recorded row count.
+         * Erase it reflow-aware first and treat it as fully consumed —
+         * otherwise the cursor-up lands inside the reflowed frame and its
+         * top rows are stranded (the duplicated status line). */
+        int reflow_cleared = 0;
+        if (runtime->term_width != runtime->inline_last_width &&
+            runtime->inline_last_frame &&
+            dynamic_buffer_len(runtime->inline_last_frame) > 0) {
+            inline_clear_reflowed(runtime);
+            reflow_cleared = 1;
+            prev_lines = 0;
+        }
+
         /* Move cursor up to where the previous frame's content started.
          * The cursor was placed at prev_cursor_row (0-indexed) after
          * the last flush. Go up prev_cursor_row lines to reach row 0. */
-        if (prev_cursor_row > 0) {
+        if (!reflow_cleared && prev_cursor_row > 0) {
             char up_buf[16];
             ansi_format_cursor_up(up_buf, sizeof(up_buf),
                                   prev_cursor_row);
@@ -1070,11 +1172,27 @@ void tui_runtime_flush(TuiRuntime *runtime)
             runtime->inline_cursor_row = line_count - 1;
         }
 
+        /* Remember this frame's bytes, the width they were painted at,
+         * and the cursor column, so a later terminal-width change can
+         * erase it reflow-aware (see inline_clear_reflowed). */
+        if (!runtime->inline_last_frame)
+            runtime->inline_last_frame = dynamic_buffer_create(len + 64);
+        if (runtime->inline_last_frame) {
+            dynamic_buffer_clear(runtime->inline_last_frame);
+            dynamic_buffer_append(runtime->inline_last_frame, data, len);
+        }
+        runtime->inline_last_width = runtime->term_width;
+        runtime->inline_last_cursor_col = v.cursor.visible ? v.cursor.col : 0;
+
         fflush(fp);
         return;
     }
 
     /* --- Alt-screen mode (default) --- */
+
+    /* Leaving inline mode: the stored inline frame is no longer on
+     * screen, so a later width change must not erase it. */
+    inline_forget_frame(runtime);
 
     /* 2. Reconcile mode toggles before content. */
     if (v.alt_screen != runtime->in_alt_screen) {

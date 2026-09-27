@@ -191,6 +191,16 @@ struct TuiRuntime
     int inline_lines_rendered; /* lines drawn last frame in inline mode */
     int inline_cursor_row;     /* 0-indexed row where cursor was placed */
     int in_inline_mode;        /* 1 if last flush was inline mode */
+    /* Last inline frame's rendered bytes + cursor column, captured per
+     * inline flush. A terminal WIDTH change re-wraps (reflows) the drawn
+     * lines to the new width, so the frame then spans a different number
+     * of PHYSICAL rows than inline_lines_rendered recorded (kitty and
+     * portty reflow; xterm does not). The next flush uses this to erase
+     * the OLD frame reflow-aware instead of stranding its top rows.
+     * NULL/0 before the first inline flush. */
+    DynamicBuffer *inline_last_frame;
+    int inline_last_width;
+    int inline_last_cursor_col;
     /* Inline transcript partial row (byte-granular commits end
      * mid-row): the seam can extend the open row on the next write.
      * inline_partial_cols is the display column of the row's end;
