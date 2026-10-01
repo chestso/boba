@@ -55,10 +55,24 @@ probe's completion signal is the deadline, never a single reply (FIFO
 answers arrive in one burst; resolving on DA1 would discard the cell
 size / XTVERSION that follow). Deferred to the next steps:
 
-- **Image transport** (`TuiImageSpec`, `tui_row_image`): kitty APC,
-  sixel and iTerm2 encoders behind the sink; row reservation sized
-  from the profile. (`tui_row_image` is currently a no-op; nevermore's
-  renderer degrades IMAGE blocks to their text.)
+- **Image transport — DONE (2026-09-29, with nevermore's IR step 5,
+  see nevermore's `docs/TRANSCRIPT-IMAGE-PLAN.md`)**: `TuiImageSpec`
+  frozen (transport/format enums, borrowed payload, display size in
+  CELLS as the row reservation), kitty APC (`f=100` PNG, `q=2`,
+  `C=1` — the terminal must not move the cursor, our row terminators
+  own the geometry) with 4096-byte `m=1/m=0` chunking, iTerm2
+  `OSC 1337 File=inline=1` (PNG/JPEG/GIF), `tui_row_image`'s row
+  accounting, `blk.image_id` boba-assigned (monotonic across clear),
+  the profile copied into the transcript per commit pass, and
+  `emit_unit`'s measure/render_image branch with a DEFER queue: an
+  IMAGE unit frozen before the profile resolves (and everything
+  freezing behind it, byte staging and row closes included) is held
+  in freeze order and replayed after the gate's verdict — emission
+  is freeze-time, the profile is commit-time, and deferral is what
+  keeps guarantee 4 through the gap. `TUI_TRANSCRIPT_STAGED_CAP`
+  1→4 MiB (above the app policy's worst legal batch). sixel needs
+  client-side pixel decode and stays deferred (the pixel tier:
+  sixel + halfblocks + kitty `f=32`).
 
 - **Commit payload cap**: a single block >cap force-commits a safe
   prefix at frozen widths (the one case the raw-buffer watermark
