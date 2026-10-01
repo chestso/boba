@@ -65,12 +65,71 @@ static void emit_text_rows(TuiRowSink *sink, const char *mark,
 /* Optional per-test row probe for render_block. */
 static void (*g_row_probe)(TuiRowSink *) = NULL;
 
+/* IMAGE tier hooks (per-test globals, same pattern as g_row_probe).
+ * Installed unconditionally; NULL hooks disable the image path
+ * (measure returns 0 -> render_block). */
+static int g_img_calls = 0;       /* measure_image invocations  */
+static int g_img_rendered = 0;    /* render_image invocations   */
+static int g_img_block_calls = 0; /* render_block IMAGE calls   */
+static TuiImageTransport g_img_transport = TUI_IMAGE_KITTY;
+static TuiTerminalProfile g_img_profile_seen;
+
+static int test_measure_image(const TuiBlock *blk, const char *text,
+                              size_t len, const TuiTerminalProfile *profile,
+                              int *out_rows, void *ud)
+{
+    (void)blk;
+    (void)text;
+    (void)len;
+    (void)ud;
+    g_img_calls++;
+    g_img_profile_seen = *profile;
+    if (profile->kitty_graphics) {
+        g_img_transport = TUI_IMAGE_KITTY;
+        *out_rows = 3;
+        return 1;
+    }
+    if (profile->iterm2_images) {
+        g_img_transport = TUI_IMAGE_ITERM2;
+        *out_rows = 3;
+        return 1;
+    }
+    return 0; /* degrade */
+}
+
+/* A fixed 12-byte PNG-signature-shaped payload: the base64 is
+ * "iVBORw0KGgpBQkNE" (hand-computed, pinned here as the golden).
+ * Tests may point g_img_payload at their own bytes (chunking). */
+static const unsigned char IMG_PAYLOAD[] = "\x89PNG\r\n\x1a\nABCD";
+#define IMG_PAYLOAD_LEN 12
+#define IMG_B64         "iVBORw0KGgpBQkNE"
+static const unsigned char *g_img_payload = IMG_PAYLOAD;
+static size_t g_img_payload_len = IMG_PAYLOAD_LEN;
+
+static void test_render_image(const TuiBlock *blk, const char *text,
+                              size_t len, int col_span, int rows,
+                              TuiRowSink *sink, void *ud)
+{
+    (void)text;
+    (void)len;
+    (void)ud;
+    g_img_rendered++;
+    TuiImageSpec spec;
+    tui_image_spec_init(&spec, g_img_transport, TUI_IMAGE_PNG, g_img_payload,
+                        g_img_payload_len, 8, 4, col_span, rows, blk->image_id);
+    tui_row_image(sink, &spec);
+    tui_row_end(sink);
+}
+
+static int g_measure_enabled = 0;
+
 static void test_render_block(const TuiBlock *blk, const char *text, size_t len,
                               int width, TuiRowSink *sink, void *ud)
 {
-    (void)blk;
     (void)width;
     (void)ud;
+    if (blk && blk->kind == TUI_BLOCK_IMAGE)
+        g_img_block_calls++;
     if (g_row_probe) {
         g_row_probe(sink);
         return;
@@ -151,9 +210,19 @@ static H *h_new(const TuiStreamSpec *streams,
     h->text = malloc(OUT_CAP);
     h->out = tmpfile();
     h->view = dynamic_buffer_create(512);
+    /* per-test globals reset here; g_measure_enabled is set by the
+     * test BEFORE h_new to install the image-tier callbacks */
+    g_img_calls = 0;
+    g_img_rendered = 0;
+    g_img_block_calls = 0;
+    memset(&g_img_profile_seen, 0, sizeof(g_img_profile_seen));
+    g_img_payload = IMG_PAYLOAD;
+    g_img_payload_len = IMG_PAYLOAD_LEN;
     TuiTranscriptConfig cfg = {
         .render_block = test_render_block,
         .render_live = test_render_live,
+        .measure_image = g_measure_enabled ? test_measure_image : NULL,
+        .render_image = test_render_image,
         .streams = streams,
         .classifiers = classifiers,
         .n_streams = n,
@@ -1300,7 +1369,7 @@ static void test_image_unit_gated_until_profile(void)
 
     /* stage the IMAGE unit: it must NOT commit while the profile is
      * unresolved (no probe declared on this harness's view) */
-    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 11));
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
     h->rt->probe_state = 2;       /* pretend an outstanding probe */
     h->rt->probe_deadline_ms = 0; /* not yet due */
     h_flush(h);
@@ -1328,7 +1397,7 @@ static void test_image_gate_does_not_deadlock_unclaimed(void)
     H *h = h_new(streams, classifiers, 1);
     assert(h);
 
-    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 11));
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
     h_flush(h);
     assert(tui_transcript_commit_count(h->t) == 1);
     assert(strstr(h_read(h), "R|!img") != NULL);
@@ -1354,8 +1423,239 @@ static void test_non_image_never_gated(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Commit path: no software wrap (the terminal owns wrapping/reflow)   */
+/* IMAGE tier: transports, row reservation, deferral, ids              */
 /* ------------------------------------------------------------------ */
+
+/* Resolve the harness's runtime profile as a kitty terminal (the
+ * transcript reads the verdict through its copy, refreshed at the
+ * commit pass). */
+static void h_profile_kitty(H *h)
+{
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 1;
+    h->rt->profile.cell_w_px = 10;
+    h->rt->profile.cell_h_px = 20;
+}
+
+static void h_profile_iterm2(H *h)
+{
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.iterm2_images = 1;
+}
+
+static void test_image_kitty_golden_bytes(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_kitty(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_flush(h);
+    const char *out = h_read(h);
+
+    /* one APC, keys on it (f=100 PNG, cells c/r, quiet, no terminal
+     * cursor move, id 1), the pinned payload, ST, and THREE row
+     * terminators for the three reserved rows */
+    char golden[128];
+    snprintf(golden, sizeof(golden),
+             "\x1b_Gf=100,q=2,C=1,c=60,r=3,i=1;" IMG_B64 "\x1b\\\r\n\r\n\r\n");
+    assert(strstr(out, golden) != NULL);
+    assert(g_img_calls == 1);
+    assert(g_img_rendered == 1);
+    assert(g_img_block_calls == 0); /* no degraded fallback          */
+    assert(g_img_profile_seen.kitty_graphics == 1);
+
+    h_free(h);
+}
+
+static void test_image_iterm2_golden_bytes(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_iterm2(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_flush(h);
+    const char *out = h_read(h);
+
+    char golden[128];
+    snprintf(golden, sizeof(golden),
+             "\x1b]1337;File=inline=1;size=12;width=60;height=3:" IMG_B64
+             "\x07\r\n\r\n\r\n");
+    assert(strstr(out, golden) != NULL);
+    assert(g_img_rendered == 1);
+
+    h_free(h);
+}
+
+static void test_image_row_reservation_bounds_the_next_unit(void)
+{
+    /* an image followed by a paragraph line: the next unit's bytes
+     * come AFTER the image's three row terminators, and the batch is
+     * one commit */
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_kitty(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 1);
+
+    const char *out = h_read(h);
+    const char *img = strstr(out, "\x1b_Gf=100");
+    const char *next = strstr(out, "R|after");
+    assert(img && next);
+    assert(next > img);
+    /* exactly the image's 3 terminators between the ST and the next
+     * unit's first byte */
+    const char *st = strstr(img, "\x1b\\");
+    assert(st && next == st + 2 + 6); /* ST + "\r\n\r\n\r\n"       */
+
+    h_free(h);
+}
+
+static void test_image_defers_until_profile_resolves(void)
+{
+    /* profile unresolved: the IMAGE unit (and everything freezing
+     * behind it) is HELD, not staged — the batch does not write, the
+     * gate reports 1, and order survives the drain */
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h->rt->probe_state = 2; /* outstanding, not yet due       */
+    h->rt->probe_deadline_ms = 0;
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 0);
+    assert(tui_transcript_staged_bytes(h->t) == 0); /* held, not staged */
+    assert(tui_transcript_commit_gated(h->t) == 1);
+    assert(g_img_calls == 0); /* measure never ran unresolved    */
+
+    /* a later unit freezes BEHIND the held image (freeze order) */
+    h_send(h, tui_msg_stream_delta(0, "tail\n\n", 6));
+
+    /* the profile resolves: one commit, image first, text after */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 1;
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 1);
+    const char *out = h_read(h);
+    const char *img = strstr(out, "\x1b_Gf=100");
+    const char *tail = strstr(out, "R|tail");
+    assert(img && tail && tail > img);
+    assert(g_img_calls == 1);
+
+    h_free(h);
+}
+
+static void test_image_measure_refusal_degrades_to_render_block(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    /* resolved profile with NO graphics: measure refuses */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_flush(h);
+    assert(g_img_calls == 1);
+    assert(g_img_rendered == 0);
+    assert(g_img_block_calls == 1);
+    /* the app's render_block drew the degradation marker text */
+    assert(strstr(h_read(h), "R|!img a:b") != NULL);
+
+    h_free(h);
+}
+
+static void test_image_ids_are_monotonic_across_clear(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_kitty(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img one\n\n", 10));
+    h_flush(h);
+    h_send(h, tui_msg_stream_delta(0, "!img two\n\n", 10));
+    h_flush(h);
+    h_send(h, tui_msg_transcript_clear());
+    h_send(h, tui_msg_stream_delta(0, "!img three\n\n", 12));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    /* kitty i= ids 1, 2 then 3: the counter survives the clear, so a
+     * re-used id can never replace a scrollback image */
+    assert(strstr(out, "i=1;") != NULL);
+    assert(strstr(out, "i=2;") != NULL);
+    assert(strstr(out, "i=3;") != NULL);
+
+    h_free(h);
+}
+
+static void test_image_large_payload_is_chunked(void)
+{
+    /* payloads over one 3072-byte chunk ride kitty's m=1/m=0 chunked
+     * transmission: two APCs, the full key set only on the first, and
+     * the concatenated base64 is exactly the payload's. 'A'*3
+     * encodes to "QUFB"; 4000 = 1333*3 + 1, so the tail is "QQ==". */
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    static unsigned char big[4000];
+    memset(big, 'A', sizeof(big));
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_kitty(h);
+    g_img_payload = big;
+    g_img_payload_len = sizeof(big);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_flush(h);
+    g_img_payload = IMG_PAYLOAD;
+    g_img_payload_len = IMG_PAYLOAD_LEN;
+
+    const char *out = h_read(h);
+    assert(count_substr(out, "\x1b_G") == 2);
+    assert(strstr(out, "f=100,q=2,C=1,c=60,r=3,i=1,m=1;") != NULL);
+    assert(strstr(out, "\x1b_Gq=2,m=0;") != NULL);
+    /* 4096 encoded bytes in chunk 1 + 1240 in chunk 2: "QUFB" x 1333
+     * and the padded one-byte tail, nothing lost */
+    assert(count_substr(out, "QUFB") == 1333);
+    assert(strstr(out, "QQ==") != NULL);
+    /* both chunks are terminated with ST, so the whole payload is
+     * well-formed APC framing */
+    assert(count_substr(out, "\x1b\\") == 2);
+
+    h_free(h);
+}
 
 /* A logical line longer than the width must reach the scrollback as
  * ONE byte run (a single trailing \r\n): no width break is baked in,
@@ -1484,6 +1784,13 @@ int main(void)
     RUN_TEST(test_image_unit_gated_until_profile);
     RUN_TEST(test_image_gate_does_not_deadlock_unclaimed);
     RUN_TEST(test_non_image_never_gated);
+    RUN_TEST(test_image_kitty_golden_bytes);
+    RUN_TEST(test_image_iterm2_golden_bytes);
+    RUN_TEST(test_image_row_reservation_bounds_the_next_unit);
+    RUN_TEST(test_image_defers_until_profile_resolves);
+    RUN_TEST(test_image_measure_refusal_degrades_to_render_block);
+    RUN_TEST(test_image_ids_are_monotonic_across_clear);
+    RUN_TEST(test_image_large_payload_is_chunked);
     RUN_TEST(test_committed_line_is_not_width_wrapped);
     RUN_TEST(test_committed_byte_run_is_not_width_wrapped);
     RUN_TEST(test_partial_row_wrapped_extends_at_column);

@@ -68,14 +68,11 @@
  * Inline mode only: "commit to the scrollback" has no meaning in an
  * alt-screen layout; this component targets boba's inline frame.
  *
- * Two seams are deferred to the image tier (see the TM-image work):
- * the app-side degradation policy (tier choice from the profile) and
- * `tui_row_image` transport are not implemented yet. What IS
- * implemented is the part that would be wrong to retrofit: an IMAGE
- * unit's commit waits for the terminal profile (probe verdict or
- * timeout) when one has been declared, and the gate is a plain
- * staging-buffer hold, so nothing on the transcript side changes when
- * the seam lands.
+ * The image tier is complete: an IMAGE unit whose rendering depends
+ * on the terminal profile (measure_image installed) is DEFERRED —
+ * held with everything freezing behind it, in freeze order — until
+ * the profile resolves, then rendered through measure/render_image
+ * into the batch. The gate is bounded by the probe's deadline.
  */
 
 #ifndef BOBA_STREAM_H
@@ -123,7 +120,11 @@ typedef struct TuiBlock
     size_t off, len;         /* byte range into the stream's raw buffer */
     int n_cols;              /* TABLE: locked at delimiter              */
     unsigned char col_align; /* TABLE: 2 bits per column                */
-    int image_id;            /* IMAGE: app-assigned                     */
+    int image_id;            /* IMAGE: boba-assigned, per-transcript
+                              * counter, monotonic across clear
+                              * (kitty i= ids must never be re-used:
+                              * a re-used id REPLACES the image still
+                              * visible in the scrollback)          */
     int stream;              /* app-facing stream id (0..n_streams-1;
                               * -1 = system). Set for render_block and
                               * render_live blocks. Borrowed facts, like
@@ -186,10 +187,50 @@ void tui_row_pad_to(TuiRowSink *s, int display_col);
  * pre-wrapped). Exactly one row is emitted per call. */
 void tui_row_end(TuiRowSink *s);
 
-/* Emit an image at the current position. `spec` is a boba-side type
- * (frozen when the image tier lands); the app builds it with boba's
- * emit helpers and never writes capability sequences itself. */
-typedef struct TuiImageSpec TuiImageSpec;
+/* Emit an image at the current position. `spec` names the transport
+ * (the app's tier choice, from the terminal profile), the payload
+ * (borrowed, callback-scoped) and the display size in CELLS — the
+ * sink reserves exactly `disp_rows` screen rows for this row and the
+ * next `tui_row_end` (or the sink's close) emits that many row
+ * terminators, so the following unit starts below the image and the
+ * terminal never decides layout. Commit destination only: on the
+ * live/count sinks the image is dropped (a live re-render would
+ * re-transmit the payload every frame — the app renders a
+ * placeholder there instead; a debug assert names the violation).
+ * The transport bytes are appended raw, not through the escape
+ * scanner: boba's own framing is never scanned. */
+typedef enum
+{
+    TUI_IMAGE_KITTY,  /* kitty graphics APC, f=100 PNG payload     */
+    TUI_IMAGE_ITERM2, /* iTerm2 OSC 1337 File=inline=1 (PNG/JPEG/GIF) */
+} TuiImageTransport;
+
+typedef enum
+{
+    TUI_IMAGE_PNG,
+    TUI_IMAGE_JPEG,
+    TUI_IMAGE_GIF,
+} TuiImageFormat;
+
+typedef struct TuiImageSpec
+{
+    TuiImageTransport transport;
+    TuiImageFormat format;
+    const unsigned char *data; /* borrowed; valid for the callback */
+    size_t data_len;           /* decoded byte count                */
+    int src_w, src_h;          /* source pixels                     */
+    int disp_cols, disp_rows;  /* display size in cells (the row
+                                * reservation)                      */
+    int image_id;              /* kitty i=; from TuiBlock.image_id  */
+} TuiImageSpec;
+
+/* Fill a spec from borrowed parts. The data pointer is borrowed for
+ * the duration of the tui_row_image call only. */
+void tui_image_spec_init(TuiImageSpec *spec, TuiImageTransport transport,
+                         TuiImageFormat format, const unsigned char *data,
+                         size_t data_len, int src_w, int src_h, int disp_cols,
+                         int disp_rows, int image_id);
+
 void tui_row_image(TuiRowSink *s, const TuiImageSpec *spec);
 
 /* ------------------------------------------------------------------ */
@@ -269,7 +310,16 @@ typedef struct TuiTranscriptConfig
                         int width, int rows_cap, TuiRowSink *sink,
                         void *user_data);
 
-    /* NULL measure_image => IMAGE blocks degrade to their text. */
+    /* IMAGE tier. measure_image is asked for the row reservation (and
+     * implicitly the transport choice, which the app derives from the
+     * profile) when the unit is emitted; it is called with a RESOLVED
+     * profile — an unresolved verdict defers the whole unit to the
+     * commit pass (the IMAGE gate), together with everything freezing
+     * behind it, so emission order survives. Returns 1 with *out_rows
+     * >= 1 to render as an image (render_image then runs), 0 to fall
+     * back to render_block (degradation marker). NULL measure_image
+     * => IMAGE blocks degrade to their text immediately, with no
+     * gate (the legacy behavior). */
     int (*measure_image)(const TuiBlock *, const char *text, size_t len,
                          const TuiTerminalProfile *profile, int *out_rows,
                          void *user_data);
@@ -340,8 +390,10 @@ int tui_transcript_live_rows(const TuiTranscript *t, int width, int rows_cap);
 /* Safety cap on bytes held by the IMAGE commit gate: a pathological
  * block larger than this forces the probe to resolve conservatively
  * rather than let the staging buffer grow for the whole session.
- * Memory bound only — correctness is unaffected. */
-#define TUI_TRANSCRIPT_STAGED_CAP (1024 * 1024)
+ * Memory bound only — correctness is unaffected. Sized above the app
+ * policy's worst legal image batch (a ~1 MiB payload base64-encodes
+ * to ~1.37 MiB plus marker rows), so a legal image never trips it. */
+#define TUI_TRANSCRIPT_STAGED_CAP (4 * 1024 * 1024)
 
 /* ----- Test / introspection seams ----- */
 
@@ -353,11 +405,15 @@ unsigned long tui_transcript_commit_count(const TuiTranscript *t);
 size_t tui_transcript_stream_raw_len(const TuiTranscript *t, int stream_id);
 
 /* Bytes staged but not yet committed. Non-zero while the commit gate
- * holds a batch (see the image gate note in stream.h). */
+ * holds a batch (see the image gate note in stream.h). Deferred
+ * (unresolved-profile) IMAGE units hold their bytes in the stream raw
+ * buffers, not in staging — they are reported by
+ * tui_transcript_commit_gated instead. */
 size_t tui_transcript_staged_bytes(const TuiTranscript *t);
 
-/* 1 while the commit pass is holding staged bytes for the terminal
- * profile (an IMAGE unit is staged and the probe has not resolved). */
+/* 1 while the commit pass is holding an IMAGE unit for the terminal
+ * profile (staged legacy bytes, or deferred units whose rendering
+ * waits on the probe's verdict). */
 int tui_transcript_commit_gated(const TuiTranscript *t);
 
 #endif /* BOBA_STREAM_H */

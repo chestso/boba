@@ -32,6 +32,7 @@
 #include <boba/stream.h>
 #include <boba/unicode.h>
 
+#include "base64.h"
 #include "stream_internal.h"
 
 #define STREAM_RAW_INIT   256
@@ -67,10 +68,11 @@ typedef struct TuiStream
     TuiBlockKind container_kind;
     size_t stage_pos; /* next raw offset to stage (byte containers) */
 
-    /* block-mode live block (table) */
+    /* block-mode live block (table, image) */
     int has_block;
     size_t block_off, block_len;
     TuiBlockKind block_kind;
+    int block_image_id; /* IMAGE: the unit's id (boba counter) */
 
     /* kind of the current line-mode block */
     TuiBlockKind cur_kind;
@@ -178,6 +180,8 @@ struct TuiRowSink
     int width;
     int col;
     int open;             /* a row is open (content written since last row end) */
+    int image_rows;       /* pending reservation: an image occupies this
+                           * many screen rows on the open row (0 = none) */
     EscScan esc;          /* split escape scan state (shared policy) */
     size_t row_start_off; /* content start of the open row */
 
@@ -187,6 +191,31 @@ struct TuiRowSink
     int rcap;
     int nrows;
 };
+
+/* Deferred emission units (the IMAGE gate's hold). An IMAGE unit whose
+ * rendering depends on the terminal profile cannot render at freeze
+ * time while the profile is unresolved, so it — and everything that
+ * freezes behind it, including byte staging and row closes — is held
+ * in freeze order and replayed once the profile resolves (see
+ * tui_transcript_commit_pending). Byte-granular ranges reference the
+ * owning stream's raw buffer: the trim never runs while the queue is
+ * non-empty (it runs only after a write, and a write only happens
+ * after a drain), so the offsets stay valid for the hold's duration. */
+enum
+{
+    TDEFER_UNIT,  /* render one emission unit (kind, off, len)     */
+    TDEFER_BYTES, /* stage a raw byte range (off..len) verbatim    */
+    TDEFER_CLOSE, /* close the open output row (stream end/submit) */
+};
+
+typedef struct TuiDefer
+{
+    unsigned char type;
+    int stream_idx; /* 0..n_user; TDEFER_* use it to find the stream */
+    TuiBlockKind kind;
+    size_t off, len;
+    int image_id;
+} TuiDefer;
 
 struct TuiTranscript
 {
@@ -207,6 +236,20 @@ struct TuiTranscript
                          * terminal profile (see commit_gated) */
     unsigned long commit_count;
 
+    /* IMAGE tier: a copy of the runtime's profile verdict, refreshed at
+     * every commit pass (copied, not borrowed: the runtime may be torn
+     * down before the transcript, and emission reads it at freeze
+     * time). image_seq assigns TuiBlock.image_id (monotonic for the
+     * transcript's lifetime — never reset by clear, so kitty i= ids
+     * are never re-used). */
+    TuiTerminalProfile profile;
+    unsigned long image_seq;
+
+    /* deferred units (the IMAGE gate's hold), in freeze order */
+    TuiDefer *defer;
+    size_t defer_len, defer_cap;
+    int draining; /* inside defer_drain: enqueue checks are bypassed */
+
     /* live planner scratch (reused; see memory-reuse principle) */
     DynamicBuffer *live_scratch;
     size_t *row_starts;
@@ -217,9 +260,15 @@ struct TuiTranscript
 /* Forward declarations for the block-mode helpers (used by
  * process_line, defined below it). */
 static void stream_open_block(TuiTranscript *t, TuiStream *s, size_t off,
-                              size_t end);
+                              size_t end, TuiBlockKind kind);
 static void stream_extend_block(TuiTranscript *t, TuiStream *s, size_t end);
 static void stream_finalize_block(TuiTranscript *t, TuiStream *s);
+static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
+                      size_t off, size_t len, int image_id);
+static void transcript_close_row(TuiTranscript *t);
+static int defer_active(const TuiTranscript *t);
+static int defer_push(TuiTranscript *t, int type, int stream_idx,
+                      TuiBlockKind kind, size_t off, size_t len, int image_id);
 
 /* ------------------------------------------------------------------ */
 /* Display-column accounting                                           */
@@ -416,7 +465,15 @@ static void stream_stage_range(TuiTranscript *t, TuiStream *s, size_t upto)
     if (upto > s->raw->len)
         upto = s->raw->len;
     if (s->stage_pos < upto) {
-        stage_bytes(t, s->raw->data + s->stage_pos, upto - s->stage_pos);
+        if (defer_active(t)) {
+            /* the gate holds units in freeze order; byte ranges defer
+             * with them (referencing the raw buffer, which cannot be
+             * trimmed while the queue is non-empty) */
+            defer_push(t, TDEFER_BYTES, (int)(s - t->streams),
+                       TUI_BLOCK_RAW, s->stage_pos, upto - s->stage_pos, 0);
+        } else {
+            stage_bytes(t, s->raw->data + s->stage_pos, upto - s->stage_pos);
+        }
         s->stage_pos = upto;
     }
 }
@@ -643,7 +700,14 @@ void tui_row_end(TuiRowSink *s)
     if (!s)
         return;
     if (s->dest == SINK_COMMIT) {
-        sink_row_break(s); /* appends \r\n, closes the row */
+        /* An image row reserves N screen rows: the row terminators
+         * (and the transcript's row accounting) cover all of them, so
+         * the cursor lands exactly one row below the image and the
+         * next unit starts under it. */
+        int n = s->image_rows > 0 ? s->image_rows : 1;
+        s->image_rows = 0;
+        for (int k = 0; k < n; k++)
+            sink_row_break(s); /* appends \r\n, closes the row */
         return;
     }
     sink_record_row(s);
@@ -651,12 +715,204 @@ void tui_row_end(TuiRowSink *s)
     s->col = 0;
 }
 
+void tui_image_spec_init(TuiImageSpec *spec, TuiImageTransport transport,
+                         TuiImageFormat format, const unsigned char *data,
+                         size_t data_len, int src_w, int src_h, int disp_cols,
+                         int disp_rows, int image_id)
+{
+    if (!spec)
+        return;
+    memset(spec, 0, sizeof(*spec));
+    spec->transport = transport;
+    spec->format = format;
+    spec->data = data;
+    spec->data_len = data_len;
+    spec->src_w = src_w;
+    spec->src_h = src_h;
+    spec->disp_cols = disp_cols > 0 ? disp_cols : 1;
+    spec->disp_rows = disp_rows > 0 ? disp_rows : 1;
+    spec->image_id = image_id;
+}
+
+/* ------------------------------------------------------------------ */
+/* Image transports                                                    */
+/* ------------------------------------------------------------------ */
+
+/* Raw source bytes per 4096-byte base64 chunk (kitty's documented
+ * chunk ceiling; base64 grows 3 -> 4, and every chunk but the last
+ * must be a multiple of 4 bytes of encoded output, which 3072 raw
+ * bytes guarantees). */
+#define IMG_KITTY_CHUNK_RAW 3072
+
+/* kitty graphics protocol: APC G <keys> ; <base64 chunk> ST, keys on
+ * the first chunk only, m=1/m=0 chunk framing. f=100 = PNG (kitty
+ * decodes the container; JPEG/GIF do not ride this protocol). c/r =
+ * display size in cells — both given, so the layout is ours, not the
+ * terminal's; kitty letterboxes any aspect drift. C=1: the terminal
+ * must NOT move the cursor itself (we reserve rows with our own row
+ * terminators — the byte accounting stays ours). q=2: no reply unless
+ * the load fails (an unsolicited reply is dropped by the input
+ * parser's reply ring anyway; the probe owns that slot). */
+static void image_write_kitty(TuiRowSink *s, const TuiImageSpec *spec)
+{
+    if (spec->format != TUI_IMAGE_PNG)
+        return; /* only PNG rides f=100; the app's tier choice guards it */
+
+    char head[128];
+    int more = spec->data_len > IMG_KITTY_CHUNK_RAW;
+    int hl = snprintf(head, sizeof(head), "\x1b_Gf=100,q=2,C=1,c=%d,r=%d,i=%d%s;",
+                      spec->disp_cols, spec->disp_rows, spec->image_id > 0 ? spec->image_id : 1,
+                      more ? ",m=1" : "");
+    if (hl <= 0)
+        return;
+
+    size_t off = 0;
+    for (;;) {
+        size_t take = spec->data_len - off;
+        if (take > IMG_KITTY_CHUNK_RAW)
+            take = IMG_KITTY_CHUNK_RAW;
+        dynamic_buffer_append(s->buf, head, (size_t)hl);
+        char b64[BOBA_BASE64_ENCODED_LEN(IMG_KITTY_CHUNK_RAW)];
+        size_t enc = boba_base64_encode(spec->data + off, take, b64,
+                                        sizeof(b64));
+        if (enc)
+            dynamic_buffer_append(s->buf, b64, enc);
+        dynamic_buffer_append_str(s->buf, "\x1b\\");
+        off += take;
+        if (off >= spec->data_len)
+            break;
+        /* subsequent chunks: only m (and optionally q) keys */
+        int last = off + IMG_KITTY_CHUNK_RAW >= spec->data_len;
+        hl = snprintf(head, sizeof(head), "\x1b_Gq=2,m=%s;",
+                      last ? "0" : "1");
+        if (hl <= 0)
+            return;
+    }
+}
+
+/* iTerm2 inline images: OSC 1337 ; File=inline=1 ; size=<decoded> ;
+ * width=<cells> ; height=<cells> : <base64> BEL. width/height in
+ * character cells, both explicit, so the row reservation matches what
+ * we frame. iTerm2 decodes PNG/JPEG/GIF itself. One OSC carries the
+ * whole payload (iTerm2 has no chunked form; the 4 MiB staged cap
+ * bounds it). */
+static void image_write_iterm2(TuiRowSink *s, const TuiImageSpec *spec)
+{
+    char head[128];
+    int hl = snprintf(head, sizeof(head),
+                      "\x1b]1337;File=inline=1;size=%zu;width=%d;height=%d:",
+                      spec->data_len, spec->disp_cols, spec->disp_rows);
+    if (hl <= 0)
+        return;
+    dynamic_buffer_append(s->buf, head, (size_t)hl);
+
+    size_t off = 0;
+    while (off < spec->data_len) {
+        size_t take = spec->data_len - off;
+        if (take > IMG_KITTY_CHUNK_RAW)
+            take = IMG_KITTY_CHUNK_RAW; /* just an encoding batch size */
+        char b64[BOBA_BASE64_ENCODED_LEN(IMG_KITTY_CHUNK_RAW)];
+        size_t enc =
+            boba_base64_encode(spec->data + off, take, b64, sizeof(b64));
+        if (enc)
+            dynamic_buffer_append(s->buf, b64, enc);
+        off += take;
+    }
+    dynamic_buffer_append(s->buf, "\x07", 1);
+}
+
 void tui_row_image(TuiRowSink *s, const TuiImageSpec *spec)
 {
-    /* Image transport lands with the image tier (see stream.h). Until
-     * then IMAGE blocks degrade to their text via render_block. */
-    (void)s;
-    (void)spec;
+    if (!s || !spec)
+        return;
+    if (s->dest != SINK_COMMIT) {
+        /* The live region renders placeholders, never images: every
+         * frame would re-transmit the payload. The assert names the
+         * contract violation in debug builds; release drops it. */
+        assert(!"tui_row_image called on the live/count sink");
+        return;
+    }
+    sink_note_row_start(s);
+    switch (spec->transport) {
+    case TUI_IMAGE_KITTY:
+        image_write_kitty(s, spec);
+        break;
+    case TUI_IMAGE_ITERM2:
+        image_write_iterm2(s, spec);
+        break;
+    default:
+        break;
+    }
+    s->open = 1;
+    s->image_rows = spec->disp_rows > 0 ? spec->disp_rows : 1;
+    s->col += spec->disp_cols > 0 ? spec->disp_cols : 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Deferred emission units (the IMAGE gate's hold)                     */
+/* ------------------------------------------------------------------ */
+
+/* Enqueue one hold record. Returns 0 on success, -1 when the queue
+ * cannot grow (the caller renders its degraded fallback instead —
+ * guarantees beat OOM silence). */
+static int defer_push(TuiTranscript *t, int type, int stream_idx,
+                      TuiBlockKind kind, size_t off, size_t len, int image_id)
+{
+    if (t->defer_len == t->defer_cap) {
+        size_t ncap = t->defer_cap ? t->defer_cap * 2 : 8;
+        TuiDefer *nd = realloc(t->defer, ncap * sizeof(*nd));
+        if (!nd)
+            return -1;
+        t->defer = nd;
+        t->defer_cap = ncap;
+    }
+    TuiDefer *d = &t->defer[t->defer_len++];
+    d->type = (unsigned char)type;
+    d->stream_idx = stream_idx;
+    d->kind = kind;
+    d->off = off;
+    d->len = len;
+    d->image_id = image_id;
+    return 0;
+}
+
+/* Should staging defer right now? TRUE only while the gate holds
+ * units (and never inside the drain, which replays the queue). */
+static int defer_active(const TuiTranscript *t)
+{
+    return !t->draining && t->defer_len > 0;
+}
+
+/* Replay every held unit in freeze order, now that the profile has a
+ * verdict. Rendering and byte staging run through their normal paths
+ * with the enqueue checks disarmed (t->draining). */
+static void defer_drain(TuiTranscript *t)
+{
+    t->draining = 1;
+    for (size_t i = 0; i < t->defer_len; i++) {
+        TuiDefer *d = &t->defer[i];
+        TuiStream *s = d->stream_idx >= 0 ? &t->streams[d->stream_idx] : NULL;
+        switch (d->type) {
+        case TDEFER_CLOSE:
+            transcript_close_row(t);
+            break;
+        case TDEFER_BYTES:
+            if (s && d->len > 0) {
+                /* clamp to what the buffer still holds: a system-stream
+                 * finalize may have cleared it while the unit was held */
+                size_t avail = s->raw->len > d->off ? s->raw->len - d->off : 0;
+                if (d->len <= avail)
+                    stage_bytes(t, s->raw->data + d->off, d->len);
+            }
+            break;
+        default:
+            if (s)
+                emit_unit(t, s, d->kind, d->off, d->len, d->image_id);
+            break;
+        }
+    }
+    t->defer_len = 0;
+    t->draining = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -690,28 +946,69 @@ static void sink_commit_end(TuiRowSink *s)
 
 /* Render one emission unit (a frozen line or a finalized block). The
  * stream is the config index, or -1 for the system stream (which is
- * byte-emitted and never reaches here). */
+ * byte-emitted and never reaches here). IMAGE units with a measure
+ * callback cannot render until the terminal profile resolves, so an
+ * unresolved profile defers the unit (and everything behind it) to
+ * the commit pass — see the defer queue and commit gate. */
 static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
-                      size_t off, size_t len)
+                      size_t off, size_t len, int image_id)
 {
-    if (!t->cfg.render_block)
-        return;
+    /* order-preserving hold: anything freezing while an IMAGE unit
+     * waits for the profile defers behind it (guarantee 4) */
+    if (!t->draining &&
+        (t->defer_len > 0 ||
+         (kind == TUI_BLOCK_IMAGE && t->cfg.measure_image &&
+          !t->profile.resolved))) {
+        if (defer_push(t, TDEFER_UNIT, (int)(s - t->streams), kind, off, len,
+                       image_id) == 0)
+            return;
+        /* fall through: allocation failed — render degraded below */
+    }
+
     TuiBlock blk;
     memset(&blk, 0, sizeof(blk));
     blk.kind = kind;
     blk.state = TUI_BLOCK_FINAL;
     blk.off = off;
     blk.len = len;
+    blk.image_id = image_id;
     blk.stream = s->cls ? (int)(s - t->streams) : -1;
 
     /* An image's row reservation depends on the terminal profile
-     * (graphics tier, cell size), so once an IMAGE unit is staged the
-     * commit waits for the probe's verdict — see
-     * tui_transcript_commit_gated(). One-way latch: the profile
-     * resolves once, so subsequent batches are never gated. */
+     * (graphics tier, cell size), so an IMAGE unit waits for the
+     * probe's verdict — see tui_transcript_commit_gated(). One-way
+     * latch: the profile resolves once, so subsequent batches are
+     * never gated. */
     if (kind == TUI_BLOCK_IMAGE)
         t->image_pending = 1;
 
+    /* IMAGE tier: measure with the (resolved) profile, then render
+     * through render_image. Measure's 0, or no measure callback,
+     * degrades to render_block (the app's marker). */
+    if (kind == TUI_BLOCK_IMAGE && t->cfg.measure_image &&
+        t->profile.resolved) {
+        int rows = 0;
+        if (t->cfg.measure_image(&blk, s->raw->data + off, len, &t->profile,
+                                 &rows, t->cfg.user_data) &&
+            rows >= 1) {
+            if (t->cfg.render_image) {
+                TuiRowSink sink;
+                sink_commit_begin(t, &sink);
+                t->cfg.render_image(&blk, s->raw->data + off, len, sink.width,
+                                    rows, &sink, t->cfg.user_data);
+                sink_commit_end(&sink);
+                /* unit rows always end terminated */
+                t->row_open = 0;
+                t->row_col = 0;
+                t->esc.state = 0;
+                t->esc.len = 0;
+            }
+            return;
+        }
+    }
+
+    if (!t->cfg.render_block)
+        return;
     TuiRowSink sink;
     sink_commit_begin(t, &sink);
     t->cfg.render_block(&blk, s->raw->data + off, len, sink.width, &sink,
@@ -729,15 +1026,14 @@ static void stream_freeze_pend(TuiTranscript *t, TuiStream *s)
 {
     if (!s->has_pend)
         return;
-    emit_unit(t, s, s->pend_kind, s->pend_off, s->pend_len);
+    emit_unit(t, s, s->pend_kind, s->pend_off, s->pend_len, 0);
     s->has_pend = 0;
 }
 
-/* Block-mode (table) helpers. */
+/* Block-mode (table, image) helpers. */
 static void stream_open_block(TuiTranscript *t, TuiStream *s, size_t off,
-                              size_t end)
+                              size_t end, TuiBlockKind kind)
 {
-    (void)t;
     if (end <= off) {
         s->has_block = 0;
         return;
@@ -745,7 +1041,9 @@ static void stream_open_block(TuiTranscript *t, TuiStream *s, size_t off,
     s->has_block = 1;
     s->block_off = off;
     s->block_len = end - off;
-    s->block_kind = TUI_BLOCK_TABLE;
+    s->block_kind = kind;
+    if (kind == TUI_BLOCK_IMAGE)
+        s->block_image_id = (int)++t->image_seq;
     s->has_pend = 0;
 }
 
@@ -760,7 +1058,8 @@ static void stream_finalize_block(TuiTranscript *t, TuiStream *s)
 {
     if (!s->has_block)
         return;
-    emit_unit(t, s, s->block_kind, s->block_off, s->block_len);
+    emit_unit(t, s, s->block_kind, s->block_off, s->block_len,
+              s->block_image_id);
     s->has_block = 0;
 }
 
@@ -788,7 +1087,7 @@ static void process_line(TuiTranscript *t, TuiStream *s, size_t ls, size_t le,
              * each completed line; verdicts matter only for CLOSE */
             if (v == TUI_LINE_CONTAINER_CLOSE) {
                 stream_freeze_pend(t, s);
-                emit_unit(t, s, s->container_kind, ls, llen);
+                emit_unit(t, s, s->container_kind, ls, llen, 0);
                 s->in_container = 0;
                 s->cur_kind = TUI_BLOCK_PARAGRAPH;
             } else {
@@ -820,8 +1119,8 @@ static void process_line(TuiTranscript *t, TuiStream *s, size_t ls, size_t le,
         if (s->has_block)
             stream_finalize_block(t, s);
         stream_freeze_pend(t, s);
-        if (okind == TUI_BLOCK_TABLE) {
-            stream_open_block(t, s, ls, end);
+        if (okind == TUI_BLOCK_TABLE || okind == TUI_BLOCK_IMAGE) {
+            stream_open_block(t, s, ls, end, okind);
         } else if (okind == TUI_BLOCK_FENCE_PLAIN || okind == TUI_BLOCK_RAW) {
             s->in_container = 1;
             s->container_byte = 1;
@@ -861,10 +1160,13 @@ static void process_line(TuiTranscript *t, TuiStream *s, size_t ls, size_t le,
             }
             size_t before = s->prev_off - s->block_off;
             if (before > 0)
-                emit_unit(t, s, s->block_kind, s->block_off, before);
+                emit_unit(t, s, s->block_kind, s->block_off, before,
+                          s->block_image_id);
             s->block_off = s->prev_off;
             s->block_len = end - s->block_off;
             s->block_kind = okind;
+            if (okind == TUI_BLOCK_IMAGE)
+                s->block_image_id = (int)++t->image_seq;
             s->cur_kind = TUI_BLOCK_PARAGRAPH;
             break;
         }
@@ -879,11 +1181,11 @@ static void process_line(TuiTranscript *t, TuiStream *s, size_t ls, size_t le,
         }
         if (okind == TUI_BLOCK_TABLE) {
             /* header (prev) + delimiter (line) open the table */
-            stream_open_block(t, s, s->pend_off, end);
+            stream_open_block(t, s, s->pend_off, end, okind);
         } else {
             /* line-mode reclass (e.g. setext): the pair is one unit */
             size_t off = s->pend_off;
-            emit_unit(t, s, okind, off, end - off);
+            emit_unit(t, s, okind, off, end - off, 0);
             s->has_pend = 0;
         }
         s->cur_kind = TUI_BLOCK_PARAGRAPH;
@@ -1096,25 +1398,42 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
     if (!t || !rt)
         return 0;
 
-    /* Commit gate: staged bytes carrying an IMAGE unit wait for the
-     * terminal profile (the batch is held in `staging` untouched —
-     * trimming and emission happen only after a write). The cap is a
-     * memory bound only: past it the profile resolves conservatively
-     * (no graphics -> the app's degradation markers) and the batch
-     * goes out. */
-    if (tui_transcript_commit_gated(t) &&
-        !tui_runtime_terminal_profile(rt)->resolved) {
+    /* The profile is the runtime's; refresh our copy for this pass
+     * (the IMAGE tier reads it at emission). */
+    t->profile = *tui_runtime_terminal_profile(rt);
+
+    /* Gate 1 — deferred IMAGE units: rendering depends on the profile
+     * (the transport choice), so the held units (in freeze order,
+     * see the defer queue) cannot be rendered until a verdict exists.
+     * probe_ensure reaches one immediately when no probe was declared
+     * (an embedding with no view); an outstanding probe resolves on
+     * its 250 ms deadline via the tick, so the hold is bounded. */
+    if (t->defer_len > 0 && !t->profile.resolved) {
+        tui_runtime_probe_ensure(rt);
+        t->profile = *tui_runtime_terminal_profile(rt);
+        if (!t->profile.resolved)
+            return 0;
+    }
+
+    /* Gate 2 — legacy staged IMAGE bytes (measure_image absent): the
+     * batch is held in `staging` untouched — trimming and emission
+     * happen only after a write. The cap is a memory bound only: past
+     * it the profile resolves conservatively (no graphics -> the
+     * app's degradation markers) and the batch goes out. */
+    if (tui_transcript_commit_gated(t) && !t->profile.resolved) {
         if (tui_transcript_staged_bytes(t) < TUI_TRANSCRIPT_STAGED_CAP) {
             /* A verdict is required, but reaching it is the runtime's
              * job: if no probe is outstanding (the component never
              * declared one / has no view), resolve conservatively now
              * rather than hold the batch forever. */
             tui_runtime_probe_ensure(rt);
-            if (!tui_runtime_terminal_profile(rt)->resolved)
+            t->profile = *tui_runtime_terminal_profile(rt);
+            if (!t->profile.resolved)
                 return 0;
         } else {
             tui_runtime_probe_check(rt);
-            if (!tui_runtime_terminal_profile(rt)->resolved)
+            t->profile = *tui_runtime_terminal_profile(rt);
+            if (!t->profile.resolved)
                 return 0;
         }
     }
@@ -1127,6 +1446,8 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
         t->esc.state = 0;
         t->esc.len = 0;
     }
+    if (t->defer_len > 0)
+        defer_drain(t);
     if (t->staging->len == 0)
         return 0;
 
@@ -1235,6 +1556,7 @@ static void stream_reset(TuiTranscript *t, TuiStream *s)
     s->has_block = 0;
     s->block_off = s->block_len = 0;
     s->block_kind = TUI_BLOCK_PARAGRAPH;
+    s->block_image_id = 0;
     s->cur_kind = TUI_BLOCK_PARAGRAPH;
     if (s->cls && s->cls->reset)
         s->cls->reset(s->cls->state);
@@ -1302,6 +1624,7 @@ void tui_transcript_free(TuiTranscript *t)
     }
     dynamic_buffer_destroy(t->staging);
     dynamic_buffer_destroy(t->live_scratch);
+    free(t->defer);
     free(t->row_starts);
     free(t->row_ends);
     free(t);
@@ -1340,9 +1663,15 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
             msg.data.stream.len == 0)
             return tui_update_result_none();
         TuiStream *s = &t->streams[t->n_user];
+        size_t off = s->raw->len;
         dynamic_buffer_append(s->raw, msg.data.stream.text,
                               msg.data.stream.len);
-        stage_bytes(t, msg.data.stream.text, msg.data.stream.len);
+        if (defer_active(t)) {
+            defer_push(t, TDEFER_BYTES, (int)t->n_user, TUI_BLOCK_RAW, off,
+                       msg.data.stream.len, 0);
+        } else {
+            stage_bytes(t, msg.data.stream.text, msg.data.stream.len);
+        }
         return tui_update_result_none();
     }
 
@@ -1354,7 +1683,10 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
         stream_finalize(t, s);
         if (s->cls && s->cls->reset)
             s->cls->reset(s->cls->state);
-        transcript_close_row(t);
+        if (defer_active(t))
+            defer_push(t, TDEFER_CLOSE, -1, TUI_BLOCK_PARAGRAPH, 0, 0, 0);
+        else
+            transcript_close_row(t);
         return tui_update_result_none();
     }
 
@@ -1363,19 +1695,27 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
         /* finalize every LIVE block across all streams; no echo */
         for (size_t i = 0; i <= t->n_user; i++)
             stream_finalize(t, &t->streams[i]);
-        transcript_close_row(t);
+        if (defer_active(t))
+            defer_push(t, TDEFER_CLOSE, -1, TUI_BLOCK_PARAGRAPH, 0, 0, 0);
+        else
+            transcript_close_row(t);
         return tui_update_result_none();
     }
 
     case TUI_MSG_TRANSCRIPT_CLEAR:
     {
-        /* new chat: reset everything; emit nothing */
+        /* new chat: reset everything; emit nothing. Held (deferred)
+         * units are dropped with their bytes — the streams reset
+         * below. image_seq is deliberately NOT reset: kitty i= ids
+         * must never be re-used while the old images are still in the
+         * scrollback. */
         if (t->row_open)
             t->orphan_partial = 1;
         t->row_open = 0;
         t->row_col = 0;
         t->esc.state = 0;
         t->esc.len = 0;
+        t->defer_len = 0;
         dynamic_buffer_clear(t->staging);
         for (size_t i = 0; i <= t->n_user; i++)
             stream_reset(t, &t->streams[i]);
@@ -1459,6 +1799,7 @@ static int live_plan(const TuiTranscript *tc, DynamicBuffer *out, int width,
                 blk.state = TUI_BLOCK_LIVE;
                 blk.off = s->block_off;
                 blk.len = s->block_len;
+                blk.image_id = s->block_image_id;
                 blk.stream = (int)i;
                 t->cfg.render_live(&blk, s->raw->data + s->block_off,
                                    s->block_len, w, cap, &sink,
@@ -1534,7 +1875,11 @@ size_t tui_transcript_staged_bytes(const TuiTranscript *t)
 
 int tui_transcript_commit_gated(const TuiTranscript *t)
 {
-    if (!t || !t->image_pending)
+    if (!t)
+        return 0;
+    if (t->defer_len > 0)
+        return 1; /* unresolved-profile IMAGE units are held (the queue) */
+    if (!t->image_pending)
         return 0;
     return tui_transcript_staged_bytes(t) > 0;
 }
