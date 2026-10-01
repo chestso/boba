@@ -318,8 +318,9 @@ typedef struct TuiTranscriptConfig
      * behind it, so emission order survives. Returns 1 with *out_rows
      * >= 1 to render as an image (render_image then runs), 0 to fall
      * back to render_block (degradation marker). NULL measure_image
-     * => IMAGE blocks degrade to their text immediately, with no
-     * gate (the legacy behavior). */
+     * => IMAGE blocks degrade to their text at freeze time, UNGATED:
+     * nothing about a text-degraded unit's rendering depends on the
+     * profile, so there is nothing to wait for. */
     int (*measure_image)(const TuiBlock *, const char *text, size_t len,
                          const TuiTerminalProfile *profile, int *out_rows,
                          void *user_data);
@@ -387,14 +388,6 @@ void tui_transcript_view(const TuiTranscript *t, DynamicBuffer *out, int width,
  * implementation to drift), for footer/cursor placement. */
 int tui_transcript_live_rows(const TuiTranscript *t, int width, int rows_cap);
 
-/* Safety cap on bytes held by the IMAGE commit gate: a pathological
- * block larger than this forces the probe to resolve conservatively
- * rather than let the staging buffer grow for the whole session.
- * Memory bound only — correctness is unaffected. Sized above the app
- * policy's worst legal image batch (a ~1 MiB payload base64-encodes
- * to ~1.37 MiB plus marker rows), so a legal image never trips it. */
-#define TUI_TRANSCRIPT_STAGED_CAP (4 * 1024 * 1024)
-
 /* ----- Test / introspection seams ----- */
 
 /* Number of transcript_write batches driven by the commit pass. */
@@ -411,9 +404,8 @@ size_t tui_transcript_stream_raw_len(const TuiTranscript *t, int stream_id);
  * tui_transcript_commit_gated instead. */
 size_t tui_transcript_staged_bytes(const TuiTranscript *t);
 
-/* 1 while the commit pass is holding an IMAGE unit for the terminal
- * profile (staged legacy bytes, or deferred units whose rendering
- * waits on the probe's verdict). */
+/* 1 while the commit pass is holding IMAGE units for the terminal
+ * profile's verdict (the defer queue). */
 int tui_transcript_commit_gated(const TuiTranscript *t);
 
 #endif /* BOBA_STREAM_H */

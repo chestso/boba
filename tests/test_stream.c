@@ -1360,47 +1360,51 @@ static const TuiClassifier image_cls = {
     .reset = NULL,
 };
 
-static void test_image_unit_gated_until_profile(void)
+static void test_image_without_measure_is_ungated(void)
 {
+    /* measure_image is NULL: the IMAGE unit degrades to its text at
+     * freeze time and is NOT gated — nothing about a text-degraded
+     * unit's rendering depends on the profile, so an outstanding
+     * (unanswered) probe must not hold the batch. */
     TuiStreamSpec streams[1] = { { "content" } };
     const TuiClassifier *classifiers[1] = { &image_cls };
-    H *h = h_new(streams, classifiers, 1);
+    H *h = h_new(streams, classifiers, 1); /* no measure installed */
     assert(h);
 
-    /* stage the IMAGE unit: it must NOT commit while the profile is
-     * unresolved (no probe declared on this harness's view) */
+    h->rt->probe_state = 2; /* outstanding, not yet due       */
+    h->rt->probe_deadline_ms = 0;
     h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
-    h->rt->probe_state = 2;       /* pretend an outstanding probe */
-    h->rt->probe_deadline_ms = 0; /* not yet due */
-    h_flush(h);
-    assert(tui_transcript_commit_count(h->t) == 0);
-    assert(tui_transcript_staged_bytes(h->t) > 0);
-    assert(tui_transcript_commit_gated(h->t) == 1);
-
-    /* the profile resolves: the held batch goes out */
-    h->rt->probe_state = 3;
-    h->rt->profile.resolved = 1;
     h_flush(h);
     assert(tui_transcript_commit_count(h->t) == 1);
-    assert(strstr(h_read(h), "R|!img") != NULL);
-    assert(tui_transcript_staged_bytes(h->t) == 0);
+    assert(tui_transcript_commit_gated(h->t) == 0);
+    assert(strstr(h_read(h), "R|!img a:b") != NULL);
 
     h_free(h);
 }
 
-static void test_image_gate_does_not_deadlock_unclaimed(void)
+static void test_image_defer_resolves_when_no_probe_declared(void)
 {
-    /* No probe was ever declared: the gate must resolve conservatively
-     * and commit rather than hold the batch forever. */
+    /* measure_image installed but no probe was ever declared (the
+     * component has no view / forgot the declaration): probe_ensure
+     * must reach a conservative verdict immediately — the held units
+     * degrade, and the batch never deadlocks. */
     TuiStreamSpec streams[1] = { { "content" } };
     const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
     H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
     assert(h);
+    /* probe_state stays 0: nothing ever declared one */
 
     h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
     h_flush(h);
     assert(tui_transcript_commit_count(h->t) == 1);
-    assert(strstr(h_read(h), "R|!img") != NULL);
+    assert(tui_transcript_commit_gated(h->t) == 0);
+    /* the conservative verdict ran measure, which refused (no
+     * graphics), so the app's render_block marker committed */
+    assert(g_img_calls == 1);
+    assert(g_img_block_calls == 1);
+    assert(strstr(h_read(h), "R|!img a:b") != NULL);
 
     h_free(h);
 }
@@ -1781,9 +1785,9 @@ int main(void)
     RUN_TEST(test_resize_live_relayout);
     RUN_TEST(test_split_escape_sequence_passthrough);
     RUN_TEST(test_no_bare_lf_anywhere);
-    RUN_TEST(test_image_unit_gated_until_profile);
-    RUN_TEST(test_image_gate_does_not_deadlock_unclaimed);
     RUN_TEST(test_non_image_never_gated);
+    RUN_TEST(test_image_without_measure_is_ungated);
+    RUN_TEST(test_image_defer_resolves_when_no_probe_declared);
     RUN_TEST(test_image_kitty_golden_bytes);
     RUN_TEST(test_image_iterm2_golden_bytes);
     RUN_TEST(test_image_row_reservation_bounds_the_next_unit);

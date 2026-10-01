@@ -232,8 +232,6 @@ struct TuiTranscript
     EscScan esc;  /* split escape scan state (see above) */
 
     int orphan_partial; /* clear() while a row was open: forget, emit nothing */
-    int image_pending;  /* an IMAGE unit is staged: commit waits for the
-                         * terminal profile (see commit_gated) */
     unsigned long commit_count;
 
     /* IMAGE tier: a copy of the runtime's profile verdict, refreshed at
@@ -974,14 +972,6 @@ static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
     blk.image_id = image_id;
     blk.stream = s->cls ? (int)(s - t->streams) : -1;
 
-    /* An image's row reservation depends on the terminal profile
-     * (graphics tier, cell size), so an IMAGE unit waits for the
-     * probe's verdict — see tui_transcript_commit_gated(). One-way
-     * latch: the profile resolves once, so subsequent batches are
-     * never gated. */
-    if (kind == TUI_BLOCK_IMAGE)
-        t->image_pending = 1;
-
     /* IMAGE tier: measure with the (resolved) profile, then render
      * through render_image. Measure's 0, or no measure callback,
      * degrades to render_block (the app's marker). */
@@ -1402,40 +1392,20 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
      * (the IMAGE tier reads it at emission). */
     t->profile = *tui_runtime_terminal_profile(rt);
 
-    /* Gate 1 — deferred IMAGE units: rendering depends on the profile
-     * (the transport choice), so the held units (in freeze order,
-     * see the defer queue) cannot be rendered until a verdict exists.
-     * probe_ensure reaches one immediately when no probe was declared
-     * (an embedding with no view); an outstanding probe resolves on
-     * its 250 ms deadline via the tick, so the hold is bounded. */
+    /* The IMAGE gate: deferred IMAGE units cannot render until the
+     * profile has a verdict (the transport choice comes from it), so
+     * the held units — in freeze order, see the defer queue — wait
+     * here. probe_ensure reaches one immediately when no probe was
+     * declared (an embedding with no view); an outstanding probe
+     * resolves on its 250 ms deadline via the tick, so the hold is
+     * bounded. An app without measure_image never defers (nothing
+     * about a text-degraded IMAGE unit depends on the profile), so
+     * it is never gated. */
     if (t->defer_len > 0 && !t->profile.resolved) {
         tui_runtime_probe_ensure(rt);
         t->profile = *tui_runtime_terminal_profile(rt);
         if (!t->profile.resolved)
             return 0;
-    }
-
-    /* Gate 2 — legacy staged IMAGE bytes (measure_image absent): the
-     * batch is held in `staging` untouched — trimming and emission
-     * happen only after a write. The cap is a memory bound only: past
-     * it the profile resolves conservatively (no graphics -> the
-     * app's degradation markers) and the batch goes out. */
-    if (tui_transcript_commit_gated(t) && !t->profile.resolved) {
-        if (tui_transcript_staged_bytes(t) < TUI_TRANSCRIPT_STAGED_CAP) {
-            /* A verdict is required, but reaching it is the runtime's
-             * job: if no probe is outstanding (the component never
-             * declared one / has no view), resolve conservatively now
-             * rather than hold the batch forever. */
-            tui_runtime_probe_ensure(rt);
-            t->profile = *tui_runtime_terminal_profile(rt);
-            if (!t->profile.resolved)
-                return 0;
-        } else {
-            tui_runtime_probe_check(rt);
-            t->profile = *tui_runtime_terminal_profile(rt);
-            if (!t->profile.resolved)
-                return 0;
-        }
     }
 
     if (t->orphan_partial) {
@@ -1877,11 +1847,7 @@ int tui_transcript_commit_gated(const TuiTranscript *t)
 {
     if (!t)
         return 0;
-    if (t->defer_len > 0)
-        return 1; /* unresolved-profile IMAGE units are held (the queue) */
-    if (!t->image_pending)
-        return 0;
-    return tui_transcript_staged_bytes(t) > 0;
+    return t->defer_len > 0; /* IMAGE units held for the profile */
 }
 
 size_t tui_transcript_stream_raw_len(const TuiTranscript *t, int stream_id)
