@@ -1463,12 +1463,14 @@ static void test_image_kitty_golden_bytes(void)
     h_flush(h);
     const char *out = h_read(h);
 
-    /* one APC, keys on it (f=100 PNG, cells c/r, quiet, no terminal
-     * cursor move, id 1), the pinned payload, ST, and THREE row
-     * terminators for the three reserved rows */
-    char golden[128];
+    /* one APC, keys on it (a=T transmit-and-display, f=100 PNG, s/v
+     * source pixels, cells c/r, id, quiet, no terminal cursor move),
+     * the pinned payload, ST, and THREE row terminators for the three
+     * reserved rows */
+    char golden[160];
     snprintf(golden, sizeof(golden),
-             "\x1b_Gf=100,q=2,C=1,c=60,r=3,i=1;" IMG_B64 "\x1b\\\r\n\r\n\r\n");
+             "\x1b_Ga=T,f=100,s=8,v=4,c=60,r=3,i=1,q=2,C=1;" IMG_B64
+             "\x1b\\\r\n\r\n\r\n");
     assert(strstr(out, golden) != NULL);
     assert(g_img_calls == 1);
     assert(g_img_rendered == 1);
@@ -1521,7 +1523,7 @@ static void test_image_row_reservation_bounds_the_next_unit(void)
     assert(tui_transcript_commit_count(h->t) == 1);
 
     const char *out = h_read(h);
-    const char *img = strstr(out, "\x1b_Gf=100");
+    const char *img = strstr(out, "\x1b_Ga=T,f=100");
     const char *next = strstr(out, "R|after");
     assert(img && next);
     assert(next > img);
@@ -1564,7 +1566,7 @@ static void test_image_defers_until_profile_resolves(void)
     h_flush(h);
     assert(tui_transcript_commit_count(h->t) == 1);
     const char *out = h_read(h);
-    const char *img = strstr(out, "\x1b_Gf=100");
+    const char *img = strstr(out, "\x1b_Ga=T,f=100");
     const char *tail = strstr(out, "R|tail");
     assert(img && tail && tail > img);
     assert(g_img_calls == 1);
@@ -1616,9 +1618,9 @@ static void test_image_ids_are_monotonic_across_clear(void)
     const char *out = h_read(h);
     /* kitty i= ids 1, 2 then 3: the counter survives the clear, so a
      * re-used id can never replace a scrollback image */
-    assert(strstr(out, "i=1;") != NULL);
-    assert(strstr(out, "i=2;") != NULL);
-    assert(strstr(out, "i=3;") != NULL);
+    assert(strstr(out, "i=1,") != NULL);
+    assert(strstr(out, "i=2,") != NULL);
+    assert(strstr(out, "i=3,") != NULL);
 
     h_free(h);
 }
@@ -1648,7 +1650,7 @@ static void test_image_large_payload_is_chunked(void)
 
     const char *out = h_read(h);
     assert(count_substr(out, "\x1b_G") == 2);
-    assert(strstr(out, "f=100,q=2,C=1,c=60,r=3,i=1,m=1;") != NULL);
+    assert(strstr(out, "a=T,f=100,s=8,v=4,c=60,r=3,i=1,q=2,C=1,m=1;") != NULL);
     assert(strstr(out, "\x1b_Gq=2,m=0;") != NULL);
     /* 4096 encoded bytes in chunk 1 + 1240 in chunk 2: "QUFB" x 1333
      * and the padded one-byte tail, nothing lost */

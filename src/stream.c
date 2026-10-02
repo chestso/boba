@@ -744,22 +744,33 @@ void tui_image_spec_init(TuiImageSpec *spec, TuiImageTransport transport,
 
 /* kitty graphics protocol: APC G <keys> ; <base64 chunk> ST, keys on
  * the first chunk only, m=1/m=0 chunk framing. f=100 = PNG (kitty
- * decodes the container; JPEG/GIF do not ride this protocol). c/r =
- * display size in cells — both given, so the layout is ours, not the
- * terminal's; kitty letterboxes any aspect drift. C=1: the terminal
- * must NOT move the cursor itself (we reserve rows with our own row
- * terminators — the byte accounting stays ours). q=2: no reply unless
- * the load fails (an unsolicited reply is dropped by the input
- * parser's reply ring anyway; the probe owns that slot). */
+ * decodes the container; JPEG/GIF do not ride this protocol). a=T:
+ * transmit AND display — the protocol's default action is a=t, which
+ * only STORES the image, so an omitted a= reserves our rows and shows
+ * nothing (kitty places on 'T' alone; the spec's own chunked sender
+ * carries "a=T,f=100"). c/r = display size in cells — both given, so
+ * the layout is ours, not the terminal's; kitty letterboxes any aspect
+ * drift. s/v = the source pixels: kitty reads the size from the PNG
+ * and ignores them, but they must be PRESENT — a receiver may require
+ * the full transmission key set on the first chunk even for f=100
+ * (coffer, and so portty, rejects a transfer without s/v as
+ * "EINVAL:missing format/dimensions"). C=1: the terminal must NOT move
+ * the cursor itself (we reserve rows with our own row terminators —
+ * the byte accounting stays ours). q=2: no reply unless the load fails
+ * (an unsolicited reply is dropped by the input parser's reply ring
+ * anyway; the probe owns that slot). */
 static void image_write_kitty(TuiRowSink *s, const TuiImageSpec *spec)
 {
     if (spec->format != TUI_IMAGE_PNG)
         return; /* only PNG rides f=100; the app's tier choice guards it */
 
-    char head[128];
+    char head[160];
     int more = spec->data_len > IMG_KITTY_CHUNK_RAW;
-    int hl = snprintf(head, sizeof(head), "\x1b_Gf=100,q=2,C=1,c=%d,r=%d,i=%d%s;",
-                      spec->disp_cols, spec->disp_rows, spec->image_id > 0 ? spec->image_id : 1,
+    int hl = snprintf(head, sizeof(head),
+                      "\x1b_Ga=T,f=100,s=%d,v=%d,c=%d,r=%d,i=%d,q=2,C=1%s;",
+                      spec->src_w, spec->src_h, spec->disp_cols,
+                      spec->disp_rows,
+                      spec->image_id > 0 ? spec->image_id : 1,
                       more ? ",m=1" : "");
     if (hl <= 0)
         return;
