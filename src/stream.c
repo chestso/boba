@@ -803,8 +803,8 @@ static void image_write_kitty(TuiRowSink *s, const TuiImageSpec *spec)
  * width=<cells> ; height=<cells> : <base64> BEL. width/height in
  * character cells, both explicit, so the row reservation matches what
  * we frame. iTerm2 decodes PNG/JPEG/GIF itself. One OSC carries the
- * whole payload (iTerm2 has no chunked form; the 4 MiB staged cap
- * bounds it). */
+ * whole payload (iTerm2 has no chunked form); the app's attach cap is
+ * what bounds it. */
 static void image_write_iterm2(TuiRowSink *s, const TuiImageSpec *spec)
 {
     char head[128];
