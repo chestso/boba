@@ -24,17 +24,25 @@
 #define MIN_POPUP_WIDTH       20
 #define BORDER_PADDING        1 /* space between border and content */
 #define BAR_WIDTH             1 /* left accent bar width */
+#define META_GAP              1 /* min cols between item text and meta */
 
 /* ===== item storage ===== */
 
 static void free_items(TuiListPopup *p)
 {
-    if (!p->items)
-        return;
-    for (int i = 0; i < p->item_count; i++)
-        free(p->items[i]);
-    free(p->items);
+    if (p->items) {
+        for (int i = 0; i < p->item_count; i++)
+            free(p->items[i]);
+        free(p->items);
+    }
     p->items = NULL;
+    /* metas is parallel to items (same count), freed together. */
+    if (p->metas) {
+        for (int i = 0; i < p->item_count; i++)
+            free(p->metas[i]);
+        free(p->metas);
+    }
+    p->metas = NULL;
     p->item_count = 0;
     p->capacity = 0;
 }
@@ -152,7 +160,10 @@ static int filtered_to_item(const TuiListPopup *p, int findex)
 
 /* ===== layout (filtered view) ===== */
 
-/* Widest item in the filtered view (drives auto width). */
+/* Widest row in the filtered view (drives auto width). A row is the
+ * item text plus, when the item has metadata, a gap and the meta
+ * string — the meta column is right-aligned, so the widest combined
+ * row sets the width, never a truncated one. */
 static int max_item_display_width(const TuiListPopup *p)
 {
     int max_w = 0;
@@ -160,6 +171,9 @@ static int max_item_display_width(const TuiListPopup *p)
         if (!item_passes_filter(p, p->items[i]))
             continue;
         int w = str_display_width(p->items[i]);
+        const char *meta = p->metas ? p->metas[i] : NULL;
+        if (meta && *meta)
+            w += META_GAP + str_display_width(meta);
         if (w > max_w)
             max_w = w;
     }
@@ -292,6 +306,12 @@ void tui_list_popup_free(TuiListPopup *p)
 void tui_list_popup_set_items(TuiListPopup *p, const char *const *texts,
                               int count)
 {
+    tui_list_popup_set_items_meta(p, texts, NULL, count);
+}
+
+void tui_list_popup_set_items_meta(TuiListPopup *p, const char *const *texts,
+                                   const char *const *metas, int count)
+{
     if (!p)
         return;
 
@@ -320,6 +340,20 @@ void tui_list_popup_set_items(TuiListPopup *p, const char *const *texts,
             return;
         }
         p->item_count++;
+    }
+
+    /* Metadata column: allocate only when the caller offers one, and
+     * only for entries that are non-empty — metas[i] == NULL means
+     * "this item has none". A failed strdup degrades that one entry to
+     * no meta (cosmetic), never a correctness issue. */
+    if (metas) {
+        p->metas = calloc((size_t)count, sizeof(char *));
+        if (p->metas) {
+            for (int i = 0; i < count; i++) {
+                if (metas[i] && metas[i][0])
+                    p->metas[i] = strdup(metas[i]);
+            }
+        }
     }
 
     p->selected = 0;
@@ -537,6 +571,13 @@ void tui_list_popup_set_colors(TuiListPopup *p, TuiColor border_color,
     p->item_color = item_color;
 }
 
+void tui_list_popup_set_meta_color(TuiListPopup *p, TuiColor meta_color)
+{
+    if (!p)
+        return;
+    p->meta_color = meta_color;
+}
+
 /* Helper: emit fg color SGR if color is not NONE */
 static void emit_fg(DynamicBuffer *out, TuiColor c)
 {
@@ -555,6 +596,50 @@ static void emit_bg(DynamicBuffer *out, TuiColor c)
     char buf[32];
     if (tui_color_format_bg(c, buf, sizeof(buf)) > 0)
         dynamic_buffer_append_str(out, buf);
+}
+
+/* Append `s` to `out`, clipped to at most max_cols display columns.
+ * ANSI escape sequences pass through without consuming columns (the
+ * caller may embed styling). Returns the number of display columns
+ * actually emitted. */
+static int emit_clipped(DynamicBuffer *out, const char *s, int max_cols)
+{
+    if (max_cols <= 0)
+        return 0;
+    size_t len = strlen(s);
+    int col = 0;
+    for (size_t i = 0; i < len && col < max_cols; i++) {
+        if ((unsigned char)s[i] == 0x1b && s[i + 1] == '[') {
+            dynamic_buffer_append(out, &s[i], 1);
+            size_t j = i + 1;
+            while (s[j] && !((unsigned char)s[j] >= 'A' &&
+                             (unsigned char)s[j] <= 'Z')) {
+                dynamic_buffer_append(out, &s[j], 1);
+                j++;
+            }
+            if (s[j]) {
+                dynamic_buffer_append(out, &s[j], 1);
+                i = j;
+            }
+        } else {
+            size_t clen = 0;
+            int w = tui_next_cluster(&s[i], len - i, &clen);
+            if (clen < 1)
+                clen = 1;
+            if (col + w > max_cols)
+                break;
+            dynamic_buffer_append(out, &s[i], clen);
+            col += w;
+            i += clen - 1;
+        }
+    }
+    return col;
+}
+
+static void emit_pad(DynamicBuffer *out, int cols)
+{
+    for (int i = 0; i < cols; i++)
+        dynamic_buffer_append_str(out, " ");
 }
 
 void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
@@ -620,47 +705,36 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
         /* 1-space indent after bar */
         dynamic_buffer_append_str(out, " ");
 
-        /* Item text, padded to content_width - 1 (indent) */
+        /* Item text, then right-aligned metadata (when the item has
+         * any), filling the row to exactly text_max columns. The item
+         * text truncates first; the meta column is anchored to the
+         * right edge, so a long id can never push a badge off-screen. */
         int text_max = content_width - 1;
         if (text_max < 1)
             text_max = 1;
 
         const char *item = p->items[idx];
-        int item_w = str_display_width(item);
-        if (item_w > text_max) {
-            size_t item_len = strlen(item);
-            int col = 0;
-            for (size_t i = 0; i < item_len && col < text_max; i++) {
-                if ((unsigned char)item[i] == 0x1b && item[i + 1] == '[') {
-                    dynamic_buffer_append(out, &item[i], 1);
-                    size_t j = i + 1;
-                    while (item[j] && !((unsigned char)item[j] >= 'A' &&
-                                        (unsigned char)item[j] <= 'Z')) {
-                        dynamic_buffer_append(out, &item[j], 1);
-                        j++;
-                    }
-                    if (item[j]) {
-                        dynamic_buffer_append(out, &item[j], 1);
-                        i = j;
-                    }
-                } else {
-                    size_t clen = 0;
-                    int w = tui_next_cluster(&item[i], item_len - i, &clen);
-                    if (clen < 1)
-                        clen = 1;
-                    if (col + w > text_max)
-                        break;
-                    dynamic_buffer_append(out, &item[i], clen);
-                    col += w;
-                    i += clen - 1;
-                }
-            }
-            for (; col < text_max; col++)
-                dynamic_buffer_append_str(out, " ");
-        } else {
-            dynamic_buffer_append_str(out, item);
-            for (int i = item_w; i < text_max; i++)
-                dynamic_buffer_append_str(out, " ");
+        const char *meta = p->metas ? p->metas[idx] : NULL;
+        int meta_w = (meta && *meta) ? str_display_width(meta) : 0;
+
+        int main_max = text_max;
+        if (meta_w > 0) {
+            main_max = text_max - meta_w - META_GAP;
+            if (main_max < 1)
+                main_max = 1;
+        }
+
+        int main_cols = emit_clipped(out, item, main_max);
+        emit_pad(out, main_max - main_cols);
+
+        if (meta_w > 0) {
+            int gap = text_max - main_max - meta_w;
+            if (gap < META_GAP)
+                gap = META_GAP; /* only when narrower than the target */
+            emit_pad(out, gap);
+            if (p->meta_color.type != TUI_COLOR_NONE)
+                emit_fg(out, p->meta_color);
+            emit_clipped(out, meta, text_max - main_max - gap);
         }
 
         dynamic_buffer_append_str(out, SGR_RESET);

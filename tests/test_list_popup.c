@@ -589,6 +589,86 @@ static void test_scroll_follows_selection_up(void)
     tui_list_popup_free(p);
 }
 
+/* ---------- metadata column ---------- */
+
+/* The meta column is display-only: it renders right-aligned per item
+ * and never becomes part of the item's value. */
+
+static void test_meta_column_renders(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta" };
+    const char *metas[] = { "1M", NULL };
+    tui_list_popup_set_items_meta(p, items, metas, 2);
+    tui_list_popup_set_terminal_size(p, 80, 24);
+    tui_list_popup_show(p, 0);
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_list_popup_view(p, buf);
+    const char *data = buf_data(buf);
+    assert(strstr(data, "alpha") != NULL);
+    assert(strstr(data, "beta") != NULL);
+    assert(strstr(data, "1M") != NULL);
+    dynamic_buffer_destroy(buf);
+    tui_list_popup_free(p);
+}
+
+static void test_meta_selected_text_is_item(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "model-id" };
+    const char *metas[] = { "1M 👀" };
+    tui_list_popup_set_items_meta(p, items, metas, 1);
+    tui_list_popup_show(p, 0);
+    assert(strcmp(tui_list_popup_selected_text(p), "model-id") == 0);
+    tui_list_popup_free(p);
+}
+
+static void test_meta_cleared_by_plain_set_items(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha" };
+    const char *metas[] = { "1M" };
+    tui_list_popup_set_items_meta(p, items, metas, 1);
+    const char *next[] = { "beta" };
+    tui_list_popup_set_items(p, next, 1);
+    tui_list_popup_set_terminal_size(p, 80, 24);
+    tui_list_popup_show(p, 0);
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_list_popup_view(p, buf);
+    assert(strstr(buf_data(buf), "1M") == NULL);
+    dynamic_buffer_destroy(buf);
+    tui_list_popup_free(p);
+}
+
+static void test_meta_survives_item_truncation(void)
+{
+    /* A row wider than the popup: the item truncates, the meta does
+     * not (the column is anchored to the right edge). */
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+    const char *metas[] = { "1M" };
+    tui_list_popup_set_items_meta(p, items, metas, 1);
+    tui_list_popup_set_terminal_size(p, 20, 24);
+    tui_list_popup_show(p, 0);
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+    tui_list_popup_view(p, buf);
+    assert(strstr(buf_data(buf), "1M") != NULL);
+    dynamic_buffer_destroy(buf);
+    tui_list_popup_free(p);
+}
+
+static void test_meta_filter_still_matches_items(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta" };
+    const char *metas[] = { "1M", "2M" };
+    tui_list_popup_set_items_meta(p, items, metas, 2);
+    tui_list_popup_set_filter(p, "alp");
+    assert(tui_list_popup_filtered_count(p) == 1);
+    assert(strcmp(tui_list_popup_filtered_text(p, 0), "alpha") == 0);
+    tui_list_popup_free(p);
+}
+
 /* ======================================================================== */
 
 int main(void)
@@ -644,6 +724,13 @@ int main(void)
     RUN_TEST(test_view_hidden_items_not_rendered);
     RUN_TEST(test_scroll_follows_selection_down);
     RUN_TEST(test_scroll_follows_selection_up);
+
+    /* metadata column */
+    RUN_TEST(test_meta_column_renders);
+    RUN_TEST(test_meta_selected_text_is_item);
+    RUN_TEST(test_meta_cleared_by_plain_set_items);
+    RUN_TEST(test_meta_survives_item_truncation);
+    RUN_TEST(test_meta_filter_still_matches_items);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

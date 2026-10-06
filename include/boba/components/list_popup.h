@@ -31,6 +31,16 @@ typedef struct TuiListPopup
     int item_count;
     int capacity;
 
+    /* Optional per-item metadata (owned), parallel to items: metas[i]
+     * is displayed right-aligned in a second column for item i, or
+     * NULL when that item has none. The whole array is NULL when no
+     * item has metadata (the common case) — callers that set metadata
+     * via tui_list_popup_set_items_meta() keep both arrays in step.
+     * The meta column is anchored to the row's right edge: the ITEM
+     * text truncates first, the meta never does (so a long id can
+     * never push a capability badge off-screen). */
+    char **metas;
+
     /* Selection + scrolling */
     int selected;      /* Highlighted index, 0-based; -1 = none */
     int scroll_offset; /* First visible item index */
@@ -64,6 +74,12 @@ typedef struct TuiListPopup
     TuiColor selected_fg;
     TuiColor selected_marker_color;
     TuiColor item_color;
+
+    /* Metadata column foreground (set via
+     * tui_list_popup_set_meta_color). NONE = inherit the row's item /
+     * selected foreground, so an unset meta renders exactly as the
+     * item text does. */
+    TuiColor meta_color;
 } TuiListPopup;
 
 /* Create a new popup. Returns NULL on failure. */
@@ -73,9 +89,19 @@ TuiListPopup *tui_list_popup_create(void);
 void tui_list_popup_free(TuiListPopup *popup);
 
 /* Set items from a NULL-terminated string array. Copies the strings;
- * caller retains ownership of the source array. Passing NULL/0 clears. */
+ * caller retains ownership of the source array. Passing NULL/0 clears.
+ * Clears any metadata set by a previous call. */
 void tui_list_popup_set_items(TuiListPopup *popup,
                               const char *const *texts, int count);
+
+/* Set items with a parallel metadata column. `metas[i]` is shown
+ * right-aligned for item i; a NULL or empty entry means that item has
+ * none. `metas` may itself be NULL (identical to set_items). The meta
+ * strings are copied. The item text truncates first when the popup is
+ * narrower than a row needs — the meta never does. */
+void tui_list_popup_set_items_meta(TuiListPopup *popup,
+                                   const char *const *texts,
+                                   const char *const *metas, int count);
 
 /* Clear all items and reset selection. */
 void tui_list_popup_clear(TuiListPopup *popup);
@@ -126,6 +152,11 @@ void tui_list_popup_set_colors(TuiListPopup *popup, TuiColor border_color,
                                TuiColor selected_fg,
                                TuiColor selected_marker_color,
                                TuiColor item_color);
+
+/* Set the metadata column's foreground. TUI_COLOR_NONE (the default)
+ * inherits the row's item/selected foreground. Separate from
+ * set_colors so callers that never set metadata never touch it. */
+void tui_list_popup_set_meta_color(TuiListPopup *popup, TuiColor meta_color);
 
 /* Render popup to output buffer. Produces no output if not visible. */
 void tui_list_popup_view(const TuiListPopup *popup, DynamicBuffer *out);
