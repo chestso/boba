@@ -150,7 +150,8 @@ void tui_msg_free(TuiMsg *msg)
         msg->data.paste.text = NULL;
         msg->data.paste.len = 0;
     } else if (msg->type == TUI_MSG_STREAM_DELTA ||
-               msg->type == TUI_MSG_STREAM_TEXT) {
+               msg->type == TUI_MSG_STREAM_TEXT ||
+               msg->type == TUI_MSG_STREAM_IMAGE) {
         free(msg->data.stream.text);
         msg->data.stream.text = NULL;
         msg->data.stream.len = 0;

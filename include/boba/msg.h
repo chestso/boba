@@ -26,6 +26,7 @@ typedef enum
     TUI_MSG_PASTE_END,          /* Bracketed paste ends (no payload) */
     TUI_MSG_STREAM_DELTA,       /* Streamed transcript delta (stream_id + text) */
     TUI_MSG_STREAM_TEXT,        /* Raw transcript entry, system stream (id < 0) */
+    TUI_MSG_STREAM_IMAGE,       /* Whole image unit for a user stream (stream_id + text) */
     TUI_MSG_STREAM_END,         /* Stream finished (stream_id) */
     TUI_MSG_TRANSCRIPT_SUBMIT,  /* User line submitted (finalizes LIVE blocks) */
     TUI_MSG_TRANSCRIPT_CLEAR,   /* New chat (resets the transcript) */
@@ -179,7 +180,7 @@ typedef struct
         TuiMouseMsg mouse;
         TuiWindowSizeMsg size;
         TuiPasteMsg paste;
-        TuiStreamMsg stream; /* TUI_MSG_STREAM_DELTA / _TEXT / _END */
+        TuiStreamMsg stream; /* TUI_MSG_STREAM_DELTA / _TEXT / _IMAGE / _END */
         TuiSubmitMsg submit; /* TUI_MSG_TRANSCRIPT_SUBMIT */
         void *custom;        /* For application-defined message data */
     } data;
@@ -232,6 +233,12 @@ TuiMsg tui_msg_paste(char *text, size_t len);
 
 /* Create a paste-end message (no payload) */
 TuiMsg tui_msg_paste_end(void);
+
+/* Create a stream image message (whole image unit, copied). `text` is the
+ * markdown-shaped image block text ("![alt](src)"), without trailing
+ * newlines; it is inserted into the stream's raw buffer as an explicit
+ * IMAGE unit. `stream_id` must be >= 0 (system stream rejected). */
+TuiMsg tui_msg_stream_image(int stream_id, const char *text, size_t len);
 
 /* Free any heap data owned by a TuiMsg (currently: paste/text
  * payloads). No-op for messages without owned data. Safe to call

@@ -1337,6 +1337,25 @@ static void test_no_bare_lf_anywhere(void)
 /* IMAGE commit gate: an IMAGE unit waits for the terminal profile     */
 /* ------------------------------------------------------------------ */
 
+/* Resolve the harness's runtime profile as a kitty terminal (the
+ * transcript reads the verdict through its copy, refreshed at the
+ * commit pass). */
+static void h_profile_kitty(H *h)
+{
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 1;
+    h->rt->profile.cell_w_px = 10;
+    h->rt->profile.cell_h_px = 20;
+}
+
+static void h_profile_iterm2(H *h)
+{
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.iterm2_images = 1;
+}
+
 /* Classifier that opens a paragraph block on a "!img" line, kind IMAGE. */
 static TuiLineClass image_classify(void *state, const char *line, size_t len,
                                    const char *prev, size_t prev_len,
@@ -1359,6 +1378,94 @@ static const TuiClassifier image_cls = {
     .classify = image_classify,
     .reset = NULL,
 };
+
+/* Direct-posted image unit (tui_msg_stream_image): finalizes pending
+ * text, emits one IMAGE unit with a fresh id, and resets the classifier
+ * prev so the next line starts at a block boundary. */
+static void test_stream_image_unit_finalizes_pending_text(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_kitty(h);
+
+    /* Stream some text WITHOUT a trailing newline: the line is pending. */
+    h_send(h, tui_msg_stream_delta(0, "before", 6));
+    h_send(h, tui_msg_stream_image(0, "!img a:b", 8));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    /* The pending text committed first, then the image rendered. */
+    const char *text = strstr(out, "R|before");
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100");
+    assert(text && apc);
+    assert(text < apc);
+    assert(g_img_calls == 1);
+    assert(g_img_rendered == 1);
+    assert(g_img_block_calls == 0);
+
+    /* A following line classifies with a blank prev (block boundary). */
+    h_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
+    h_flush(h);
+    assert(strstr(h_read(h), "R|after") != NULL);
+
+    h_free(h);
+}
+
+/* An unresolved profile defers an explicit image unit; text posted after
+ * it freezes BEHIND it, and once the profile resolves the held units
+ * drain in order. */
+static void test_stream_image_unit_defers_until_profile_resolves(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+
+    h->rt->probe_state = 2;
+    h->rt->probe_deadline_ms = 0;
+    h_send(h, tui_msg_stream_image(0, "!img a:b", 8));
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 0);
+    assert(tui_transcript_commit_gated(h->t) == 1);
+    assert(g_img_calls == 0);
+
+    /* text after the image freezes behind it */
+    h_send(h, tui_msg_stream_delta(0, "tail\n\n", 6));
+
+    h_profile_kitty(h);
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 1);
+    const char *out = h_read(h);
+    const char *img = strstr(out, "\x1b_Ga=T,f=100");
+    const char *tail = strstr(out, "R|tail");
+    assert(img && tail && tail > img);
+    assert(g_img_calls == 1);
+
+    h_free(h);
+}
+
+/* No measure_image configured: an explicit image unit degrades through
+ * render_block (ungated, like classifier-discovered images). */
+static void test_stream_image_unit_without_measure_degrades(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    H *h = h_new(streams, classifiers, 1); /* no measure installed */
+    assert(h);
+
+    h_send(h, tui_msg_stream_image(0, "!img a:b", 8));
+    h_flush(h);
+    assert(g_img_block_calls == 1);
+    assert(strstr(h_read(h), "R|!img a:b") != NULL);
+
+    h_free(h);
+}
 
 static void test_image_without_measure_is_ungated(void)
 {
@@ -1429,25 +1536,6 @@ static void test_non_image_never_gated(void)
 /* ------------------------------------------------------------------ */
 /* IMAGE tier: transports, row reservation, deferral, ids              */
 /* ------------------------------------------------------------------ */
-
-/* Resolve the harness's runtime profile as a kitty terminal (the
- * transcript reads the verdict through its copy, refreshed at the
- * commit pass). */
-static void h_profile_kitty(H *h)
-{
-    h->rt->probe_state = 3;
-    h->rt->profile.resolved = 1;
-    h->rt->profile.kitty_graphics = 1;
-    h->rt->profile.cell_w_px = 10;
-    h->rt->profile.cell_h_px = 20;
-}
-
-static void h_profile_iterm2(H *h)
-{
-    h->rt->probe_state = 3;
-    h->rt->profile.resolved = 1;
-    h->rt->profile.iterm2_images = 1;
-}
 
 static void test_image_kitty_golden_bytes(void)
 {
@@ -1797,6 +1885,9 @@ int main(void)
     RUN_TEST(test_image_measure_refusal_degrades_to_render_block);
     RUN_TEST(test_image_ids_are_monotonic_across_clear);
     RUN_TEST(test_image_large_payload_is_chunked);
+    RUN_TEST(test_stream_image_unit_finalizes_pending_text);
+    RUN_TEST(test_stream_image_unit_defers_until_profile_resolves);
+    RUN_TEST(test_stream_image_unit_without_measure_degrades);
     RUN_TEST(test_committed_line_is_not_width_wrapped);
     RUN_TEST(test_committed_byte_run_is_not_width_wrapped);
     RUN_TEST(test_partial_row_wrapped_extends_at_column);

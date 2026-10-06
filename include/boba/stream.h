@@ -24,6 +24,10 @@
  *     app cannot emit framing bytes, cursor movement, or raw
  *     buffer access. boba owns terminators, EL, CRLF
  *     normalization, capability sequences and cursor placement.
+ *     IMAGE units arrive either from the classifier (model-authored
+ *     standalone image lines) or explicitly via tui_msg_stream_image;
+ *     both routes render through the same measure/render_image or
+ *     render_block marker ladder.
  *   - an optional `live_attr` (TuiStreamSpec): the app owns the
  *     value, boba maps it to SGR and applies it around the live rows
  *     boba paints itself. This is the one exception to "the app owns
@@ -98,8 +102,9 @@ typedef enum
     TUI_BLOCK_TABLE,
     TUI_BLOCK_QUOTE,
     TUI_BLOCK_LIST,
-    TUI_BLOCK_IMAGE,
-    TUI_BLOCK_RAW, /* app-defined via classifier; byte-emitted */
+    TUI_BLOCK_IMAGE, /* classifier-discovered or explicit via
+                      * tui_msg_stream_image */
+    TUI_BLOCK_RAW,   /* app-defined via classifier; byte-emitted */
 } TuiBlockKind;
 
 typedef enum
@@ -355,6 +360,13 @@ TuiMsg tui_msg_stream_delta(int stream_id, const char *text, size_t len);
  * (cursor movement, EL, OSC, APC/DCS) is dropped — no raw \r and no
  * app-controlled cursor bytes ever reach the scrollback. */
 TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len);
+
+/* Whole image unit for a user stream (stream_id >= 0). The block text
+ * is copied and must be markdown-shaped ("![alt](src)"), without trailing
+ * newlines; the transcript treats it as an explicit IMAGE unit, bypassing
+ * the classifier. Degrades through the configured measure/render_image or
+ * the render_block marker exactly like classifier-discovered IMAGE blocks. */
+TuiMsg tui_msg_stream_image(int stream_id, const char *text, size_t len);
 
 /* Finalize the stream's live content (stream end / turn end). */
 TuiMsg tui_msg_stream_end(int stream_id);

@@ -1472,6 +1472,11 @@ TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len)
     return stream_text_msg(TUI_MSG_STREAM_TEXT, stream_id, text, len);
 }
 
+TuiMsg tui_msg_stream_image(int stream_id, const char *text, size_t len)
+{
+    return stream_text_msg(TUI_MSG_STREAM_IMAGE, stream_id, text, len);
+}
+
 TuiMsg tui_msg_stream_end(int stream_id)
 {
     TuiMsg msg;
@@ -1653,6 +1658,31 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
         } else {
             stage_bytes(t, msg.data.stream.text, msg.data.stream.len);
         }
+        return tui_update_result_none();
+    }
+
+    case TUI_MSG_STREAM_IMAGE:
+    {
+        /* Whole image unit, user stream only. Finalize whatever is live,
+         * append the block text to the raw buffer, and emit it as an IMAGE
+         * unit directly — no classifier involved. The unit is a block
+         * boundary: the next text line classifies against a blank prev. */
+        if (msg.data.stream.stream_id < 0 || !msg.data.stream.text ||
+            msg.data.stream.len == 0)
+            return tui_update_result_none();
+        TuiStream *s = transcript_stream_for(t, msg.data.stream.stream_id);
+        if (!s || !s->cls)
+            return tui_update_result_none();
+        stream_finalize(t, s);
+        size_t off = s->raw->len;
+        dynamic_buffer_append(s->raw, msg.data.stream.text,
+                              msg.data.stream.len);
+        int image_id = (int)++t->image_seq;
+        emit_unit(t, s, TUI_BLOCK_IMAGE, off, msg.data.stream.len, image_id);
+        s->tail_off = s->raw->len;
+        s->has_prev = 0;
+        s->prev_off = s->prev_len = 0;
+        s->cur_kind = TUI_BLOCK_PARAGRAPH;
         return tui_update_result_none();
     }
 
