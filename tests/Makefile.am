@@ -1,6 +1,6 @@
 # tests/Makefile.am - Build and run boba unit tests
 
-UNIT_TESTS = test_ansi test_textinput test_viewport test_runtime test_focus test_clipboard test_input_parser test_style test_list_popup test_stream test_terminal_profile test_unicode
+UNIT_TESTS = test_ansi test_statusline test_textinput test_viewport test_runtime test_focus test_clipboard test_input_parser test_style test_list_popup test_stream test_terminal_profile test_unicode
 
 check_PROGRAMS = $(UNIT_TESTS)
 
@@ -34,6 +34,7 @@ override CFLAGS += -UNDEBUG
 LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
 
 test_ansi_SOURCES = test_ansi.c
+test_statusline_SOURCES = test_statusline.c
 test_textinput_SOURCES = test_textinput.c
 test_viewport_SOURCES = test_viewport.c
 test_runtime_SOURCES = test_runtime.c

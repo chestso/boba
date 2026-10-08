@@ -18,6 +18,7 @@ libboba_a_SOURCES = \
     stream_internal.h \
     terminal_profile.c \
     terminal_profile_internal.h \
+    components/statusline.c \
     components/textinput.c \
     components/viewport.c \
     components/list_popup.c

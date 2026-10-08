@@ -83,6 +83,26 @@ size / XTVERSION that follow). Deferred to the next steps:
   the whole budget today; revisit if an interleaving provider shows up
   (the interleaved test already guards ordering).
 
+## Status line component
+
+The status row is now `TuiStatusLine` (`include/boba/components/statusline.h`):
+a declared segment list with left / fill / right packing, `priority` /
+`min_cols` elision, an eager layout and a pure `view`. It used to be a field
+of `TuiTextInput` (`TuiSpan`, `tui_textinput_set_status_line`), which is
+deleted. Deferred:
+
+- **`max_cols` / `pad_right` on a segment**: no caller. `pad_left` covers
+  the one gap nevermore declares, and a bounded segment is a row policy
+  nobody has asked for.
+- **A tmux e2e app**: the component is unit-tested end to end (declarations
+  in, painted bytes out) and exercised through nevermore, but boba's tmux
+  apps do not register one, so there is no standalone paint test in a real
+  terminal. Cheap to add (a mini-app wrapping the component); do it when
+  the next tmux app is touched.
+- **Multi-row chrome** (`get_height` > 1): deliberately a different
+  component — a taller row breaks the separator contract and the frame
+  budget math the one-row shape is built on.
+
 ## Declarative API alignment
 
 - **Declarative replacements for textinput/viewport setters.** The

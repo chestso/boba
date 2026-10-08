@@ -35,8 +35,9 @@ static int is_word_char(const TuiTextInput *input, char c)
  * literal glyphs); the prompt / continuation prompt are pre-rendered strings
  * that may carry their own SGR, so they go through
  * tui_utf8_display_width_ansi — the same call viewport.c and list_popup.c
- * make on rendered text. The status line's width is never measured at
- * all: it is its own row, outside every input metric. */
+ * make on rendered text. Chrome above the input (a status row) is not
+ * this component's: it belongs to the boba statusline component, which
+ * measures and lays out its own row. */
 
 /* Byte offset of the end of the longest prefix of text[0..len) that fits in
  * `cols` display columns. Zero when `cols <= 0`; otherwise at least one
@@ -76,8 +77,8 @@ static int prompt_cols(const char *prompt)
 /* Display width of the prompt rendered on a given logical line:
  * line 0 uses the main prompt; later lines use the continuation prompt or
  * fall back to spaces of width prompt_len (matches render_continuation_prompt).
- * The status line, when set, is its own row and is NOT part of this — the
- * prompt column never depends on the status content. */
+ * Chrome above the input is not part of this — the prompt column never
+ * depends on anything outside the input. */
 static int line_prompt_width(const TuiTextInput *input, int line_index)
 {
     if (!input->show_prompt || !input->prompt || input->prompt_len <= 0)
@@ -87,12 +88,6 @@ static int line_prompt_width(const TuiTextInput *input, int line_index)
     if (input->continuation_prompt && input->continuation_prompt_len > 0)
         return input->continuation_prompt_len;
     return input->prompt_len;
-}
-
-/* Rows the status line occupies: 0 or 1. */
-static int status_rows(const TuiTextInput *input)
-{
-    return input->n_status > 0 ? 1 : 0;
 }
 
 /* Byte range of the logical line containing the cursor */
@@ -827,12 +822,6 @@ void tui_textinput_free(TuiTextInput *input)
     free(input->kill_buf);
     free(input->word_chars);
     free(input->snap_buf);
-    if (input->status_text) {
-        for (int i = 0; i < input->n_status; i++)
-            free(input->status_text[i]);
-        free(input->status_text);
-    }
-    free(input->status_style);
     undo_free(input);
     free(input);
 }
@@ -1202,30 +1191,6 @@ static void emit_styled_or_legacy(DynamicBuffer *out, const TuiStyle *style,
     }
 }
 
-/* Render the status line's spans (if any) to `out`. The caller owns the
- * row: it positions (absolute mode) or separates (relative mode) the row
- * and clears its tail — the status content is not part of any width
- * arithmetic, so it may simply overflow into the EL. */
-static void render_status_line(const TuiTextInput *input, DynamicBuffer *out)
-{
-    for (int i = 0; i < input->n_status; i++) {
-        const char *t = input->status_text[i];
-        if (!t || !*t)
-            continue;
-        if (style_has_styling(&input->status_style[i])) {
-            TuiStyle s = input->status_style[i];
-            s.inline_ = 1; /* spans are inline: box model ignored */
-            char *rendered = tui_style_render(&s, t);
-            if (rendered) {
-                dynamic_buffer_append_str(out, rendered);
-                free(rendered);
-            }
-        } else {
-            dynamic_buffer_append_str(out, t);
-        }
-    }
-}
-
 /* Render continuation prompt or space-padding for lines after the first:
  * the continuation prompt when one is set, otherwise spaces of the main
  * prompt's width, so continuation rows align under the text column. */
@@ -1517,19 +1482,10 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
     if (input->terminal_row > 0) {
         /* Absolute-positioning mode: draw rows [terminal_row, next_row - 1],
          * then blank any surplus rows from a taller previous frame. The
-         * status line (when set) owns terminal_row; the input rows follow
-         * at terminal_row + status_rows. */
-        int row0 = input->terminal_row + status_rows(input);
+         * input's rows start AT terminal_row: chrome above it (a status
+         * row) is another component's, and the composing app places it. */
+        int row0 = input->terminal_row;
         int next_row = input->terminal_row;
-
-        if (status_rows(input)) {
-            snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H",
-                     input->terminal_row);
-            dynamic_buffer_append_str(out, pos_buf);
-            dynamic_buffer_append_str(out, EL_TO_END);
-            render_status_line(input, out);
-            next_row = row0;
-        }
 
         if (!input->multiline) {
             /* Single-line mode */
@@ -1614,15 +1570,11 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
      * so there is no surplus-row bookkeeping to do. */
     mutable_input->last_render_rows = 0;
 
-    /* The frame's first row: cleared, and carrying the status line when one
-     * is set — the input rows then start one row below. */
+    /* The input's first row: cleared, then the prompt/text. Chrome above it
+     * (a status row) is another component's — the composing app paints it
+     * and owns the separator between the two. */
     dynamic_buffer_append_str(out, "\r");
     dynamic_buffer_append_str(out, EL_TO_END);
-    if (status_rows(input)) {
-        render_status_line(input, out);
-        dynamic_buffer_append_str(out, "\r\n");
-        dynamic_buffer_append_str(out, EL_TO_END);
-    }
 
     if (!input->multiline) {
         /* Single-line mode */
@@ -1984,54 +1936,6 @@ void tui_textinput_set_continuation_prompt(TuiTextInput *input,
     input->continuation_prompt_len = prompt_cols(prompt);
 }
 
-/* Set the status line (ordered run of styled spans, a full row above the
- * prompt). Copies the span texts and styles; the row's height (0 or 1)
- * joins the component's height and cursor math. NULL / n_spans == 0
- * clears. */
-void tui_textinput_set_status_line(TuiTextInput *input, const TuiSpan *spans,
-                                   size_t n_spans)
-{
-    if (!input)
-        return;
-
-    /* Release the previous status line. */
-    if (input->status_text) {
-        for (int i = 0; i < input->n_status; i++)
-            free(input->status_text[i]);
-        free(input->status_text);
-        free(input->status_style);
-    }
-    input->status_text = NULL;
-    input->status_style = NULL;
-    input->n_status = 0;
-
-    if (!spans || n_spans == 0)
-        return;
-
-    input->status_text = (char **)calloc(n_spans, sizeof(char *));
-    input->status_style = (TuiStyle *)calloc(n_spans, sizeof(TuiStyle));
-    if (!input->status_text || !input->status_style) {
-        free(input->status_text);
-        free(input->status_style);
-        input->status_text = NULL;
-        input->status_style = NULL;
-        return;
-    }
-
-    for (size_t i = 0; i < n_spans; i++) {
-        const char *t = spans[i].text ? spans[i].text : "";
-        size_t len = spans[i].len ? spans[i].len : strlen(t);
-        char *copy = (char *)malloc(len + 1);
-        if (!copy)
-            continue;
-        memcpy(copy, t, len);
-        copy[len] = '\0';
-        input->status_text[i] = copy;
-        input->status_style[i] = spans[i].style;
-        input->n_status = (int)i + 1;
-    }
-}
-
 /* Set echo mode */
 void tui_textinput_set_echo_mode(TuiTextInput *input, int mode)
 {
@@ -2113,12 +2017,10 @@ int tui_textinput_get_height(const TuiTextInput *input)
 {
     if (!input)
         return 1;
-    /* The status line, when set, is one row above the input rows. */
-    int rows = status_rows(input);
     if (!input->multiline)
-        return rows + (input->soft_wrap ? total_visual_rows(input) : 1);
-    return rows + (input->soft_wrap ? total_visual_rows(input)
-                                    : tui_textinput_line_count(input));
+        return input->soft_wrap ? total_visual_rows(input) : 1;
+    return input->soft_wrap ? total_visual_rows(input)
+                            : tui_textinput_line_count(input);
 }
 
 /* Report cursor position for the runtime. Mirrors the arithmetic the old
@@ -2128,16 +2030,15 @@ TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
     if (!input || !input->focused)
         return tui_cursor_hidden();
 
-    /* base_row is the input's first row: below the status line when one is
-     * set (absolute mode paints the status at terminal_row; relative mode's
-     * frame row 1 is the status row). */
-    int base_row =
-        (input->terminal_row > 0 ? input->terminal_row : 1) + status_rows(input);
+    /* base_row is the input's FIRST row — the row the prompt is painted on,
+     * in this component's own coordinates. A composing app that paints
+     * chrome above the input (a status row) adds that row to the cursor
+     * row it declares. */
+    int base_row = input->terminal_row > 0 ? input->terminal_row : 1;
 
     /* Soft-wrap mode: compute visual row/col across wrapped lines */
     if (input->soft_wrap && input->terminal_width > 0) {
-        /* The status line (when set) is the frame's first row; line 0
-         * carries the main prompt. */
+        /* Line 0 carries the main prompt. */
         int prompt_w = line_prompt_width(input, 0);
         int content_w = input->terminal_width - prompt_w;
         if (content_w <= 0)
