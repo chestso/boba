@@ -109,6 +109,20 @@ typedef struct TuiStatusLine
     } *pieces;
     size_t n_pieces;
     size_t cap_pieces;
+
+    /* Per-segment layout state — the layout's scratch, owned and REUSED
+     * across relayouts (grown by doubling, freed with the model). One
+     * buffer for the whole layout instead of three per-layout
+     * allocations, and none at all once it is warm. Component-internal:
+     * callers never touch it. */
+    struct TuiStatusLineSlot
+    {
+        int cols;  /* current column count */
+        int floor; /* min_cols, clamped to cols */
+        int start; /* column the segment starts at */
+        int pad;   /* normalized pad_left (>= 0) */
+    } *slots;
+    size_t cap_slots;
 } TuiStatusLine;
 
 /* Create a status line with no segments (height 0: no row). */

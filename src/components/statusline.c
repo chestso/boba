@@ -33,6 +33,7 @@
 #include <boba/components/statusline.h>
 #include <boba/unicode.h>
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -209,6 +210,7 @@ void tui_statusline_free(TuiStatusLine *sl)
     segments_clear(sl);
     free(sl->row);
     free(sl->pieces);
+    free(sl->slots);
     free(sl);
 }
 
@@ -226,11 +228,34 @@ static int layout_width(const TuiStatusLine *sl)
     return w;
 }
 
+/* Grow the layout scratch to at least `n` slots. 0 on success.
+ *
+ * The slots are the model's, not the layout's: they are grown once and
+ * then reused, so a relayout costs no allocation at all (the declaration
+ * count is the same size every time, which is what made the old
+ * per-layout calloc/free a pure allocator round-trip). */
+static int slots_reserve(TuiStatusLine *sl, size_t n)
+{
+    if (n <= sl->cap_slots)
+        return 0;
+    if (n > SIZE_MAX / sizeof(*sl->slots))
+        return -1;
+    size_t cap = sl->cap_slots ? sl->cap_slots : 8;
+    while (cap < n)
+        cap *= 2;
+    void *p = realloc(sl->slots, cap * sizeof(*sl->slots));
+    if (!p)
+        return -1;
+    sl->slots = p;
+    sl->cap_slots = cap;
+    return 0;
+}
+
 /* The pad a segment still reserves: a dropped (0-column) segment takes its
  * pad with it. */
-static int seg_pad(const TuiSegment *s, int cols)
+static int slot_pad(const struct TuiStatusLineSlot *slot)
 {
-    return cols > 0 && s->pad_left > 0 ? s->pad_left : 0;
+    return slot->cols > 0 ? slot->pad : 0;
 }
 
 /* Rebuild the composed row from the current declarations. */
@@ -243,37 +268,32 @@ static void statusline_layout(TuiStatusLine *sl)
     if (n == 0)
         return;
 
-    const int w = layout_width(sl);
-
-    int *cols = (int *)calloc(n, sizeof(int));
-    int *floors = (int *)calloc(n, sizeof(int));
-    int *start = (int *)calloc(n, sizeof(int));
-    if (!cols || !floors || !start) {
-        free(cols);
-        free(floors);
-        free(start);
+    if (slots_reserve(sl, n) != 0)
         return; /* no memory: no row (rather than a wrong one) */
-    }
+    struct TuiStatusLineSlot *S = sl->slots;
+
+    const int w = layout_width(sl);
 
     int want = 0;
     for (size_t i = 0; i < n; i++) {
         const TuiSegment *s = &sl->segs[i];
         size_t tlen = strlen(sl->seg_text[i]);
+        S[i].pad = s->pad_left > 0 ? s->pad_left : 0;
         if (s->align == TUI_SEGMENT_FILL) {
             int floor = s->min_cols > 0 ? s->min_cols : 0;
             if (floor > w)
                 floor = w;
-            cols[i] = floor;
-            floors[i] = floor;
+            S[i].cols = floor;
+            S[i].floor = floor;
         } else {
             int text_cols = tui_utf8_display_width_n(sl->seg_text[i], tlen);
-            cols[i] = text_cols;
-            floors[i] = s->min_cols > 0 ? s->min_cols : 0;
-            if (floors[i] > cols[i])
-                floors[i] = cols[i]; /* a floor above the text is the text */
+            S[i].cols = text_cols;
+            S[i].floor = s->min_cols > 0 ? s->min_cols : 0;
+            if (S[i].floor > S[i].cols)
+                S[i].floor = S[i].cols; /* a floor above the text is the text */
         }
-        want += s->pad_left > 0 ? s->pad_left : 0;
-        want += cols[i];
+        want += S[i].pad;
+        want += S[i].cols;
     }
 
     /* What gives when the row does not fit: (a) every shrinkable segment
@@ -287,7 +307,7 @@ static void statusline_layout(TuiStatusLine *sl)
                 const TuiSegment *s = &sl->segs[i];
                 if (s->priority <= 0)
                     continue;
-                int room = pass == 0 ? cols[i] - floors[i] : cols[i];
+                int room = pass == 0 ? S[i].cols - S[i].floor : S[i].cols;
                 if (room <= 0)
                     continue;
                 if (best < 0 || s->priority > sl->segs[best].priority)
@@ -296,9 +316,9 @@ static void statusline_layout(TuiStatusLine *sl)
             if (best < 0)
                 break;
             int room =
-                pass == 0 ? cols[best] - floors[best] : cols[best];
+                pass == 0 ? S[best].cols - S[best].floor : S[best].cols;
             int give = room < over ? room : over;
-            cols[best] -= give;
+            S[best].cols -= give;
             over -= give;
             if (over <= 0)
                 break;
@@ -311,10 +331,10 @@ static void statusline_layout(TuiStatusLine *sl)
      * fills below, and the row stays exactly as wide as it was declared. */
     if (over <= 0) {
         for (size_t i = 0; i < n; i++) {
-            if (sl->segs[i].align == TUI_SEGMENT_FILL || cols[i] <= 0)
+            if (sl->segs[i].align == TUI_SEGMENT_FILL || S[i].cols <= 0)
                 continue;
             size_t tlen = strlen(sl->seg_text[i]);
-            cols[i] = fitted_cols(sl->seg_text[i], tlen, cols[i]);
+            S[i].cols = fitted_cols(sl->seg_text[i], tlen, S[i].cols);
         }
     }
 
@@ -323,8 +343,8 @@ static void statusline_layout(TuiStatusLine *sl)
     if (over <= 0) {
         int placed = 0, n_fills = 0;
         for (size_t i = 0; i < n; i++) {
-            placed += seg_pad(&sl->segs[i], cols[i]);
-            placed += cols[i];
+            placed += slot_pad(&S[i]);
+            placed += S[i].cols;
             if (sl->segs[i].align == TUI_SEGMENT_FILL)
                 n_fills++;
         }
@@ -337,7 +357,7 @@ static void statusline_layout(TuiStatusLine *sl)
                 if (sl->segs[i].align != TUI_SEGMENT_FILL)
                     continue;
                 seen++;
-                cols[i] += each + (seen == n_fills ? rest : 0);
+                S[i].cols += each + (seen == n_fills ? rest : 0);
             }
         }
     }
@@ -353,19 +373,19 @@ static void statusline_layout(TuiStatusLine *sl)
     }
     int cursor = 0;
     for (size_t i = 0; i < first_suffix; i++) {
-        start[i] = cursor;
-        cursor += seg_pad(&sl->segs[i], cols[i]) + cols[i];
+        S[i].start = cursor;
+        cursor += slot_pad(&S[i]) + S[i].cols;
     }
     int suffix_w = 0;
     for (size_t i = first_suffix; i < n; i++)
-        suffix_w += seg_pad(&sl->segs[i], cols[i]) + cols[i];
+        suffix_w += slot_pad(&S[i]) + S[i].cols;
     int suffix_start = w - suffix_w;
     if (suffix_start < cursor)
         suffix_start = cursor; /* overlapping declarations: overflow */
     cursor = suffix_start;
     for (size_t i = first_suffix; i < n; i++) {
-        start[i] = cursor;
-        cursor += seg_pad(&sl->segs[i], cols[i]) + cols[i];
+        S[i].start = cursor;
+        cursor += slot_pad(&S[i]) + S[i].cols;
     }
 
     /* Emit: each segment's gap blanks, its pad blanks and its (elided)
@@ -377,25 +397,26 @@ static void statusline_layout(TuiStatusLine *sl)
     int emitted = 0;
     for (size_t i = 0; i < n; i++) {
         const TuiSegment *s = &sl->segs[i];
-        if (cols[i] <= 0)
+        if (S[i].cols <= 0)
             continue;
         size_t tlen = strlen(sl->seg_text[i]);
         if (row_reserve(sl, sl->row_len + tlen + 4) != 0)
             break;
         size_t off = sl->row_len;
-        if (start[i] > emitted) /* the right-packed group's gap */
-            row_blanks(sl, start[i] - emitted);
-        row_blanks(sl, seg_pad(s, cols[i]));
+        if (S[i].start > emitted) /* the right-packed group's gap */
+            row_blanks(sl, S[i].start - emitted);
+        row_blanks(sl, slot_pad(&S[i]));
         if (s->align == TUI_SEGMENT_FILL) {
             row_fill(sl, sl->seg_text[i], tlen,
-                     tui_utf8_display_width_n(sl->seg_text[i], tlen), cols[i]);
+                     tui_utf8_display_width_n(sl->seg_text[i], tlen),
+                     S[i].cols);
         } else {
             memcpy(sl->row + sl->row_len, sl->seg_text[i], tlen + 1);
-            if (tui_utf8_display_width_n(sl->seg_text[i], tlen) > cols[i])
-                fit_cols(sl->row + sl->row_len, cols[i]);
+            if (tui_utf8_display_width_n(sl->seg_text[i], tlen) > S[i].cols)
+                fit_cols(sl->row + sl->row_len, S[i].cols);
             sl->row_len += strlen(sl->row + sl->row_len);
         }
-        emitted = start[i] + seg_pad(s, cols[i]) + cols[i];
+        emitted = S[i].start + slot_pad(&S[i]) + S[i].cols;
         if (piece_reserve(sl, sl->n_pieces + 1) != 0)
             break;
         sl->pieces[sl->n_pieces].off = off;
@@ -403,10 +424,6 @@ static void statusline_layout(TuiStatusLine *sl)
         sl->pieces[sl->n_pieces].style = s->style;
         sl->n_pieces++;
     }
-
-    free(cols);
-    free(floors);
-    free(start);
 }
 
 /* ---------------------------------------------------------------- */

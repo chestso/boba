@@ -504,6 +504,66 @@ static void test_layout_is_eager(void)
     tui_statusline_free(sl);
 }
 
+/* The layout scratch belongs to the MODEL, not to the layout: a relayout
+ * allocates nothing at all (the buffer identity is stable across a resize
+ * and across a changed declaration set), it grows when the declarations
+ * outgrow it, and it is kept when they shrink — with no stale slot
+ * surviving into the rebuilt row. */
+static void test_layout_scratch_is_reused(void)
+{
+    TuiStatusLine *sl = tui_statusline_create();
+    tui_statusline_set_terminal_width(sl, 10);
+    TuiSegment segs[3];
+    segs[0] = seg("ab", TUI_SEGMENT_LEFT, 0, 0, 0);
+    segs[1] = seg(".", TUI_SEGMENT_FILL, 1, 0, 0);
+    segs[2] = seg("cd", TUI_SEGMENT_RIGHT, 0, 0, 1);
+    tui_statusline_set_segments(sl, segs, 3);
+
+    struct TuiStatusLineSlot *slots = sl->slots;
+    assert(slots != NULL);
+
+    /* A resize: same declarations, a relayout — no allocation. */
+    tui_statusline_set_terminal_width(sl, 12);
+    assert(sl->slots == slots);
+
+    /* A changed declaration set of the same size: still no allocation. */
+    segs[0].text = "ab!";
+    tui_statusline_set_segments(sl, segs, 3);
+    assert(sl->slots == slots);
+    char *row = painted_row(sl);
+    assert(strcmp(row, "ab!...... cd") == 0); /* 12 columns */
+    free(row);
+
+    /* More segments than the scratch holds: it grows, and the row follows. */
+    TuiSegment many[12];
+    for (int i = 0; i < 12; i++)
+        many[i] = seg("a", TUI_SEGMENT_LEFT, 0, 0, 0);
+    tui_statusline_set_segments(sl, many, 12);
+    assert(sl->cap_slots >= 12);
+    row = painted_row(sl);
+    assert(strcmp(row, "aaaaaaaaaaaa") == 0);
+    free(row);
+
+    /* Fewer segments again: the grown buffer is kept, and the rebuilt row
+     * is the smaller declaration's — no leftover slot leaks into it. */
+    struct TuiStatusLineSlot *big = sl->slots;
+    tui_statusline_set_segments(sl, segs, 3);
+    assert(sl->slots == big);
+    row = painted_row(sl);
+    assert(strcmp(row, "ab!...... cd") == 0);
+    free(row);
+
+    /* Clearing keeps the scratch too, so the next row reuses it. */
+    tui_statusline_set_segments(sl, NULL, 0);
+    tui_statusline_set_segments(sl, segs, 3);
+    assert(sl->slots == big);
+    row = painted_row(sl);
+    assert(strcmp(row, "ab!...... cd") == 0);
+    free(row);
+
+    tui_statusline_free(sl);
+}
+
 /* ---------- styles ---------- */
 
 static void test_pieces_carry_their_styles(void)
@@ -603,6 +663,7 @@ int main(void)
     RUN_TEST(test_identical_segments_are_a_noop);
     RUN_TEST(test_style_change_detected);
     RUN_TEST(test_layout_is_eager);
+    RUN_TEST(test_layout_scratch_is_reused);
 
     /* styles */
     RUN_TEST(test_pieces_carry_their_styles);
