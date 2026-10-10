@@ -50,6 +50,33 @@ static void send_char(TuiTextInput *input, char c)
         tui_cmd_free(r.cmd);
 }
 
+/* Send a Ctrl+<letter> chord */
+static void send_ctrl(TuiTextInput *input, char c)
+{
+    TuiUpdateResult r = tui_textinput_update(
+        input, tui_msg_key(TUI_KEY_NONE, (uint32_t)c, TUI_MOD_CTRL));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+}
+
+/* Send a bracketed-paste payload of explicit length. The message owns
+ * its text, so it is freed here (the component copies what it inserts). */
+static void send_paste_len(TuiTextInput *input, const char *text, size_t len)
+{
+    char *copy = (char *)malloc(len + 1);
+    assert(copy != NULL);
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+    TuiMsg m = tui_msg_paste(copy, len);
+    tui_textinput_update(input, m);
+    tui_msg_free(&m);
+}
+
+static void send_paste(TuiTextInput *input, const char *text)
+{
+    send_paste_len(input, text, strlen(text));
+}
+
 /* ---------- tests ---------- */
 
 static void test_create_and_free(void)
@@ -273,6 +300,119 @@ static void test_release_event_ignored(void)
     /* Press still inserts. */
     send_char(input, 'a');
     assert(strcmp(tui_textinput_text(input), "a") == 0);
+    tui_textinput_free(input);
+}
+
+/* ---------- bracketed paste ---------- */
+
+static void test_paste_keeps_newlines(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+
+    send_paste(input, "line1\nline2\n");
+    assert(strcmp(tui_textinput_text(input), "line1\nline2\n") == 0);
+    assert(tui_textinput_len(input) == 12);
+    assert(tui_textinput_cursor(input) == 12);
+    assert(tui_textinput_line_count(input) == 3);
+    tui_textinput_free(input);
+}
+
+static void test_paste_normalizes_line_endings(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+
+    /* The same copied text arrives CRLF from one terminal and CR from
+     * another: both are one line break, never two. */
+    send_paste(input, "a\r\nb\rc");
+    assert(strcmp(tui_textinput_text(input), "a\nb\nc") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_paste_single_line_joins_lines_with_spaces(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL); /* single-line */
+
+    send_paste(input, "line1\r\nline2\nline3");
+    assert(strcmp(tui_textinput_text(input), "line1 line2 line3") == 0);
+    assert(tui_textinput_get_height(input) == 1);
+    tui_textinput_free(input);
+}
+
+static void test_paste_inserts_at_cursor(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+
+    send_string(input, "ac");
+    send_key(input, TUI_KEY_LEFT);
+    send_paste(input, "b\n");
+    assert(strcmp(tui_textinput_text(input), "ab\nc") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_paste_drops_control_bytes(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+
+    /* BEL and ESC are not text: the buffer is what the view paints. */
+    send_paste(input, "a\x07\x1b b");
+    assert(strcmp(tui_textinput_text(input), "a b") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_paste_drops_truncated_utf8_tail(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+
+    /* "a" then the first two bytes of a 3-byte codepoint: the tail is
+     * dropped whole, never inserted half-decoded. */
+    send_paste_len(input, "a\xe2\x82", 3);
+    assert(strcmp(tui_textinput_text(input), "a") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_paste_is_one_undo_entry(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+
+    send_char(input, 'x');        /* one undo entry */
+    send_paste(input, "a\nb\nc"); /* one more, whatever its length */
+
+    /* C-x C-u restores the buffer the paste landed on — "x", never a
+     * prefix of the payload. */
+    send_ctrl(input, 'x');
+    send_ctrl(input, 'u');
+    assert(strcmp(tui_textinput_text(input), "x") == 0);
+
+    send_ctrl(input, 'x');
+    send_ctrl(input, 'u');
+    assert(strcmp(tui_textinput_text(input), "") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_paste_ignored_when_unfocused(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 0);
+
+    send_paste(input, "a\nb");
+    assert(strcmp(tui_textinput_text(input), "") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_paste_empty_payload_is_a_noop(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+
+    send_string(input, "seed");
+    send_paste(input, "");
+    assert(strcmp(tui_textinput_text(input), "seed") == 0);
     tui_textinput_free(input);
 }
 
@@ -1788,6 +1928,15 @@ int main(void)
     RUN_TEST(test_focus);
     RUN_TEST(test_unfocused_ignores_input);
     RUN_TEST(test_release_event_ignored);
+    RUN_TEST(test_paste_keeps_newlines);
+    RUN_TEST(test_paste_normalizes_line_endings);
+    RUN_TEST(test_paste_single_line_joins_lines_with_spaces);
+    RUN_TEST(test_paste_inserts_at_cursor);
+    RUN_TEST(test_paste_drops_control_bytes);
+    RUN_TEST(test_paste_drops_truncated_utf8_tail);
+    RUN_TEST(test_paste_is_one_undo_entry);
+    RUN_TEST(test_paste_ignored_when_unfocused);
+    RUN_TEST(test_paste_empty_payload_is_a_noop);
     RUN_TEST(test_focused_blurred_styles_differ);
     RUN_TEST(test_prompt_style_applies_in_multiline_mode);
     RUN_TEST(test_legacy_color_still_works);

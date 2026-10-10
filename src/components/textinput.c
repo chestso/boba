@@ -267,6 +267,58 @@ static int insert_codepoint(TuiTextInput *input, uint32_t cp)
     return insert_text(input, buf, len);
 }
 
+/* Insert a bracketed-paste payload as text.
+ *
+ * The payload is the terminal's bytes for what the user copied, so it
+ * arrives as LINES, not as keystrokes: a newline in it is a newline,
+ * never an Enter key press (which is what a terminal without bracketed
+ * paste delivers — and what would submit the line mid-paste).
+ *
+ * Line endings are normalized on the way in: CRLF, a lone CR and a lone
+ * LF all mean one line break, because that is what the terminals send
+ * for the same copied text. What a line break becomes is the input's
+ * own shape: '\n' in a multiline input, and a single SPACE in a
+ * single-line one (the bubbles textinput's rule — the one-row buffer
+ * has no lines, so the break joins words rather than gluing them).
+ *
+ * Other C0 control bytes are dropped: they are not text, and the buffer
+ * is what the view paints and the app reads. A truncated UTF-8 tail is
+ * dropped whole, never inserted half-decoded.
+ *
+ * The payload lands as ONE edit — insert_text per run — so the caller
+ * wraps it in a single undo snapshot: one undo restores the buffer the
+ * paste landed on, not one per character pasted. */
+static void insert_paste(TuiTextInput *input, const TuiPasteMsg *paste)
+{
+    if (!paste || !paste->text)
+        return;
+
+    const char *p = paste->text;
+    const char *end = p + paste->len;
+
+    while (p < end) {
+        unsigned char c = (unsigned char)*p;
+
+        if (c == '\r' || c == '\n') {
+            if (c == '\r' && p + 1 < end && p[1] == '\n')
+                p++; /* CRLF is one break, not two */
+            p++;
+            insert_codepoint(input, input->multiline ? '\n' : ' ');
+            continue;
+        }
+        if (c < 0x20) { /* C0 control bytes are not text */
+            p++;
+            continue;
+        }
+
+        int len = tui_utf8_char_len(p);
+        if (len <= 0 || p + len > end)
+            break; /* a truncated tail is dropped whole */
+        insert_text(input, p, (size_t)len);
+        p += len;
+    }
+}
+
 /* Delete character before cursor (backspace) */
 static void delete_before(TuiTextInput *input)
 {
@@ -844,6 +896,16 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
 
     if (!input->focused)
         return tui_update_result_none();
+
+    /* Bracketed paste is text, not keystrokes: it is inserted as one
+     * edit (one undo entry), and a newline in it stays a newline
+     * instead of submitting the line. */
+    if (msg.type == TUI_MSG_PASTE) {
+        undo_snapshot(input);
+        insert_paste(input, &msg.data.paste);
+        undo_commit(input);
+        return tui_update_result_none();
+    }
 
     if (msg.type != TUI_MSG_KEY_PRESS)
         return tui_update_result_none();

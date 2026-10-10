@@ -340,6 +340,7 @@ Features:
 - **Soft-wrap mode** - Long lines wrap to the next visual row instead of horizontal scrolling (`tui_textinput_set_soft_wrap`)
 - **Syntax-highlighting callback** - Host applications can inject per-token styling via `tui_textinput_set_text_renderer`; the callback returns a malloc'd ANSI-escaped string that replaces raw text in the rendered output
 - **Ctrl+D deletes char** - The textinput handles Ctrl+D as `delete-char` (never decides to quit; the component receives `TUI_MSG_EOF` and decides)
+- **Bracketed paste** - A `TUI_MSG_PASTE` payload is inserted as TEXT, as one edit (one undo entry), never as synthesized keystrokes: line endings (CRLF / CR / LF) become `\n` in multi-line mode and a single space in single-line mode, so a pasted line break is a line break and never an Enter that submits
 
 For decorative horizontal lines above or below the input, parents
 compose `tui_border_render_horizontal()` (see [Styles](#styles)) — the
