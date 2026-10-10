@@ -220,6 +220,92 @@ static void test_kitty_release_special_key(void)
     assert(m.data.key.action == TUI_KEY_ACTION_RELEASE);
 }
 
+/* Ctrl+C and Ctrl+D keep their verdicts under the protocol. The legacy
+ * path reads them from the control BYTES (0x03 / 0x04), which flag 1
+ * stops sending — a key's meaning must not depend on its encoding. */
+static void test_kitty_ctrl_c_is_interrupt(void)
+{
+    TuiMsg m = parse_one("\033[99;5u");
+    assert(m.type == TUI_MSG_INTERRUPT);
+}
+
+static void test_kitty_ctrl_shift_c_is_interrupt(void)
+{
+    /* Shift does not change what the key means (the legacy byte for
+     * Ctrl+Shift+C is 0x03 like Ctrl+C's). */
+    TuiMsg m = parse_one("\033[99;6u");
+    assert(m.type == TUI_MSG_INTERRUPT);
+}
+
+static void test_kitty_ctrl_d_is_eof(void)
+{
+    TuiMsg m = parse_one("\033[100;5u");
+    assert(m.type == TUI_MSG_EOF);
+}
+
+static void test_kitty_alt_ctrl_c_is_a_key(void)
+{
+    /* Alt is a real distinction under the protocol: alt+ctrl+c is not a
+     * quit. */
+    TuiMsg m = parse_one("\033[99;7u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.rune == 'c');
+    assert(m.data.key.mods == (TUI_MOD_CTRL | TUI_MOD_ALT));
+}
+
+static void test_kitty_other_ctrl_keys_are_keys(void)
+{
+    /* The parity is for the two verdict keys only: Ctrl+A is still a
+     * key (the textinput's line-start binding). */
+    TuiMsg m = parse_one("\033[97;5u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.rune == 'a');
+    assert(m.data.key.mods == TUI_MOD_CTRL);
+}
+
+/* The kitty keyboard flags answer is a capability REPLY, not a key
+ * press: `CSI ? <flags> u` (a key event is `CSI <code> u`, no `?`). A
+ * probe that claimed replies gets it parked; without a claim it is
+ * dropped, never typed. */
+static void test_kitty_flags_reply_is_claimed_not_typed(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    tui_input_parser_claim_reply(p);
+
+    const char *reply = "\033[?9u";
+    TuiMsg msgs[4];
+    int n = tui_input_parser_parse(p, (const unsigned char *)reply,
+                                   strlen(reply), msgs, 4);
+    assert(n == 0);
+
+    char *payload = NULL;
+    size_t len = 0;
+    assert(tui_input_parser_next_reply(p, &payload, &len) == 1);
+    assert(payload != NULL);
+    assert(strcmp(payload, "[?9u") == 0);
+    free(payload);
+
+    /* The same bytes with no probe outstanding are dropped — never a
+     * Tab (which is what a flat decode of "?9u" would produce). */
+    tui_input_parser_release_reply(p);
+    n = tui_input_parser_parse(p, (const unsigned char *)reply, strlen(reply),
+                               msgs, 4);
+    assert(n == 0);
+
+    /* A real key event still parses. */
+    const char *key = "\033[97u";
+    n = tui_input_parser_parse(p, (const unsigned char *)key, strlen(key),
+                               msgs, 4);
+    assert(n == 1);
+    assert(msgs[0].type == TUI_MSG_KEY_PRESS);
+    assert(msgs[0].data.key.rune == 'a');
+    for (int i = 0; i < n; i++)
+        tui_msg_free(&msgs[i]);
+
+    tui_input_parser_free(p);
+}
+
 /* Regression: standard CSI sequences with ';' separator still parse after
  * the param-array refactor. */
 static void test_csi_ctrl_up_still_works(void)
@@ -566,6 +652,12 @@ int main(void)
     RUN_TEST(test_kitty_release);
     RUN_TEST(test_kitty_release_with_ctrl);
     RUN_TEST(test_kitty_release_special_key);
+    RUN_TEST(test_kitty_ctrl_c_is_interrupt);
+    RUN_TEST(test_kitty_ctrl_shift_c_is_interrupt);
+    RUN_TEST(test_kitty_ctrl_d_is_eof);
+    RUN_TEST(test_kitty_alt_ctrl_c_is_a_key);
+    RUN_TEST(test_kitty_other_ctrl_keys_are_keys);
+    RUN_TEST(test_kitty_flags_reply_is_claimed_not_typed);
     RUN_TEST(test_csi_ctrl_up_still_works);
 
     RUN_TEST(test_paste_simple);

@@ -40,6 +40,22 @@ void ansi_format_cursor_up(char *buf, size_t size, int n)
     snprintf(buf, size, CSI "%dA", n);
 }
 
+/* Kitty keyboard protocol: push a flag set (ESC [ > <flags> u). The
+ * terminal keeps a stack, so this pairs with ANSI_DISABLE_KITTY_KBD. */
+void ansi_format_kbd_push(char *buf, size_t size, int flags)
+{
+    if (!buf || size < ANSI_KBD_PUSH_BUFSIZE) {
+        if (buf && size > 0)
+            buf[0] = '\0';
+        return;
+    }
+    if (flags <= 0) {
+        buf[0] = '\0';
+        return;
+    }
+    snprintf(buf, size, CSI ">%du", flags);
+}
+
 void ansi_format_cursor_down(char *buf, size_t size, int n)
 {
     if (!buf || size < 16)

@@ -324,11 +324,15 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
 
     /* SGR mouse sequences reach parse_sgr_mouse_sequence instead. `c`
      * (DA1, XTVERSION-class capability) and `t` (cell/character size)
-     * are capability replies: not key input. When a probe has claimed
-     * replies, park the raw sequence (introducer + final, no ESC) for
-     * the decoder — including any unrecognized `c`/`t` reply, so the
-     * profile is built from what the terminal actually said. */
-    if (final == 'c' || final == 't') {
+     * are capability replies: not key input, and neither is the kitty
+     * keyboard flags answer (`CSI ? <flags> u` — told apart from a key
+     * event by its `?`; a key is `CSI <code> u`). When a probe has
+     * claimed replies, park the raw sequence (introducer + final, no
+     * ESC) for the decoder — including any unrecognized `c`/`t` reply,
+     * so the profile is built from what the terminal actually said. */
+    int is_reply =
+        (final == 'c' || final == 't' || (final == 'u' && seq[0] == '?'));
+    if (is_reply) {
         if (parser && parser->reply_claimed) {
             char payload[64];
             int n = snprintf(payload, sizeof(payload), "[%s", (char *)seq);
@@ -405,6 +409,20 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
          * Repeat folds into PRESS to match Bubbletea v2's KeyMsg shape. */
         TuiKeyAction action = (params[2] == 3) ? TUI_KEY_ACTION_RELEASE
                                                : TUI_KEY_ACTION_PRESS;
+
+        /* Ctrl+C and Ctrl+D keep their verdicts here. The legacy path
+         * reads them from the control BYTES (0x03 / 0x04), which flag 1
+         * stops sending: without this, enabling the protocol would
+         * silently turn "interrupt" and "end of input" into ordinary
+         * ctrl+letter presses. A key's meaning must not depend on its
+         * encoding. Alt is a real distinction under the protocol, so it
+         * is excluded — alt+ctrl+c is not a quit. */
+        if ((mods & TUI_MOD_CTRL) && !(mods & TUI_MOD_ALT)) {
+            if (param1 == 'c' || param1 == 'C')
+                return tui_msg_interrupt();
+            if (param1 == 'd' || param1 == 'D')
+                return tui_msg_eof();
+        }
 
         int key_code = TUI_KEY_NONE;
         uint32_t rune = 0;

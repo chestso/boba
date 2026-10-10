@@ -78,6 +78,41 @@ static void test_ansi_cursor_down_zero(void)
     ASSERT_STR_EQ(buf, "");
 }
 
+/* The kitty keyboard push carries the declared FLAG SET: the terminal
+ * stores it on its own stack, so the sequence is the declaration. */
+static void test_ansi_kbd_push_flag_one(void)
+{
+    char buf[ANSI_KBD_PUSH_BUFSIZE];
+    ansi_format_kbd_push(buf, sizeof(buf), 1);
+    ASSERT_STR_EQ(buf, "\033[>1u");
+}
+
+static void test_ansi_kbd_push_full_tier(void)
+{
+    char buf[ANSI_KBD_PUSH_BUFSIZE];
+    /* 1 | 8 | 16 — disambiguate + all keys as escape codes + associated
+     * text (the full-fidelity tier). */
+    ansi_format_kbd_push(buf, sizeof(buf), 1 | 8 | 16);
+    ASSERT_STR_EQ(buf, "\033[>25u");
+}
+
+static void test_ansi_kbd_push_zero_is_empty(void)
+{
+    char buf[ANSI_KBD_PUSH_BUFSIZE];
+    ansi_format_kbd_push(buf, sizeof(buf), 0);
+    /* No flags: nothing to declare, and an empty push is not a sequence
+     * the terminal should see. */
+    ASSERT_STR_EQ(buf, "");
+}
+
+static void test_ansi_kbd_push_short_buffer_is_empty(void)
+{
+    char buf[4];
+    buf[0] = 'x';
+    ansi_format_kbd_push(buf, sizeof(buf), 25);
+    ASSERT_STR_EQ(buf, "");
+}
+
 int main(void)
 {
     printf("ansi cursor movement tests:\n");
@@ -89,6 +124,10 @@ int main(void)
     RUN_TEST(test_ansi_cursor_back);
     RUN_TEST(test_ansi_cursor_up_zero);
     RUN_TEST(test_ansi_cursor_down_zero);
+    RUN_TEST(test_ansi_kbd_push_flag_one);
+    RUN_TEST(test_ansi_kbd_push_full_tier);
+    RUN_TEST(test_ansi_kbd_push_zero_is_empty);
+    RUN_TEST(test_ansi_kbd_push_short_buffer_is_empty);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

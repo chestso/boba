@@ -242,8 +242,7 @@ typedef struct TuiView {
   int alt_screen;                            /* 1 = alternate screen (legacy) */
   TuiRenderMode render_mode;                 /* ALT_SCREEN (default) or INLINE */
   TuiMouseMode mouse_mode;                   /* NONE / CELL_MOTION / ALL_MOTION */
-  TuiKeyboardEnhancements kbd_enhancements;  /* Kitty keyboard protocol bitmask */
-  int report_focus;                          /* 1 = enable focus events */
+  TuiKeyboardEnhancements kbd_enhancements;  /* Kitty keyboard protocol bitmask */  int report_focus;                          /* 1 = enable focus events */
   int bracketed_paste;                       /* 1 = enable bracketed paste */
   const char *window_title;                  /* NULL = leave alone */
   TuiCursor cursor;                          /* visible=0 = hidden */
@@ -254,6 +253,18 @@ typedef struct TuiView {
 TUI in the alternate buffer) or `TUI_RENDER_INLINE` (renders in the primary
 buffer with cursor-up repaint). The `alt_screen` field is kept for backward
 compatibility; new code should use `render_mode`.
+
+`TuiKeyboardEnhancements` is a bitmask of the kitty protocol's progressive
+enhancement flags — `TUI_KBD_KITTY` (1, disambiguate escape codes: Esc,
+alt+key and ctrl+key arrive as `CSI u`), `TUI_KBD_KITTY_ALL_KEYS` (8, report
+all keys as escape codes, which is what makes Shift+Enter tellable from
+Enter) and `TUI_KBD_KITTY_TEXT` (16, report associated text, so a capital
+arrives as `A` and not as a lowercase key code plus SHIFT). The flags are
+pushed onto the terminal's own stack and popped on change and at stop; a
+terminal that does not answer `CSI ? u` ignores them and keeps sending the
+legacy encodings, which the parser still accepts in every tier. Declaring
+`probe_terminal` reports what the terminal granted
+(`TuiTerminalProfile::kbd_protocol` / `kbd_flags`).
 
 The runtime diffs each frame's `TuiView` against the terminal state it tracks
 and emits only the bytes needed to reach the requested state — no imperative

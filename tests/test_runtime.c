@@ -136,6 +136,83 @@ static TuiComponent noop_component = {
 };
 
 /* ========================================================================
+ * Component that declares a keyboard mask and a render mode
+ * (for the kitty keyboard reconcile tests)
+ * ======================================================================== */
+
+typedef struct
+{
+    TuiModel base;
+    TuiKeyboardEnhancements kbd;
+    TuiRenderMode mode;
+} KbdModel;
+
+static TuiInitResult kbd_init(void *config)
+{
+    (void)config;
+    KbdModel *m = calloc(1, sizeof(KbdModel));
+    m->base.type = 997;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+static TuiView kbd_view(const TuiModel *model, DynamicBuffer *out)
+{
+    const KbdModel *m = (const KbdModel *)model;
+    dynamic_buffer_append_str(out, "x\r\n");
+    TuiView v = tui_view_default(out);
+    v.kbd_enhancements = m->kbd;
+    v.render_mode = m->mode;
+    return v;
+}
+
+static TuiComponent kbd_component = {
+    .init = kbd_init,
+    .update = noop_update,
+    .view = kbd_view,
+    .free = test_free,
+};
+
+/* A runtime whose component declares `kbd` in `mode`, with its output
+ * captured in a tmpfile. Started, so the stop path is live. */
+static TuiRuntime *kbd_rt(FILE *out, TuiKeyboardEnhancements kbd,
+                          TuiRenderMode mode)
+{
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out };
+    TuiRuntime *rt = tui_runtime_create(&kbd_component, NULL, &cfg);
+    assert(rt != NULL);
+    KbdModel *m = (KbdModel *)tui_runtime_model(rt);
+    assert(m != NULL);
+    m->kbd = kbd;
+    m->mode = mode;
+    tui_runtime_start(rt);
+    return rt;
+}
+
+/* Read everything written to `out` so far (position preserved). */
+static const char *kbd_capture(FILE *out, char *buf, size_t cap)
+{
+    fflush(out);
+    long pos = ftell(out);
+    assert(pos >= 0);
+    rewind(out);
+    size_t n = fread(buf, 1, cap - 1, out);
+    buf[n] = '\0';
+    fseek(out, pos, SEEK_SET);
+    return buf;
+}
+
+static int kbd_count(const char *hay, const char *needle)
+{
+    int n = 0;
+    const char *p = hay;
+    while ((p = strstr(p, needle)) != NULL) {
+        n++;
+        p++;
+    }
+    return n;
+}
+
+/* ========================================================================
  * Tests
  * ======================================================================== */
 
@@ -2852,15 +2929,126 @@ static void test_probe_silent_loop_resolves_on_exit(void)
 
 /* ======================================================================== */
 
+/* The declared mask is pushed onto the terminal's stack, once — a
+ * steady declaration is not re-sent every frame. */
+static void test_kbd_push_carries_declared_flags(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntime *rt =
+        kbd_rt(out,
+               TUI_KBD_KITTY | TUI_KBD_KITTY_ALL_KEYS | TUI_KBD_KITTY_TEXT,
+               TUI_RENDER_ALT_SCREEN);
+    tui_runtime_flush(rt);
+    tui_runtime_flush(rt);
+
+    char buf[8192];
+    /* 1 | 8 | 16 = 25 */
+    assert(kbd_count(kbd_capture(out, buf, sizeof(buf)), "\033[>25u") == 1);
+
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
+/* A changed declaration pops the entry it pushed, then pushes the new
+ * one — one pop per push, so the terminal's stack is left as we found
+ * it — and stop drops the last entry. */
+static void test_kbd_change_pops_then_pushes(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntime *rt = kbd_rt(out, TUI_KBD_KITTY, TUI_RENDER_ALT_SCREEN);
+    tui_runtime_flush(rt);
+
+    char buf[8192];
+    assert(strstr(kbd_capture(out, buf, sizeof(buf)), "\033[>1u") != NULL);
+
+    /* The terminal answered the probe: it grants the full tier, so the
+     * app upgrades mid-session. */
+    KbdModel *m = (KbdModel *)tui_runtime_model(rt);
+    m->kbd = TUI_KBD_KITTY | TUI_KBD_KITTY_ALL_KEYS | TUI_KBD_KITTY_TEXT;
+    tui_runtime_flush(rt);
+
+    const char *data = kbd_capture(out, buf, sizeof(buf));
+    const char *pop = strstr(data, "\033[<u");
+    const char *push = strstr(data, "\033[>25u");
+    assert(pop != NULL && push != NULL);
+    assert(pop < push);
+
+    tui_runtime_stop(rt);
+    data = kbd_capture(out, buf, sizeof(buf));
+    assert(kbd_count(data, "\033[<u") == 2);
+
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
+/* Inline mode reconciles the keyboard flags too: the protocol is
+ * independent of the screen buffer, and an inline app is exactly the
+ * shape that wants Shift+Enter and an unambiguous Esc. The stop path
+ * pops what it pushed — a terminal left with our flags would hand the
+ * shell CSI u keys after exit. */
+static void test_kbd_inline_declares_and_stops(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntime *rt = kbd_rt(out, TUI_KBD_KITTY, TUI_RENDER_INLINE);
+    tui_runtime_flush(rt);
+
+    char buf[8192];
+    assert(strstr(kbd_capture(out, buf, sizeof(buf)), "\033[>1u") != NULL);
+
+    tui_runtime_stop(rt);
+    const char *data = kbd_capture(out, buf, sizeof(buf));
+    assert(kbd_count(data, "\033[>1u") == 1);
+    assert(kbd_count(data, "\033[<u") == 1);
+
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
+/* A legacy declaration pushes nothing, and neither does a TEXT-only one
+ * (associated text is undefined without report-all-keys, so the runtime
+ * drops the bit rather than pushing a flag set the terminal cannot
+ * honour). Nothing pushed means nothing to pop at stop. */
+static void test_kbd_legacy_and_text_only_declare_nothing(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntime *rt = kbd_rt(out, TUI_KBD_NONE, TUI_RENDER_ALT_SCREEN);
+    tui_runtime_flush(rt);
+
+    char buf[8192];
+    const char *data = kbd_capture(out, buf, sizeof(buf));
+    assert(strstr(data, "\033[>") == NULL);
+    assert(strstr(data, "\033[<") == NULL);
+
+    KbdModel *m = (KbdModel *)tui_runtime_model(rt);
+    m->kbd = TUI_KBD_KITTY_TEXT;
+    tui_runtime_flush(rt);
+    data = kbd_capture(out, buf, sizeof(buf));
+    assert(strstr(data, "\033[>") == NULL);
+
+    tui_runtime_stop(rt);
+    data = kbd_capture(out, buf, sizeof(buf));
+    assert(strstr(data, "\033[<") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
 int main(void)
 {
     printf("runtime tests:\n");
-
     RUN_TEST(test_config_stores_callbacks);
     RUN_TEST(test_start_idempotent);
     RUN_TEST(test_stop_idempotent);
     RUN_TEST(test_start_stop_cycle);
     RUN_TEST(test_get_dimensions);
+    RUN_TEST(test_kbd_push_carries_declared_flags);
+    RUN_TEST(test_kbd_change_pops_then_pushes);
+    RUN_TEST(test_kbd_inline_declares_and_stops);
+    RUN_TEST(test_kbd_legacy_and_text_only_declare_nothing);
     RUN_TEST(test_get_dimensions_null);
     RUN_TEST(test_null_callbacks_in_config);
     RUN_TEST(test_default_config_raw_mode);

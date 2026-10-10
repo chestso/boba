@@ -51,6 +51,51 @@ static void test_query_bytes(void)
     assert(graphics == da1); /* DA1 immediately follows the query */
     assert(strstr(buf, "\033[16t") != NULL);
     assert(strstr(buf, "\033[>0q") != NULL);
+    /* The keyboard flags query rides the same rule as the graphics one
+     * (ask, then DA1): a terminal that does not answer is then
+     * distinguishable from one that answers nothing yet. */
+    const char *kbd = strstr(buf, "\033[?u");
+    assert(kbd != NULL);
+    assert(kbd < strstr(buf, "\033[c"));
+    /* And the whole query still fits: a query that outgrew its buffer
+     * would be silently truncated at the tail (the XTVERSION). */
+    assert(n < TUI_TERM_PROBE_QUERY_MAX);
+}
+
+/* The keyboard flags answer: `CSI ? <flags> u`. Support is the PRESENCE
+ * of the reply — a terminal with no flags set answers `?0u` and still
+ * speaks the protocol. */
+static void test_kbd_flags_reply(void)
+{
+    TuiTerminalProfile p;
+    memset(&p, 0, sizeof(p));
+    feed(&p, "[?0u");
+    assert(p.kbd_protocol == 1);
+    assert(p.kbd_flags == 0);
+
+    memset(&p, 0, sizeof(p));
+    feed(&p, "[?25u");
+    assert(p.kbd_protocol == 1);
+    assert(p.kbd_flags == 25);
+}
+
+/* The kbd decoder must not steal DA1 (both open with "[?"), and DA1
+ * must not swallow the kbd answer — the reply that arrives first wins
+ * its own decode, in either order. */
+static void test_kbd_flags_and_da1_do_not_collide(void)
+{
+    TuiTerminalProfile p;
+    memset(&p, 0, sizeof(p));
+    feed(&p, "[?25u");
+    feed(&p, "[?1;2;4c");
+    assert(p.kbd_protocol == 1 && p.kbd_flags == 25);
+    assert(p.sixel == 1);
+
+    memset(&p, 0, sizeof(p));
+    feed(&p, "[?1;2;4c");
+    feed(&p, "[?0u");
+    assert(p.kbd_protocol == 1 && p.kbd_flags == 0);
+    assert(p.sixel == 1);
 }
 
 static void test_da1_sixel_attr(void)
@@ -277,9 +322,10 @@ static void test_probe_decodes_all_replies_then_deadline(void)
     TuiRuntime *rt = probe_rt(out, NULL, 1);
     tui_runtime_flush(rt);
 
-    /* the terminal answers (kitty graphics ack + DA1 with sixel) */
-    const char *reply =
-        "\033_Gi=31;OK\033\\\033[?1;2;4c\033[6;18;9t\033P>|kitty(0.36.0)\033\\";
+    /* the terminal answers (kitty graphics ack + keyboard flags + DA1
+     * with sixel + cell size + XTVERSION) */
+    const char *reply = "\033_Gi=31;OK\033\\\033[?1u\033[?1;2;4c"
+                        "\033[6;18;9t\033P>|kitty(0.36.0)\033\\";
     tui_runtime_process_input(rt, (const unsigned char *)reply,
                               strlen(reply));
     /* the deadline is the completion signal: replies in FIFO order are
@@ -294,6 +340,9 @@ static void test_probe_decodes_all_replies_then_deadline(void)
     assert(p->resolved == 1 && p->kitty_graphics == 1 && p->sixel == 1);
     assert(p->kitty_placeholders == 1);
     assert(p->cell_w_px == 9 && p->cell_h_px == 18);
+    /* The keyboard flags answer proves the protocol (and is not a key
+     * press: nothing typed itself into the app). */
+    assert(p->kbd_protocol == 1 && p->kbd_flags == 1);
 
     /* exactly one callback, even after more flushes/checks */
     tui_runtime_flush(rt);
@@ -382,6 +431,8 @@ int main(void)
     printf("Running terminal profile tests...\n");
 
     RUN_TEST(test_query_bytes);
+    RUN_TEST(test_kbd_flags_reply);
+    RUN_TEST(test_kbd_flags_and_da1_do_not_collide);
     RUN_TEST(test_da1_sixel_attr);
     RUN_TEST(test_kitty_ack);
     RUN_TEST(test_xtversion_placeholders);

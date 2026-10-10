@@ -64,11 +64,33 @@ typedef enum
     TUI_MOUSE_MODE_ALL_MOTION,  /* SGR mouse, all motion regardless of button */
 } TuiMouseMode;
 
-/* Keyboard-enhancement bitmask — declared each frame on TuiView. */
+/* Keyboard-enhancement bitmask — declared each frame on TuiView.
+ *
+ * These are the Kitty protocol's progressive-enhancement bits, pushed
+ * onto the terminal's own stack (see ansi_format_kbd_push): the
+ * terminal's answer to `CSI ? u` says what it actually set. The bits
+ * are cumulative in effect — a declaration that names a higher tier
+ * asks for the lower one too (report-all-keys implies disambiguation,
+ * and associated text is undefined without report-all-keys). */
 typedef enum
 {
     TUI_KBD_NONE = 0,
-    TUI_KBD_KITTY = 1 << 0, /* Kitty keyboard protocol */
+    /* Flag 1: disambiguate escape codes. Esc, alt+key, ctrl+key and
+     * ctrl+alt+key arrive as CSI u sequences instead of the legacy
+     * bytes that collide with control codes. Enter, Tab and Backspace
+     * keep their legacy bytes (the spec's shell-recovery exception), so
+     * Shift+Enter is still indistinguishable from Enter at this tier. */
+    TUI_KBD_KITTY = 1 << 0,
+    /* Flag 8: report all keys as escape codes — text keys included,
+     * which is what makes Shift+Enter (CSI 13;2u) tellable from Enter.
+     * A plain key's text is then NOT sent as text, so a capital arrives
+     * as its unshifted key code plus SHIFT unless flag 16 is set too. */
+    TUI_KBD_KITTY_ALL_KEYS = 1 << 1,
+    /* Flag 16: report associated text — the produced text rides the key
+     * event (CSI 97;2;65u for shift+a), so capitals and IME text arrive
+     * as themselves. Undefined without ALL_KEYS, and dropped there (the
+     * runtime pushes no 16 for a declaration that names only it). */
+    TUI_KBD_KITTY_TEXT = 1 << 2,
 } TuiKeyboardEnhancements;
 
 /* Render mode — declares how the runtime should paint each frame.

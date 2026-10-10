@@ -27,11 +27,13 @@
 #define ST  ESC "\\" /* ST (String Terminator) = ESC \ */
 
 /* Terminal mode sequences */
-#define ANSI_ENTER_ALT_SCREEN        CSI "?1049h"
-#define ANSI_EXIT_ALT_SCREEN         CSI "?1049l"
-#define ANSI_ENABLE_MOUSE            CSI "?1000h" CSI "?1006h"
-#define ANSI_DISABLE_MOUSE           CSI "?1006l" CSI "?1000l"
-#define ANSI_ENABLE_KITTY_KBD        CSI ">1u"
+#define ANSI_ENTER_ALT_SCREEN CSI "?1049h"
+#define ANSI_EXIT_ALT_SCREEN  CSI "?1049l"
+#define ANSI_ENABLE_MOUSE     CSI "?1000h" CSI "?1006h"
+#define ANSI_DISABLE_MOUSE    CSI "?1006l" CSI "?1000l"
+/* Kitty keyboard protocol: the push carries the FLAGS (see
+ * ansi_format_kbd_push below — the set is a declaration, not a
+ * constant), and the pop drops the entry it pushed. */
 #define ANSI_DISABLE_KITTY_KBD       CSI "<u"
 #define ANSI_ENABLE_BRACKETED_PASTE  CSI "?2004h"
 #define ANSI_DISABLE_BRACKETED_PASTE CSI "?2004l"
@@ -255,6 +257,28 @@ void ansi_format_fg_color_rgb(char *buf, size_t size, int r, int g, int b);
  * Result: "\033[48;2;<r>;<g>;<b>m"
  */
 void ansi_format_bg_color_rgb(char *buf, size_t size, int r, int g, int b);
+
+/* Format the Kitty keyboard protocol's flag push:
+ *   ESC [ > <flags> u
+ *
+ * The flags are the progressive-enhancement bit set the app wants
+ * (1 = disambiguate escape codes, 8 = report all keys as escape codes,
+ * 16 = report associated text — see TuiKeyboardEnhancements). They are
+ * PUSHED onto the terminal's stack, so the matching
+ * ANSI_DISABLE_KITTY_KBD (ESC [ < u) pops exactly this entry.
+ *
+ * Parameters:
+ *   buf:   Output buffer (must be >= ANSI_KBD_PUSH_BUFSIZE)
+ *   size:  Size of output buffer
+ *   flags: the bit set (0 leaves buf empty: nothing to declare)
+ *
+ * Result: "\033[><flags>u"; empty when flags is 0, NULL buf or a short
+ * buffer. */
+void ansi_format_kbd_push(char *buf, size_t size, int flags);
+
+/* Required buffer size for ansi_format_kbd_push: CSI > (3), a flags
+ * value (at most 3 digits for the defined bits), 'u' and a null. */
+#define ANSI_KBD_PUSH_BUFSIZE 12
 
 /* Format OSC 2 window title sequence
  * Parameters:

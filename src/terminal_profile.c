@@ -34,6 +34,7 @@
  * both the sixel verdict and the kitty verdict are settled.
  *
  *   ESC _ Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \   kitty, 1x1 RGB query
+ *   ESC [ ? u                                      kitty keyboard flags
  *   ESC [ c                                        DA1 (sixel = attr 4)
  *   ESC [ 16 t                                     cell size in pixels
  *   ESC [ > 0 q                                    XTVERSION
@@ -42,10 +43,13 @@
  * 1x1 dummy image in query mode, so nothing is stored by the terminal.
  * Cell size and XTVERSION are best-effort extras (the unknown-cell-size
  * consumer falls back to a nominal cell; the version only gates the
- * placeholder tier). */
+ * placeholder tier). The keyboard flags query rides the same rule as
+ * the graphics one: ask, then DA1, so a terminal that does not answer
+ * is distinguishable from one that answers nothing yet. */
 size_t tui_term_probe_query(char *buf, size_t cap)
 {
     static const char query[] = "\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\"
+                                "\033[?u"
                                 "\033[c"
                                 "\033[16t"
                                 "\033[>0q";
@@ -163,6 +167,24 @@ static int decode_cellsize(TuiTerminalProfile *p, const char *s, size_t len)
     return 1;
 }
 
+/* Kitty keyboard flags reply: "[?<flags>u" (the answer to `CSI ? u`).
+ * Any answer counts as support — the protocol's detection rule is the
+ * presence of the reply, since a terminal with no flags set answers
+ * `?0u`. The value is kept for a consumer that wants to see it. */
+static int decode_kbd_flags(TuiTerminalProfile *p, const char *s, size_t len)
+{
+    if (!match(s, len, "[?"))
+        return 0;
+    size_t i = 2;
+    int ok = 0;
+    int flags = scan_dec(s, len, &i, &ok);
+    if (!ok || i >= len || s[i] != 'u')
+        return 0;
+    p->kbd_protocol = 1;
+    p->kbd_flags = flags;
+    return 1;
+}
+
 /* kitty graphics query ack: "Gi=31;OK". Any payload after our id counts
  * as support — an error reply still proves the APC was parsed by a
  * terminal that knows the protocol. Another client's id is ignored. */
@@ -214,6 +236,10 @@ int tui_term_profile_feed(TuiTerminalProfile *p, const char *payload,
     /* CSI replies carry their "[params final" shape; the string
      * sequences carry a payload prefix. */
     if (payload[0] == '[') {
+        /* The keyboard flags answer is checked before DA1: both open
+         * with "[?", and DA1's scan would otherwise claim it. */
+        if (decode_kbd_flags(p, payload, len))
+            return 1;
         if (decode_da1(p, payload, len))
             return 1;
         if (decode_cellsize(p, payload, len))

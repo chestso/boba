@@ -264,6 +264,47 @@ static void runtime_tick_maybe(TuiRuntime *runtime, int interval_ms)
 }
 
 /* ------------------------------------------------------------------ */
+/* Keyboard protocol                                                   */
+/* ------------------------------------------------------------------ */
+
+/* The declared mask as the protocol's wire flags.
+ *
+ * Flag 8 (report all keys as escape codes) is what makes Shift+Enter
+ * tellable from Enter, and it implies disambiguation; flag 16
+ * (associated text) is undefined without flag 8, so a declaration that
+ * names only TEXT asks for nothing. Returns 0 for a declaration with no
+ * kitty bit — nothing to push. */
+static int kbd_wire_flags(TuiKeyboardEnhancements k)
+{
+    if (!(k & (TUI_KBD_KITTY | TUI_KBD_KITTY_ALL_KEYS)))
+        return 0;
+    int flags = 1;
+    if (k & TUI_KBD_KITTY_ALL_KEYS) {
+        flags |= 8;
+        if (k & TUI_KBD_KITTY_TEXT)
+            flags |= 16;
+    }
+    return flags;
+}
+
+/* Reconcile the terminal's pushed flag set with the declared mask: pop
+ * the previous entry (when there was one), push the new. One pop per
+ * push, so the terminal's stack is left as we found it. */
+static void runtime_reconcile_kbd(TuiRuntime *runtime, FILE *fp,
+                                  TuiKeyboardEnhancements declared)
+{
+    if (declared == runtime->cur_kbd_enhancements)
+        return;
+    if (kbd_wire_flags(runtime->cur_kbd_enhancements) != 0)
+        fputs(ANSI_DISABLE_KITTY_KBD, fp);
+    char push[ANSI_KBD_PUSH_BUFSIZE];
+    ansi_format_kbd_push(push, sizeof(push), kbd_wire_flags(declared));
+    if (push[0] != '\0')
+        fputs(push, fp);
+    runtime->cur_kbd_enhancements = declared;
+}
+
+/* ------------------------------------------------------------------ */
 /* Terminal capability probe (see terminal_profile.h)                  */
 /* ------------------------------------------------------------------ */
 
@@ -684,10 +725,16 @@ void tui_runtime_stop(TuiRuntime *runtime)
 
     if (runtime->in_inline_mode) {
         /* Inline mode: write \r\n to end the current input line, then
-         * disable bracketed paste. Output printed after stop() will
+         * drop the modes this app set (bracketed paste, and the pushed
+         * keyboard flags — leaving them pushed would hand the shell
+         * CSI u keys after exit). Output printed after stop() will
          * appear on fresh lines below. Do NOT do DECRC — we want the
          * cursor to stay here, not jump back to where start() saved it. */
         runtime_write(runtime, "\r\n");
+        if (kbd_wire_flags(runtime->cur_kbd_enhancements) != 0) {
+            runtime_write(runtime, ANSI_DISABLE_KITTY_KBD);
+            runtime->cur_kbd_enhancements = TUI_KBD_NONE;
+        }
         if (runtime->cur_bracketed_paste) {
             runtime_write(runtime, ANSI_DISABLE_BRACKETED_PASTE);
             runtime->cur_bracketed_paste = 0;
@@ -702,7 +749,7 @@ void tui_runtime_stop(TuiRuntime *runtime)
         return;
     }
 
-    if (runtime->cur_kbd_enhancements & TUI_KBD_KITTY) {
+    if (kbd_wire_flags(runtime->cur_kbd_enhancements) != 0) {
         runtime_write(runtime, ANSI_DISABLE_KITTY_KBD);
         runtime->cur_kbd_enhancements = TUI_KBD_NONE;
     }
@@ -1067,8 +1114,11 @@ void tui_runtime_flush(TuiRuntime *runtime)
     if (v.render_mode == TUI_RENDER_INLINE) {
         runtime->in_inline_mode = 1;
 
-        /* Inline mode: no alt screen, no mouse, no kbd enhancements.
-         * Only reconcile bracketed paste. */
+        /* Inline mode: no alt screen and no mouse. The keyboard
+         * protocol is independent of the screen buffer, so it is
+         * reconciled here too (an inline app is exactly the shape that
+         * wants Shift+Enter and an unambiguous Esc). */
+        runtime_reconcile_kbd(runtime, fp, v.kbd_enhancements);
         if (v.bracketed_paste != runtime->cur_bracketed_paste) {
             fputs(v.bracketed_paste ? ANSI_ENABLE_BRACKETED_PASTE
                                     : ANSI_DISABLE_BRACKETED_PASTE,
@@ -1206,13 +1256,8 @@ void tui_runtime_flush(TuiRuntime *runtime)
             fputs(ANSI_ENABLE_MOUSE, fp);
         runtime->cur_mouse_mode = v.mouse_mode;
     }
-    if (v.kbd_enhancements != runtime->cur_kbd_enhancements) {
-        if (runtime->cur_kbd_enhancements & TUI_KBD_KITTY)
-            fputs(ANSI_DISABLE_KITTY_KBD, fp);
-        if (v.kbd_enhancements & TUI_KBD_KITTY)
-            fputs(ANSI_ENABLE_KITTY_KBD, fp);
-        runtime->cur_kbd_enhancements = v.kbd_enhancements;
-    }
+    if (v.kbd_enhancements != runtime->cur_kbd_enhancements)
+        runtime_reconcile_kbd(runtime, fp, v.kbd_enhancements);
     if (v.bracketed_paste != runtime->cur_bracketed_paste) {
         fputs(v.bracketed_paste ? ANSI_ENABLE_BRACKETED_PASTE
                                 : ANSI_DISABLE_BRACKETED_PASTE,

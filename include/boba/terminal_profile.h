@@ -63,17 +63,27 @@ typedef struct TuiTerminalProfile
 
     /* Cell geometry in pixels, 0 when unknown (`CSI 16 t` reply). */
     int cell_w_px, cell_h_px;
+
+    /* Kitty keyboard protocol support: set when the terminal answered
+     * the flags query (`CSI ? u` → `CSI ? <flags> u`). The PRESENCE of
+     * an answer is the verdict, not its value — a terminal that speaks
+     * the protocol answers even when it currently has no flags set
+     * (`?0u`). A terminal that does not ignores the query, so silence
+     * here means "keep the legacy encodings". */
+    int kbd_protocol;
+    int kbd_flags; /* the flags the terminal reported as SET */
 } TuiTerminalProfile;
 
 /* The runtime's profile. Never NULL. `resolved` tells whether a probe
  * has reached its verdict. */
 const TuiTerminalProfile *tui_runtime_terminal_profile(struct TuiRuntime *rt);
 
-/* Probe query bytes (see step 2 above): kitty graphics query, DA1, cell
- * size, XTVERSION — in the order kitty documents (support query first,
- * then DA1, so a terminal without graphics answers DA1 alone). Exposed
- * for tests and for consumers embedding the runtime elsewhere. `buf`
- * must hold TUI_TERM_PROBE_QUERY_MAX bytes; returns the length. */
+/* Probe query bytes (see step 2 above): kitty graphics query, kitty
+ * keyboard flags, DA1, cell size, XTVERSION — in the order kitty
+ * documents (support query first, then DA1, so a terminal without
+ * graphics answers DA1 alone). Exposed for tests and for consumers
+ * embedding the runtime elsewhere. `buf` must hold
+ * TUI_TERM_PROBE_QUERY_MAX bytes; returns the length. */
 #define TUI_TERM_PROBE_QUERY_MAX 128
 size_t tui_term_probe_query(char *buf, size_t cap);
 
