@@ -119,13 +119,31 @@ typedef enum
     TUI_KEY_F12 = 26,
 } TuiKeyCode;
 
-/* Key press message data */
+/* Key press message data.
+ *
+ * `rune` is the key's character. When the terminal reports the text a
+ * key PRODUCED — the kitty protocol's "report associated text" flag —
+ * that text is carried here too, because the key code alone is the
+ * UNSHIFTED key (`CSI 97;2;65u` is shift+a, whose text is "A") and can
+ * be more than one codepoint (a dead key plus its base, an IME result).
+ * `text_len` is 0 when the terminal reported none: every legacy
+ * encoding, and a protocol terminal that does not implement the flag —
+ * then `rune` is all the app has.
+ *
+ * The buffer is inline and bounded on purpose: a key message is copied
+ * by value on every event, so a heap payload would be one malloc per
+ * keystroke, and a key event's text is a grapheme, not a paragraph. */
+#define TUI_KEY_TEXT_MAX 32
+
 typedef struct
 {
     int key;             /* Special key code (TuiKeyCode) or 0 for regular char */
     uint32_t rune;       /* Unicode codepoint for regular characters */
     int mods;            /* Modifier flags (TuiKeyMod) */
     TuiKeyAction action; /* Press (default) vs release */
+
+    char text[TUI_KEY_TEXT_MAX]; /* the text the key produced (see above) */
+    int text_len;                /* bytes in `text`; 0 = not reported */
 } TuiKeyMsg;
 
 /* Window size message data */

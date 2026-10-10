@@ -263,8 +263,91 @@ static void test_kitty_other_ctrl_keys_are_keys(void)
     assert(m.data.key.mods == TUI_MOD_CTRL);
 }
 
-/* The kitty keyboard flags answer is a capability REPLY, not a key
- * press: `CSI ? <flags> u` (a key event is `CSI <code> u`, no `?`). A
+/* Associated text (the "report associated text" flag): the key code is
+ * the UNSHIFTED key, so the text is what the key actually produced. */
+static void test_kitty_associated_text_capital(void)
+{
+    /* CSI 97;2;65u — shift+a, text "A" (kitty's own example). */
+    TuiMsg m = parse_one("\033[97;2;65u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.key == TUI_KEY_NONE);
+    assert(m.data.key.rune == 'A');
+    assert(m.data.key.mods == TUI_MOD_SHIFT);
+    assert(m.data.key.text_len == 1);
+    assert(memcmp(m.data.key.text, "A", 1) == 0);
+}
+
+static void test_kitty_associated_text_grapheme(void)
+{
+    /* CSI 101;1;101:769u — 'e' plus COMBINING ACUTE, one key event
+     * carrying both codepoints (a dead key's result). */
+    TuiMsg m = parse_one("\033[101;1;101:769u");
+    assert(m.data.key.key == TUI_KEY_NONE);
+    assert(m.data.key.rune == 'e');
+    assert(m.data.key.text_len == 3);
+    assert(memcmp(m.data.key.text, "e\xcc\x81", 3) == 0);
+}
+
+static void test_kitty_pure_text_event(void)
+{
+    /* CSI 0;;229u — no key information at all (an IME result): the text
+     * is the event. */
+    TuiMsg m = parse_one("\033[0;;229u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.key == TUI_KEY_NONE);
+    assert(m.data.key.rune == 229);
+    assert(m.data.key.text_len == 2);
+    assert(memcmp(m.data.key.text, "\xc3\xa5", 2) == 0);
+}
+
+/* The event type is a SUB-PARAMETER: only a ':' field is one, so a ';'
+ * field that happens to hold 3 is text, never a release. */
+static void test_kitty_event_type_needs_the_colon(void)
+{
+    TuiMsg release = parse_one("\033[97;2:3u");
+    assert(release.data.key.action == TUI_KEY_ACTION_RELEASE);
+
+    TuiMsg press = parse_one("\033[97;2;3u");
+    assert(press.data.key.action == TUI_KEY_ACTION_PRESS);
+    /* 3 is a control code, which is not text: the field is empty. */
+    assert(press.data.key.text_len == 0);
+    assert(press.data.key.rune == 'a');
+}
+
+/* A special key keeps its code, and control codes are not text — so the
+ * text field is not a character there. */
+static void test_kitty_special_key_ignores_text(void)
+{
+    TuiMsg m = parse_one("\033[13;2;13u");
+    assert(m.data.key.key == TUI_KEY_ENTER);
+    assert(m.data.key.mods == TUI_MOD_SHIFT);
+    assert(m.data.key.text_len == 0);
+}
+
+/* A key event's text is a grapheme, not a paragraph: the buffer is
+ * bounded, and what does not fit is dropped rather than overflowing. */
+static void test_kitty_associated_text_is_bounded(void)
+{
+    /* 20 three-byte codepoints (U+0800) = 60 bytes, well past the cap. */
+    char seq[256];
+    int n = snprintf(seq, sizeof(seq), "\033[97;1;%u", 0x800u);
+    for (int i = 1; i < 20; i++) {
+        char part[16];
+        snprintf(part, sizeof(part), ":%u", 0x800u);
+        size_t len = strlen(seq);
+        snprintf(seq + len, sizeof(seq) - len, "%s", part);
+    }
+    size_t len = strlen(seq);
+    snprintf(seq + len, sizeof(seq) - len, "u");
+
+    TuiMsg m = parse_one(seq);
+    assert(m.data.key.text_len <= TUI_KEY_TEXT_MAX);
+    /* Whole codepoints only: the cap is a multiple of three here. */
+    assert(m.data.key.text_len == (TUI_KEY_TEXT_MAX / 3) * 3);
+    assert(m.data.key.rune == 0x800u);
+}
+
+/* The kitty keyboard flags answer is a capability REPLY, not a key * press: `CSI ? <flags> u` (a key event is `CSI <code> u`, no `?`). A
  * probe that claimed replies gets it parked; without a claim it is
  * dropped, never typed. */
 static void test_kitty_flags_reply_is_claimed_not_typed(void)
@@ -652,6 +735,12 @@ int main(void)
     RUN_TEST(test_kitty_release);
     RUN_TEST(test_kitty_release_with_ctrl);
     RUN_TEST(test_kitty_release_special_key);
+    RUN_TEST(test_kitty_associated_text_capital);
+    RUN_TEST(test_kitty_associated_text_grapheme);
+    RUN_TEST(test_kitty_pure_text_event);
+    RUN_TEST(test_kitty_event_type_needs_the_colon);
+    RUN_TEST(test_kitty_special_key_ignores_text);
+    RUN_TEST(test_kitty_associated_text_is_bounded);
     RUN_TEST(test_kitty_ctrl_c_is_interrupt);
     RUN_TEST(test_kitty_ctrl_shift_c_is_interrupt);
     RUN_TEST(test_kitty_ctrl_d_is_eof);

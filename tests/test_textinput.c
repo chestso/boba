@@ -416,6 +416,77 @@ static void test_paste_empty_payload_is_a_noop(void)
     tui_textinput_free(input);
 }
 
+/* ---------- associated text (kitty flag 16) ---------- */
+
+/* Send a key press carrying the text the key produced. */
+static void send_key_text(TuiTextInput *input, uint32_t rune, int mods,
+                          const char *text)
+{
+    TuiMsg m = tui_msg_key(TUI_KEY_NONE, rune, mods);
+    size_t len = strlen(text);
+    assert(len <= TUI_KEY_TEXT_MAX);
+    memcpy(m.data.key.text, text, len);
+    m.data.key.text_len = (int)len;
+    TuiUpdateResult r = tui_textinput_update(input, m);
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+}
+
+/* The reported text is what the key PRODUCED, so it wins over the key
+ * code: shift+a is key code 97 plus SHIFT and text "A". */
+static void test_key_text_is_inserted(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+
+    send_key_text(input, 'a', TUI_MOD_SHIFT, "A");
+    assert(strcmp(tui_textinput_text(input), "A") == 0);
+
+    /* And a grapheme arrives whole (a dead key plus its base). */
+    send_key_text(input, 'e', TUI_MOD_NONE, "e\xcc\x81");
+    assert(strcmp(tui_textinput_text(input), "Ae\xcc\x81") == 0);
+    assert(tui_textinput_len(input) == 4);
+
+    tui_textinput_free(input);
+}
+
+/* A terminal that reports keys as escape codes WITHOUT their text (the
+ * "report all keys" flag without the associated-text one) sends shift+a
+ * as key code 97 plus SHIFT: the capital is recovered rather than
+ * inserting the unshifted letter. */
+static void test_shifted_letter_without_text_recovers_capital(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+
+    TuiUpdateResult r = tui_textinput_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'b', TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    assert(strcmp(tui_textinput_text(input), "B") == 0);
+
+    /* Shift+digit has no layout-independent answer: the unshifted key
+     * stands (a terminal that reports its text sends that instead). */
+    r = tui_textinput_update(input,
+                             tui_msg_key(TUI_KEY_NONE, '5', TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    assert(strcmp(tui_textinput_text(input), "B5") == 0);
+
+    tui_textinput_free(input);
+}
+
+/* Ctrl+letter carries no text (control codes are excluded from
+ * associated text), so the bindings keep working under the flag. */
+static void test_ctrl_binding_survives_associated_text(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    send_string(input, "ab");
+    send_ctrl(input, 'a'); /* line start */
+    assert(tui_textinput_cursor(input) == 0);
+    send_key_text(input, 'a', TUI_MOD_CTRL, "");
+    assert(strcmp(tui_textinput_text(input), "ab") == 0);
+    tui_textinput_free(input);
+}
+
 /* Render the textinput view to a buffer and return its data as a malloc'd
  * copy (caller frees). */
 static char *render_view(TuiTextInput *input)
@@ -1937,6 +2008,9 @@ int main(void)
     RUN_TEST(test_paste_is_one_undo_entry);
     RUN_TEST(test_paste_ignored_when_unfocused);
     RUN_TEST(test_paste_empty_payload_is_a_noop);
+    RUN_TEST(test_key_text_is_inserted);
+    RUN_TEST(test_shifted_letter_without_text_recovers_capital);
+    RUN_TEST(test_ctrl_binding_survives_associated_text);
     RUN_TEST(test_focused_blurred_styles_differ);
     RUN_TEST(test_prompt_style_applies_in_multiline_mode);
     RUN_TEST(test_legacy_color_still_works);

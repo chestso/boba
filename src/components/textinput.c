@@ -1201,6 +1201,23 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                         pending_cmd = tui_cmd_clipboard_copy(src, src_len);
                     clear_mark_if_set(input);
                 }
+            } else if (key.text_len > 0) {
+                /* The terminal reported what the key produced (the kitty
+                 * protocol's associated text): insert THAT, not the key
+                 * code — `CSI 97;2;65u` is shift+a, whose key code is
+                 * the unshifted 97 while its text is "A". A grapheme (a
+                 * dead key plus its base, an IME result) arrives whole. */
+                insert_text(input, key.text, (size_t)key.text_len);
+            } else if ((key.mods & TUI_MOD_SHIFT) && key.rune >= 'a' &&
+                       key.rune <= 'z' && !(key.mods & (TUI_MOD_CTRL | TUI_MOD_ALT))) {
+                /* A terminal that reports keys as escape codes without
+                 * their text (the "report all keys" flag without the
+                 * associated-text one) sends shift+a as the key code 97
+                 * plus SHIFT: recover the capital rather than inserting
+                 * the unshifted letter. ASCII letters are the case that
+                 * is layout-independent — a shifted digit or punctuation
+                 * key is left to a terminal that reports its text. */
+                insert_codepoint(input, key.rune - 0x20);
             } else {
                 insert_codepoint(input, key.rune);
             }

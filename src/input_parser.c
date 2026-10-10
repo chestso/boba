@@ -1,6 +1,7 @@
 /* input_parser.c - Terminal input parsing for boba TUI library */
 
 #include <boba/input_parser.h>
+#include <boba/unicode.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +32,13 @@ static const unsigned char PASTE_END_MARKER[6] = { 0x1B, '[', '2', '0', '1',
 struct TuiInputParser
 {
     ParserState state;
-    unsigned char seq_buf[32]; /* Buffer for escape sequences */
+    /* Buffer for escape sequences. Sized for the longest CSI the parser
+     * can use: a kitty key event carrying associated text — 16 params of
+     * up to 7 digits each (`1114111`), plus the final byte. A longer
+     * sequence is dropped whole rather than half-parsed (the state
+     * machine consumes it, stores nothing past the cap, and the final
+     * byte's parse sees a truncated param list). */
+    unsigned char seq_buf[160];
     int seq_len;
     int utf8_remaining;      /* Remaining bytes in UTF-8 sequence */
     uint32_t utf8_codepoint; /* Accumulated UTF-8 codepoint */
@@ -269,17 +276,22 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
      * - ';' is the standard CSI parameter separator.
      * - ':' is the sub-parameter separator (used by the Kitty keyboard
      *   protocol, e.g. CSI 65 ; 5 : 3 u for Ctrl+'A' release).
-     * For our flat dispatch we treat both identically.
+     * The two are NOT the same thing, which is why each param records
+     * the separator that opened it: `CSI key;mod:event;text u` carries
+     * an event type after a ':' and the associated text after a ';',
+     * and a flat array cannot tell them apart (see the 'u' case).
      * A leading '?' (DEC private) is skipped: DA1 is `CSI ? 1 ; 2 ; 4 c`. */
-    int params[8] = { 0 };
+    int params[16] = { 0 };
+    char seps[16] = { 0 }; /* seps[i]: the separator that opened params[i] */
     int n_params = 0;
     const char *p = (const char *)seq;
     char final = seq[len - 1];
+    char pending_sep = 0; /* the separator awaiting the next param */
 
     if (*p == '?')
         p++;
 
-    while (n_params < 8) {
+    while (n_params < 16) {
         int v = 0;
         int saw_digit = 0;
         while (*p >= '0' && *p <= '9') {
@@ -288,13 +300,16 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
             saw_digit = 1;
         }
         if (saw_digit) {
+            seps[n_params] = pending_sep;
             params[n_params++] = v;
         }
         if (*p == ';' || *p == ':') {
-            if (!saw_digit && n_params < 8) {
+            if (!saw_digit && n_params < 16) {
                 /* Empty slot (e.g. ";;3" — leave previous defaults at 0). */
+                seps[n_params] = pending_sep;
                 params[n_params++] = 0;
             }
+            pending_sep = *p;
             p++;
         } else {
             break;
@@ -404,11 +419,16 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
     case 'u':
     {
         /* CSI u — Kitty keyboard protocol.
-         *   CSI codepoint ; modifiers : event-type u
+         *   CSI codepoint ; modifiers : event-type ; text u
          * event-type: 1=press (default), 2=repeat, 3=release.
-         * Repeat folds into PRESS to match Bubbletea v2's KeyMsg shape. */
-        TuiKeyAction action = (params[2] == 3) ? TUI_KEY_ACTION_RELEASE
-                                               : TUI_KEY_ACTION_PRESS;
+         * Repeat folds into PRESS to match Bubbletea v2's KeyMsg shape.
+         * The event type is a SUB-PARAMETER (after ':'), which is why
+         * the ';' and ':' separators are tracked apart: without that,
+         * `CSI 97;2;3u` (text = 3) would read as a release. */
+        TuiKeyAction action =
+            (n_params > 2 && seps[2] == ':' && params[2] == 3)
+                ? TUI_KEY_ACTION_RELEASE
+                : TUI_KEY_ACTION_PRESS;
 
         /* Ctrl+C and Ctrl+D keep their verdicts here. The legacy path
          * reads them from the control BYTES (0x03 / 0x04), which flag 1
@@ -424,6 +444,36 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
                 return tui_msg_eof();
         }
 
+        /* Associated text (the "report associated text" flag): the field
+         * opened by the first ';' past the modifier field — one
+         * codepoint, or several ':'-separated ones when the key produced
+         * a grapheme (a dead key plus its base, an IME result). A
+         * control code is not text and ends the field. */
+        char text[TUI_KEY_TEXT_MAX];
+        int text_len = 0;
+        uint32_t text_first = 0;
+        for (int i = 2; i < n_params; i++) {
+            if (seps[i] != ';')
+                continue;
+            for (int j = i; j < n_params; j++) {
+                if (j > i && seps[j] != ':')
+                    break;
+                uint32_t cp = (uint32_t)params[j];
+                if (cp < 0x20)
+                    break;
+                char enc[5];
+                int n = tui_utf8_encode(cp, enc);
+                if (text_len + n > TUI_KEY_TEXT_MAX)
+                    break; /* a key event's text is a grapheme, not a
+                            * paragraph: the buffer is bounded */
+                memcpy(text + text_len, enc, (size_t)n);
+                if (text_len == 0)
+                    text_first = cp;
+                text_len += n;
+            }
+            break;
+        }
+
         int key_code = TUI_KEY_NONE;
         uint32_t rune = 0;
         if (param1 == 13)
@@ -436,11 +486,26 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
             key_code = TUI_KEY_BACKSPACE;
         else if (param1 >= 0x20)
             rune = (uint32_t)param1;
-        else
-            break; /* Unrecognized — drop. */
+        else if (text_len == 0)
+            break; /* Unrecognized — and no text to fall back on. */
+
+        /* A text key's associated text is what the key produced, so it
+         * outranks the key code — which is the UNSHIFTED key (97 for
+         * shift+a, whose text is "A") — and its first codepoint is also
+         * the rune, so a consumer that reads only `rune` still gets the
+         * common single-codepoint case right. A special key keeps its
+         * code: the spec excludes control codes from associated text,
+         * so a text field there is not a character. */
+        int is_text_key = (key_code == TUI_KEY_NONE && text_len > 0);
+        if (is_text_key)
+            rune = text_first;
 
         TuiMsg km = tui_msg_key(key_code, rune, mods);
         km.data.key.action = action;
+        if (is_text_key) {
+            memcpy(km.data.key.text, text, (size_t)text_len);
+            km.data.key.text_len = text_len;
+        }
         return km;
     }
     }

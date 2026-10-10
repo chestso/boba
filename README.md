@@ -266,6 +266,14 @@ legacy encodings, which the parser still accepts in every tier. Declaring
 `probe_terminal` reports what the terminal granted
 (`TuiTerminalProfile::kbd_protocol` / `kbd_flags`).
 
+The parser decodes the associated text into `TuiKeyMsg::text` (bounded, one
+grapheme): a text key's `rune` is the first codepoint of that text, so a
+consumer that only reads `rune` gets the common single-codepoint case right,
+and the textinput inserts `text` when it is there. A terminal that reports
+keys without their text still types: a shifted ASCII letter with no reported
+text is recovered as its capital, and a shifted digit or punctuation key is
+left to a terminal that reports what it produced.
+
 The runtime diffs each frame's `TuiView` against the terminal state it tracks
 and emits only the bytes needed to reach the requested state — no imperative
 "enter alt screen" / "show cursor" commands. Use `tui_view_default(out)` to

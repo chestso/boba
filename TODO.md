@@ -8,19 +8,15 @@ None are blockers — they extend or polish what's already in place.
 The kitty keyboard protocol is wired: `TuiView.kbd_enhancements` is a
 bitmask of flags 1/8/16, pushed onto the terminal's stack (popped on
 change and at stop, in both render modes), the probe asks `CSI ? u` and
-reports `TuiTerminalProfile::kbd_protocol` / `kbd_flags`, and Ctrl+C /
-Ctrl+D keep their INTERRUPT / EOF verdicts under the protocol.
+reports `TuiTerminalProfile::kbd_protocol` / `kbd_flags`, Ctrl+C / Ctrl+D
+keep their INTERRUPT / EOF verdicts under the protocol, and the parser
+decodes the associated text (flag 16) into `TuiKeyMsg::text` — so a
+consumer can declare all three flags: Shift+Enter (`CSI 13;2u`), capitals
+from the reported text, and IME results.
 
-- **Associated text (flag 16) is not decoded yet.** With flag 8 alone a
-  capital arrives as its unshifted key code plus SHIFT (`CSI 97;2u`), so
-  a consumer that declares ALL_KEYS without TEXT would insert lowercase
-  for every capital. Flag 16 sends the produced text as a field after
-  the modifiers (`CSI 97;2;65u`), and a pure text event (an IME result)
-  has key code 0 and no modifier (`CSI 0;;229u`) — the parser drops
-  both today. Decoding it needs the `;` / `:` sub-parameter distinction
-  the flat `params[]` loses, and an answer to the multi-codepoint case
-  (the text field is a `:`-separated list, and a `TuiKeyMsg` carries one
-  rune). Until then, declare `TUI_KBD_KITTY` alone (flag 1).
+- **Event types (flag 2) are not requested** — releases and repeats would
+  arrive as sub-fields the parser already reads (`:1`/`:2`/`:3`), but no
+  consumer wants them yet, and the textinput ignores releases.
 
 ## Selection / clipboard
 
