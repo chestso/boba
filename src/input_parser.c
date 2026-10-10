@@ -268,10 +268,10 @@ void tui_input_parser_reset(TuiInputParser *parser)
  * "report all keys as escape codes" flag reports a Shift press as
  * `CSI 57441;2u`, and a consumer that inserts the rune of every
  * printable key would type an invisible PUA codepoint each time the
- * user reached for a capital. Real text in the PUA still arrives as
- * text: it comes in the event's text field (a pure text event is
- * `CSI 0;;<codepoint>u`), which is where a deliberately typed PUA
- * character lands. */
+ * user reached for a capital. Text that really is PUA still arrives as
+ * text, in the event's text field: a pure text event is
+ * `CSI 0;;<codepoint>u`, and a keypad digit (a PUA key code) carries
+ * the digit it typed. */
 static int is_functional_key_codepoint(int cp)
 {
     return cp >= 0xE000 && cp <= 0xF8FF;
@@ -336,23 +336,27 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
     int param1 = params[0];
     int param2 = params[1];
 
-    /* param2 encodes modifiers: 1=none, 2=shift, 3=alt, etc */
-    if (param2 >= 2) {
-        if (param2 == 2)
-            mods |= TUI_MOD_SHIFT;
-        else if (param2 == 3)
-            mods |= TUI_MOD_ALT;
-        else if (param2 == 4)
-            mods |= TUI_MOD_ALT | TUI_MOD_SHIFT;
-        else if (param2 == 5)
-            mods |= TUI_MOD_CTRL;
-        else if (param2 == 6)
-            mods |= TUI_MOD_CTRL | TUI_MOD_SHIFT;
-        else if (param2 == 7)
-            mods |= TUI_MOD_CTRL | TUI_MOD_ALT;
-        else if (param2 == 8)
-            mods |= TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_SHIFT;
-    }
+    /* param2 is the protocol's modifier BIT FIELD plus one — shift 1,
+     * alt 2, ctrl 4, super 8, hyper 16, meta 32, caps_lock 64, num_lock
+     * 128 — NOT an enumeration of the combinations that were easy to
+     * write down. The difference bites: a lock modifier is reported for
+     * EVERY key event once the report-all flag is on (that flag is what
+     * makes Shift+Enter tellable from Enter), so a user with Num Lock
+     * on sends `CSI 13;130u` for Shift+Enter — a value outside any
+     * hand-written table, which read as NO modifiers and turned the
+     * newline back into a submit (and Ctrl+Shift+key into a plain
+     * letter). The locks are keyboard STATE, not modifiers: they are
+     * masked off. Super, hyper and meta have one flag here
+     * (TUI_MOD_META). */
+    int bits = param2 > 0 ? param2 - 1 : 0;
+    if (bits & 1)
+        mods |= TUI_MOD_SHIFT;
+    if (bits & 2)
+        mods |= TUI_MOD_ALT;
+    if (bits & 4)
+        mods |= TUI_MOD_CTRL;
+    if (bits & (8 | 16 | 32))
+        mods |= TUI_MOD_META;
 
     /* SGR mouse sequences reach parse_sgr_mouse_sequence instead. `c`
      * (DA1, XTVERSION-class capability) and `t` (cell/character size)
@@ -501,11 +505,15 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
             key_code = TUI_KEY_ESCAPE;
         else if (param1 == 127)
             key_code = TUI_KEY_BACKSPACE;
-        else if (is_functional_key_codepoint(param1))
-            /* A FUNCTIONAL key — the modifier keys themselves, the lock
-             * keys, F13 and up — is not text, and boba has no code for
-             * it: dropping it is what keeps a Shift press (reported by
-             * the report-all flag) out of the input. */
+        else if (is_functional_key_codepoint(param1) && text_len == 0)
+            /* A FUNCTIONAL key that produced no text — the modifier
+             * keys themselves, the lock keys, F13 and up — is not text,
+             * and boba has no code for it: dropping it is what keeps a
+             * Shift press (reported by the report-all flag) out of the
+             * input. A functional key that DID produce text keeps it: a
+             * keypad digit with Num Lock on is a PUA key code whose
+             * text is the digit, and the text field below is what it
+             * typed. */
             break;
         else if (param1 >= 0x20)
             rune = (uint32_t)param1;

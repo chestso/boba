@@ -337,6 +337,69 @@ static void test_kitty_special_key_ignores_text(void)
     assert(m.data.key.text_len == 0);
 }
 
+/* The modifier field is a BIT FIELD plus one, and the LOCK modifiers
+ * are bits in it. The report-all flag makes a terminal report the lock
+ * state for every key, so a user with Num Lock on sends `CSI 13;130u`
+ * for Shift+Enter — and a decoder that only knows the values 2..8 reads
+ * that as NO modifiers: the newline becomes a submit, and Ctrl+Shift+A
+ * becomes a plain 'a'. The locks are state, not modifiers: masked off,
+ * the real modifiers survive. */
+static void test_kitty_lock_modifiers_do_not_eat_the_modifiers(void)
+{
+    /* Shift+Enter with Num Lock on: 1 + shift(1) + num_lock(128). */
+    TuiMsg m = parse_one("\033[13;130u");
+    assert(m.data.key.key == TUI_KEY_ENTER);
+    assert(m.data.key.mods == TUI_MOD_SHIFT);
+
+    /* Ctrl+Shift+a with Num Lock on: 1 + shift(1) + ctrl(4) + 128. */
+    m = parse_one("\033[97;134u");
+    assert(m.data.key.rune == 'a');
+    assert(m.data.key.mods == (TUI_MOD_CTRL | TUI_MOD_SHIFT));
+
+    /* Ctrl+a with Num Lock on (1 + ctrl(4) + 128). */
+    m = parse_one("\033[97;133u");
+    assert(m.data.key.mods == TUI_MOD_CTRL);
+
+    /* Caps Lock on: 1 + shift(1) + caps_lock(64). */
+    m = parse_one("\033[13;66u");
+    assert(m.data.key.key == TUI_KEY_ENTER);
+    assert(m.data.key.mods == TUI_MOD_SHIFT);
+
+    /* A lock alone is not a modifier at all. */
+    m = parse_one("\033[97;129u");
+    assert(m.data.key.rune == 'a');
+    assert(m.data.key.mods == TUI_MOD_NONE);
+
+    /* Super, hyper and meta fold into the one extra flag boba has. */
+    m = parse_one("\033[97;9u"); /* super */
+    assert(m.data.key.mods == TUI_MOD_META);
+    m = parse_one("\033[97;17u"); /* hyper */
+    assert(m.data.key.mods == TUI_MOD_META);
+    m = parse_one("\033[97;33u"); /* meta */
+    assert(m.data.key.mods == TUI_MOD_META);
+
+    /* And the plain combinations are exactly what they were. */
+    assert(parse_one("\033[97;2u").data.key.mods == TUI_MOD_SHIFT);
+    assert(parse_one("\033[97;3u").data.key.mods == TUI_MOD_ALT);
+    assert(parse_one("\033[97;5u").data.key.mods == TUI_MOD_CTRL);
+    assert(parse_one("\033[97;8u").data.key.mods ==
+           (TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_SHIFT));
+}
+
+/* A functional key that produced TEXT is not dropped: a keypad digit
+ * with Num Lock on is the PUA key code KP_1 with the digit in its text
+ * field, and the digit is what the user typed. */
+static void test_kitty_keypad_digit_keeps_its_text(void)
+{
+    /* CSI 57400;129;49u — KP_1, Num Lock on, text "1". */
+    TuiMsg m = parse_one("\033[57400;129;49u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.rune == '1');
+    assert(m.data.key.mods == TUI_MOD_NONE);
+    assert(m.data.key.text_len == 1);
+    assert(m.data.key.text[0] == '1');
+}
+
 /* A functional key is not text. The "report all keys as escape codes"
  * flag reports the modifier keys THEMSELVES (a Shift press is `CSI
  * 57441;2u`) alongside the keys that have no character of their own,
@@ -786,6 +849,8 @@ int main(void)
     RUN_TEST(test_kitty_pure_text_event);
     RUN_TEST(test_kitty_event_type_needs_the_colon);
     RUN_TEST(test_kitty_special_key_ignores_text);
+    RUN_TEST(test_kitty_lock_modifiers_do_not_eat_the_modifiers);
+    RUN_TEST(test_kitty_keypad_digit_keeps_its_text);
     RUN_TEST(test_kitty_functional_keys_are_not_text);
     RUN_TEST(test_kitty_pua_text_field_is_still_text);
     RUN_TEST(test_kitty_associated_text_is_bounded);
