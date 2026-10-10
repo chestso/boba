@@ -35,6 +35,19 @@ static TuiMsg parse_one(const char *seq)
     return msgs[0];
 }
 
+/* Feed a sequence that must produce NO message at all (a capability
+ * reply, a key the parser has no code for). */
+static int parse_none(const char *seq)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    TuiMsg msgs[4];
+    int n = tui_input_parser_parse(p, (const unsigned char *)seq, strlen(seq),
+                                   msgs, 4);
+    tui_input_parser_free(p);
+    return n == 0;
+}
+
 /* ----- basic buttons ---------------------------------------------------- */
 
 static void test_left_press(void)
@@ -322,6 +335,39 @@ static void test_kitty_special_key_ignores_text(void)
     assert(m.data.key.key == TUI_KEY_ENTER);
     assert(m.data.key.mods == TUI_MOD_SHIFT);
     assert(m.data.key.text_len == 0);
+}
+
+/* A functional key is not text. The "report all keys as escape codes"
+ * flag reports the modifier keys THEMSELVES (a Shift press is `CSI
+ * 57441;2u`) alongside the keys that have no character of their own,
+ * and every one of them is encoded in the Private Use Area. Handing
+ * that codepoint to a consumer as a rune types an invisible PUA
+ * character — once per capital the user types. */
+static void test_kitty_functional_keys_are_not_text(void)
+{
+    /* Left shift, left control, left super (the modifier keys). */
+    assert(parse_none("\033[57441;2u"));
+    assert(parse_none("\033[57442;5u"));
+    assert(parse_none("\033[57444;9u"));
+    /* A lock key and a key past F12 (no key code in boba to report). */
+    assert(parse_none("\033[57358u"));
+    assert(parse_none("\033[57376u"));
+    /* A modifier key RELEASE (flag 2 + flag 8) is no more text. */
+    assert(parse_none("\033[57441;2:3u"));
+}
+
+/* The other half of that rule: a PUA CHARACTER still arrives as text,
+ * because text travels in the text field — a pure text event carries
+ * key code 0 and the codepoint is text. */
+static void test_kitty_pua_text_field_is_still_text(void)
+{
+    /* CSI 0;;57344u — a text event whose text is U+E000. */
+    TuiMsg m = parse_one("\033[0;;57344u");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.key == TUI_KEY_NONE);
+    assert(m.data.key.rune == 0xE000);
+    assert(m.data.key.text_len == 3);
+    assert(memcmp(m.data.key.text, "\xee\x80\x80", 3) == 0);
 }
 
 /* A key event's text is a grapheme, not a paragraph: the buffer is
@@ -740,6 +786,8 @@ int main(void)
     RUN_TEST(test_kitty_pure_text_event);
     RUN_TEST(test_kitty_event_type_needs_the_colon);
     RUN_TEST(test_kitty_special_key_ignores_text);
+    RUN_TEST(test_kitty_functional_keys_are_not_text);
+    RUN_TEST(test_kitty_pua_text_field_is_still_text);
     RUN_TEST(test_kitty_associated_text_is_bounded);
     RUN_TEST(test_kitty_ctrl_c_is_interrupt);
     RUN_TEST(test_kitty_ctrl_shift_c_is_interrupt);

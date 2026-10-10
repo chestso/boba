@@ -260,6 +260,23 @@ void tui_input_parser_reset(TuiInputParser *parser)
     /* paste_buf retained for reuse across pastes. */
 }
 
+/* Is CP a FUNCTIONAL key codepoint rather than text? The kitty keyboard
+ * protocol encodes the keys that have no Unicode character of their own
+ * — F13 and up, the keypad, the media keys, the lock keys, and the
+ * modifier keys THEMSELVES — in the Unicode Private Use Area
+ * (57344-63743). None of them is text, so none of them is a rune: the
+ * "report all keys as escape codes" flag reports a Shift press as
+ * `CSI 57441;2u`, and a consumer that inserts the rune of every
+ * printable key would type an invisible PUA codepoint each time the
+ * user reached for a capital. Real text in the PUA still arrives as
+ * text: it comes in the event's text field (a pure text event is
+ * `CSI 0;;<codepoint>u`), which is where a deliberately typed PUA
+ * character lands. */
+static int is_functional_key_codepoint(int cp)
+{
+    return cp >= 0xE000 && cp <= 0xF8FF;
+}
+
 /* Parse CSI sequence and return appropriate key message. `parser` is
  * used only to record capability-probe replies (DA1, cell size); a
  * NULL parser (unit tests) simply skips the recording. */
@@ -484,6 +501,12 @@ static TuiMsg parse_csi_sequence(TuiInputParser *parser,
             key_code = TUI_KEY_ESCAPE;
         else if (param1 == 127)
             key_code = TUI_KEY_BACKSPACE;
+        else if (is_functional_key_codepoint(param1))
+            /* A FUNCTIONAL key — the modifier keys themselves, the lock
+             * keys, F13 and up — is not text, and boba has no code for
+             * it: dropping it is what keeps a Shift press (reported by
+             * the report-all flag) out of the input. */
+            break;
         else if (param1 >= 0x20)
             rune = (uint32_t)param1;
         else if (text_len == 0)
