@@ -94,6 +94,11 @@ static int test_measure_image(const TuiBlock *blk, const char *text,
         *out_rows = 3;
         return 1;
     }
+    if (profile->sixel) {
+        g_img_transport = TUI_IMAGE_SIXEL;
+        *out_rows = 3;
+        return 1;
+    }
     return 0; /* degrade */
 }
 
@@ -106,6 +111,51 @@ static const unsigned char IMG_PAYLOAD[] = "\x89PNG\r\n\x1a\nABCD";
 static const unsigned char *g_img_payload = IMG_PAYLOAD;
 static size_t g_img_payload_len = IMG_PAYLOAD_LEN;
 
+/* SIXEL payload: a 3x12 two-color INDEXED8 image and its palette
+ * (0-100 per channel, the spec's range). Band 0 is 0,1,0 per row; band
+ * 1 is all 0. The golden below pins the framing it produces. */
+#define IMG_IDX_W 3
+#define IMG_IDX_H 12
+static const unsigned char IMG_IDX[IMG_IDX_W * IMG_IDX_H] = {
+    0,
+    1,
+    0,
+    0,
+    1,
+    0,
+    0,
+    1,
+    0,
+    0,
+    1,
+    0,
+    0,
+    1,
+    0,
+    0,
+    1,
+    0, /* band 0 */
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0, /* band 1 */
+};
+static const unsigned char IMG_PAL[6] = { 100, 0, 0, 0, 100, 0 };
+
 static void test_render_image(const TuiBlock *blk, const char *text,
                               size_t len, int col_span, int rows,
                               TuiRowSink *sink, void *ud)
@@ -115,8 +165,17 @@ static void test_render_image(const TuiBlock *blk, const char *text,
     (void)ud;
     g_img_rendered++;
     TuiImageSpec spec;
-    tui_image_spec_init(&spec, g_img_transport, TUI_IMAGE_PNG, g_img_payload,
-                        g_img_payload_len, 8, 4, col_span, rows, blk->image_id);
+    if (g_img_transport == TUI_IMAGE_SIXEL) {
+        tui_image_spec_init(&spec, TUI_IMAGE_SIXEL, TUI_IMAGE_INDEXED8, IMG_IDX,
+                            sizeof(IMG_IDX), IMG_IDX_W, IMG_IDX_H, col_span,
+                            rows, blk->image_id);
+        spec.palette = IMG_PAL;
+        spec.ncolors = 2;
+    } else {
+        tui_image_spec_init(&spec, g_img_transport, TUI_IMAGE_PNG, g_img_payload,
+                            g_img_payload_len, 8, 4, col_span, rows,
+                            blk->image_id);
+    }
     tui_row_image(sink, &spec);
     tui_row_end(sink);
 }
@@ -1356,6 +1415,15 @@ static void h_profile_iterm2(H *h)
     h->rt->profile.iterm2_images = 1;
 }
 
+static void h_profile_sixel(H *h)
+{
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.sixel = 1;
+    h->rt->profile.cell_w_px = 10;
+    h->rt->profile.cell_h_px = 6;
+}
+
 /* Classifier that opens a paragraph block on a "!img" line, kind IMAGE. */
 static TuiLineClass image_classify(void *state, const char *line, size_t len,
                                    const char *prev, size_t prev_len,
@@ -1588,6 +1656,71 @@ static void test_image_iterm2_golden_bytes(void)
              "\x07\r\n\r\n\r\n");
     assert(strstr(out, golden) != NULL);
     assert(g_img_rendered == 1);
+
+    h_free(h);
+}
+
+/* sixel: one DCS — P1=0/P2=1/P3=0, the square-pixel raster with the
+ * payload's pixel dims, the palette, then the bands (register passes
+ * with $ between registers and - between bands, run-length encoded) and
+ * ST — followed by exactly ONE row terminator. The terminal lands the
+ * cursor on the image's LAST row per the VT340 spec, so disp_rows
+ * terminators would leave a gap. */
+static void test_image_sixel_golden_bytes(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_sixel(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_flush(h);
+    const char *out = h_read(h);
+
+    const char *golden =
+        "\x1bP0;1;0q\"1;1;3;12"
+        "#0;2;100;0;0#1;2;0;100;0"
+        "#0~?~"
+        "$#1?~?"
+        "-#0!3~"
+        "\x1b\\"
+        "\r\n";
+    assert(strstr(out, golden) != NULL);
+    assert(g_img_calls == 1);
+    assert(g_img_rendered == 1);
+    assert(g_img_block_calls == 0); /* no degraded fallback */
+    assert(g_img_profile_seen.sixel == 1);
+
+    h_free(h);
+}
+
+/* The sixel reservation is ONE row: the following unit's bytes come
+ * after a single terminator, not disp_rows. */
+static void test_image_sixel_reserves_one_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_sixel(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
+    h_flush(h);
+    const char *out = h_read(h);
+
+    const char *st = strstr(out, "\x1b\\");
+    const char *after = strstr(out, "after");
+    assert(st && after);
+    /* exactly "\r\n" between the image's ST and the next unit */
+    assert(strncmp(st + 2, "\r\n", 2) == 0);
+    assert(strncmp(st + 2, "\r\n\r\n", 4) != 0);
+    assert(after > st);
 
     h_free(h);
 }
@@ -1880,6 +2013,8 @@ int main(void)
     RUN_TEST(test_image_defer_resolves_when_no_probe_declared);
     RUN_TEST(test_image_kitty_golden_bytes);
     RUN_TEST(test_image_iterm2_golden_bytes);
+    RUN_TEST(test_image_sixel_golden_bytes);
+    RUN_TEST(test_image_sixel_reserves_one_row);
     RUN_TEST(test_image_row_reservation_bounds_the_next_unit);
     RUN_TEST(test_image_defers_until_profile_resolves);
     RUN_TEST(test_image_measure_refusal_degrades_to_render_block);

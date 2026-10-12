@@ -195,19 +195,20 @@ void tui_row_end(TuiRowSink *s);
 /* Emit an image at the current position. `spec` names the transport
  * (the app's tier choice, from the terminal profile), the payload
  * (borrowed, callback-scoped) and the display size in CELLS — the
- * sink reserves exactly `disp_rows` screen rows for this row and the
- * next `tui_row_end` (or the sink's close) emits that many row
- * terminators, so the following unit starts below the image and the
- * terminal never decides layout. Commit destination only: on the
- * live/count sinks the image is dropped (a live re-render would
- * re-transmit the payload every frame — the app renders a
- * placeholder there instead; a debug assert names the violation).
+ * sink reserves the screen rows for this row and the next
+ * `tui_row_end` (or the sink's close) emits the row terminators, so
+ * the following unit starts below the image and the terminal never
+ * decides layout. Commit destination only: on the live/count sinks the
+ * image is dropped (a live re-render would re-transmit the payload
+ * every frame — the app renders a placeholder there instead; a debug
+ * assert names the violation).
  * The transport bytes are appended raw, not through the escape
  * scanner: boba's own framing is never scanned. */
 typedef enum
 {
     TUI_IMAGE_KITTY,  /* kitty graphics APC, f=100 PNG payload     */
     TUI_IMAGE_ITERM2, /* iTerm2 OSC 1337 File=inline=1 (PNG/JPEG/GIF) */
+    TUI_IMAGE_SIXEL,  /* sixel DCS, INDEXED8 payload + palette     */
 } TuiImageTransport;
 
 typedef enum
@@ -215,6 +216,9 @@ typedef enum
     TUI_IMAGE_PNG,
     TUI_IMAGE_JPEG,
     TUI_IMAGE_GIF,
+    /* A raw display payload: one palette index per pixel (the app's
+     * quantizer output). Display-only — never a wire container. */
+    TUI_IMAGE_INDEXED8,
 } TuiImageFormat;
 
 typedef struct TuiImageSpec
@@ -222,15 +226,24 @@ typedef struct TuiImageSpec
     TuiImageTransport transport;
     TuiImageFormat format;
     const unsigned char *data; /* borrowed; valid for the callback */
-    size_t data_len;           /* decoded byte count                */
-    int src_w, src_h;          /* source pixels                     */
-    int disp_cols, disp_rows;  /* display size in cells (the row
-                                * reservation)                      */
+    size_t data_len;           /* decoded byte count (INDEXED8:
+                                * src_w*src_h index bytes)          */
+    int src_w, src_h;          /* source pixels (SIXEL: the payload's
+                                * pixel dims — its display extent)  */
+    int disp_cols, disp_rows;  /* display size in cells             */
     int image_id;              /* kitty i=; from TuiBlock.image_id  */
+
+    /* SIXEL only (ignored by kitty/iTerm2): the palette the INDEXED8
+     * payload indexes into — `ncolors` RGB triples, each component
+     * 0-100 (the VT340 spec's range). Set after tui_image_spec_init
+     * (which zeroes them), for a TUI_IMAGE_INDEXED8 payload. */
+    const unsigned char *palette;
+    int ncolors;
 } TuiImageSpec;
 
 /* Fill a spec from borrowed parts. The data pointer is borrowed for
- * the duration of the tui_row_image call only. */
+ * the duration of the tui_row_image call only. `palette`/`ncolors`
+ * are left zeroed — a sixel caller sets them after the call. */
 void tui_image_spec_init(TuiImageSpec *spec, TuiImageTransport transport,
                          TuiImageFormat format, const unsigned char *data,
                          size_t data_len, int src_w, int src_h, int disp_cols,

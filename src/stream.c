@@ -830,6 +830,190 @@ static void image_write_iterm2(TuiRowSink *s, const TuiImageSpec *spec)
     dynamic_buffer_append(s->buf, "\x07", 1);
 }
 
+/* ------------------------------------------------------------------ */
+/* sixel                                                               */
+/* ------------------------------------------------------------------ */
+
+/* Run-length state for one color pass: sixel repeats a char with
+ * `!<n><char>`, and a bare char is the n == 1 form. */
+typedef struct
+{
+    int run;
+    unsigned char ch;
+} SixelRun;
+
+static void sixel_rle_flush(TuiRowSink *s, SixelRun *r)
+{
+    if (r->run <= 0)
+        return;
+    if (r->run == 1) {
+        dynamic_buffer_append(s->buf, (const char *)&r->ch, 1);
+    } else {
+        char rep[24];
+        int n = snprintf(rep, sizeof(rep), "!%d%c", r->run, (int)r->ch);
+        if (n > 0)
+            dynamic_buffer_append(s->buf, rep, (size_t)n);
+    }
+    r->run = 0;
+}
+
+static void sixel_rle_put(TuiRowSink *s, SixelRun *r, unsigned char ch)
+{
+    if (r->run > 0 && ch == r->ch) {
+        r->run++;
+        return;
+    }
+    sixel_rle_flush(s, r);
+    r->run = 1;
+    r->ch = ch;
+}
+
+/* One set pixel, bucketed by its palette register within a band. */
+typedef struct
+{
+    int col;
+    unsigned char bit;
+} SixelPx;
+
+/* sixel: DCS P1;P2;P3 q <data> ST, per the VT340 reference (ch14).
+ * The payload is one palette index per pixel (INDEXED8, src_w*src_h
+ * bytes) indexing `ncolors` RGB triples at 0-100 — the spec's range
+ * ("Red 0-100, Green 0-100, Blue 0-100"). The framing:
+ *
+ *   P1=0        macro/aspect — "new applications should set P1 to 0
+ *               and use the set raster attributes"
+ *   P2=1        background: unset pixels keep their current color
+ *               (transparent)
+ *   P3=0        horizontal grid size (ignored)
+ *   "1;1;w;h    raster attributes: square pixels (overriding P1=0's
+ *               2:1 default) and the image's pixel dims
+ *   #c;2;r;g;b  one definition per register
+ *   bands       six pixel rows each; per register present in the band,
+ *               `#c` then the band's columns run-length encoded
+ *               ('?'+bits, LSB = top pixel); `$` returns to the band's
+ *               left edge between registers, `-` advances a band. No
+ *               trailing `-`: the sixel cursor stays on the last band
+ *               — the row the spec leaves the text cursor on.
+ *
+ * The terminal derives the row count from the emitted bands and the
+ * cursor advance from the spec, so boba emits ONE row terminator after
+ * the image (see tui_row_image), not disp_rows. */
+static void image_write_sixel(TuiRowSink *s, const TuiImageSpec *spec)
+{
+    int w = spec->src_w;
+    int h = spec->src_h;
+    int ncolors = spec->ncolors;
+    if (spec->format != TUI_IMAGE_INDEXED8 || !spec->data || !spec->palette)
+        return;
+    if (w <= 0 || h <= 0 || ncolors <= 0 || ncolors > 256)
+        return;
+    if (spec->data_len < (size_t)w * (size_t)h)
+        return; /* one index per pixel */
+
+    /* At most six set pixels per column, bucketed per band. One
+     * allocation per image event, freed below (the memory-reuse rule). */
+    SixelPx *px = malloc((size_t)6 * (size_t)w * sizeof(*px));
+    if (!px)
+        return;
+
+    char head[64];
+    int hl = snprintf(head, sizeof(head), "\x1bP0;1;0q\"1;1;%d;%d", w, h);
+    if (hl <= 0) {
+        free(px);
+        return;
+    }
+    dynamic_buffer_append(s->buf, head, (size_t)hl);
+
+    for (int c = 0; c < ncolors; c++) {
+        char def[48];
+        int dl = snprintf(def, sizeof(def), "#%d;2;%d;%d;%d", c,
+                          spec->palette[c * 3], spec->palette[c * 3 + 1],
+                          spec->palette[c * 3 + 2]);
+        if (dl > 0)
+            dynamic_buffer_append(s->buf, def, (size_t)dl);
+    }
+
+    int count[256];
+    int cursor[256];
+    int bands = (h + 5) / 6;
+    for (int band = 0; band < bands; band++) {
+        int y0 = band * 6;
+        int y1 = y0 + 6 > h ? h : y0 + 6;
+
+        /* Counting sort of the band's set pixels by register, filled in
+         * column order so each register's list is sorted — the color
+         * pass then walks it linearly. */
+        memset(count, 0, sizeof(count));
+        for (int y = y0; y < y1; y++) {
+            const unsigned char *row = spec->data + (size_t)y * w;
+            for (int x = 0; x < w; x++)
+                if (row[x] < ncolors)
+                    count[row[x]]++;
+        }
+        int total = 0;
+        for (int c = 0; c < ncolors; c++) {
+            cursor[c] = total;
+            total += count[c];
+        }
+        /* Fill in COLUMN order (x outer), so each register's bucket is
+         * sorted by column and a column's bits are contiguous — the
+         * color pass below walks it linearly. */
+        for (int x = 0; x < w; x++) {
+            for (int y = y0; y < y1; y++) {
+                int c = spec->data[(size_t)y * w + x];
+                if (c >= ncolors)
+                    continue;
+                px[cursor[c]].col = x;
+                px[cursor[c]].bit = (unsigned char)(1u << (y - y0));
+                cursor[c]++;
+            }
+        }
+
+        if (band > 0)
+            dynamic_buffer_append_str(s->buf, "-");
+        if (total == 0) {
+            /* A fully transparent band still advances the band count
+             * (the terminal sizes the image from the emitted bands). */
+            dynamic_buffer_append_str(s->buf, "?");
+            continue;
+        }
+        int drew = 0;
+        for (int c = 0; c < ncolors; c++) {
+            int n = count[c];
+            if (n == 0)
+                continue;
+            if (drew)
+                dynamic_buffer_append_str(s->buf, "$"); /* band's left edge */
+            drew = 1;
+            char sel[16];
+            int sl = snprintf(sel, sizeof(sel), "#%d", c);
+            if (sl > 0)
+                dynamic_buffer_append(s->buf, sel, (size_t)sl);
+
+            int start = cursor[c] - n;
+            SixelRun run = { 0, '?' };
+            int x = 0;
+            for (int i = 0; i < n;) {
+                int col = px[start + i].col;
+                unsigned char bits = 0;
+                while (i < n && px[start + i].col == col) {
+                    bits |= px[start + i].bit;
+                    i++;
+                }
+                for (; x < col; x++)
+                    sixel_rle_put(s, &run, '?'); /* transparent columns */
+                sixel_rle_put(s, &run, (unsigned char)('?' + bits));
+                x = col + 1;
+            }
+            for (; x < w; x++)
+                sixel_rle_put(s, &run, '?');
+            sixel_rle_flush(s, &run);
+        }
+    }
+    dynamic_buffer_append_str(s->buf, "\x1b\\");
+    free(px);
+}
+
 void tui_row_image(TuiRowSink *s, const TuiImageSpec *spec)
 {
     if (!s || !spec)
@@ -849,11 +1033,21 @@ void tui_row_image(TuiRowSink *s, const TuiImageSpec *spec)
     case TUI_IMAGE_ITERM2:
         image_write_iterm2(s, spec);
         break;
+    case TUI_IMAGE_SIXEL:
+        image_write_sixel(s, spec);
+        break;
     default:
         break;
     }
     s->open = 1;
-    s->image_rows = spec->disp_rows > 0 ? spec->disp_rows : 1;
+    /* The row reservation. kitty (C=1) and iTerm2 leave the cursor
+     * where it was, so boba emits every reserved row. sixel does not:
+     * the VT340 spec lands the cursor on the image's LAST row, so ONE
+     * terminator leaves the image — disp_rows would gap. */
+    if (spec->transport == TUI_IMAGE_SIXEL)
+        s->image_rows = 1;
+    else
+        s->image_rows = spec->disp_rows > 0 ? spec->disp_rows : 1;
     s->col += spec->disp_cols > 0 ? spec->disp_cols : 1;
 }
 
