@@ -175,17 +175,68 @@ static void test_env_hints(void)
 {
     TuiTerminalProfile p;
     memset(&p, 0, sizeof(p));
-    tui_term_profile_env(&p, "iTerm.app", NULL);
+    tui_term_profile_env(&p, "iTerm.app", NULL, NULL, NULL);
     assert(p.iterm2_images == 1);
     memset(&p, 0, sizeof(p));
-    tui_term_profile_env(&p, NULL, "iTerm2");
+    tui_term_profile_env(&p, NULL, "iTerm2", NULL, NULL);
     assert(p.iterm2_images == 1);
     memset(&p, 0, sizeof(p));
-    tui_term_profile_env(&p, "WezTerm", NULL);
+    tui_term_profile_env(&p, "WezTerm", NULL, NULL, NULL);
     assert(p.sixel == 1);
     memset(&p, 0, sizeof(p));
-    tui_term_profile_env(&p, "xterm", NULL);
+    tui_term_profile_env(&p, "xterm", NULL, NULL, NULL);
     assert(p.iterm2_images == 0 && p.sixel == 0);
+}
+
+/* COLORTERM and the direct-color TERM variants: the env-derived
+ * truecolor hint. It is readable BEFORE resolution (the field-provenance
+ * contract), which is what lets a consumer with no query to wait for
+ * pick its color tier from frame one. */
+static void test_env_truecolor(void)
+{
+    TuiTerminalProfile p;
+
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, "truecolor", "xterm-256color");
+    assert(p.truecolor == 1);
+
+    /* Case-insensitive: the value is a convention, not a grammar. */
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, "24BIT", "xterm-256color");
+    assert(p.truecolor == 1);
+
+    /* The TERM variants, with no COLORTERM at all. */
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, NULL, "xterm-direct");
+    assert(p.truecolor == 1);
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, NULL, "foot-truecolor");
+    assert(p.truecolor == 1);
+
+    /* A plain 256-color terminal is NOT truecolor: the pulse degrades to
+     * a blink there, and no field claims a color count. */
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, NULL, "xterm-256color");
+    assert(p.truecolor == 0);
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, "yes", "xterm-256color");
+    assert(p.truecolor == 0);
+
+    /* A suffix match only at the END: a term that merely contains
+     * "-direct" is not a direct-color terminal. */
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, NULL, "xterm-direct-ish");
+    assert(p.truecolor == 0);
+
+    /* NULL arguments are a miss, never a crash. */
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, NULL, NULL);
+    assert(p.truecolor == 0);
+
+    /* The hint needs no probe verdict: it is set at probe start. */
+    memset(&p, 0, sizeof(p));
+    tui_term_profile_env(&p, NULL, NULL, "truecolor", NULL);
+    assert(p.resolved == 0 && p.truecolor == 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -439,6 +490,7 @@ int main(void)
     RUN_TEST(test_cell_size);
     RUN_TEST(test_unknown_payload_ignored);
     RUN_TEST(test_env_hints);
+    RUN_TEST(test_env_truecolor);
 
     RUN_TEST(test_probe_not_declared_no_query);
     RUN_TEST(test_probe_declared_emits_once);

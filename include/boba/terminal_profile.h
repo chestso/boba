@@ -28,6 +28,23 @@
  * and no capabilities, so consumers that ignore the gate degrade to
  * text rather than mis-laying-out.
  *
+ * FIELD PROVENANCE — what `resolved` gates. The profile has two kinds
+ * of field, and only one kind waits for the verdict:
+ *
+ *   - ENV-DERIVED (iterm2_images, sixel, truecolor): set when the
+ *     probe STARTS (tui_term_profile_apply_env), so they are readable
+ *     before `resolved`. A consumer whose capability is env-visible
+ *     needs no gate.
+ *   - QUERY-DERIVED (kitty_graphics, kitty_placeholders, cell_w_px,
+ *     cell_h_px, kbd_protocol, kbd_flags): meaningful only once
+ *     `resolved` is set — before that the terminal has not answered,
+ *     which is not the same as "no".
+ *
+ * A field whose value came from the environment is a hint, not a
+ * verdict: COLORTERM is the de-facto standard for 24-bit color and a
+ * terminal that sets it wrongly is the conservative direction to be
+ * wrong in (a color pulse becomes a blink), never a broken frame.
+ *
  * Windows note: ConPTY translates or drops these queries, so the probe
  * there resolves conservatively on timeout. That is the correct
  * degradation — the profile is an optimization, not a requirement.
@@ -60,6 +77,14 @@ typedef struct TuiTerminalProfile
     int kitty_graphics;     /* kitty graphics query acknowledged      */
     int kitty_placeholders; /* version >= 0.28 (XTVERSION)       */
     int iterm2_images;      /* TERM_PROGRAM / LC_TERMINAL env        */
+
+    /* 24-bit color advertised by the environment (COLORTERM, or a
+     * TERM naming a direct-color variant). Env-derived: readable from
+     * probe start, before `resolved` — see the field-provenance note
+     * above. 0 means "no hint of truecolor", which is the signal to
+     * degrade (a blink instead of a brightness pulse), never a claim
+     * that the terminal has only 16 colors. */
+    int truecolor;
 
     /* Cell geometry in pixels, 0 when unknown (`CSI 16 t` reply). */
     int cell_w_px, cell_h_px;
@@ -94,10 +119,12 @@ int tui_term_profile_feed(TuiTerminalProfile *p, const char *payload,
                           size_t len);
 
 /* Environment-derived hints (TERM_PROGRAM=iTerm.app, LC_TERMINAL /
- * TERM_PROGRAM for others). Not a query; applied once at probe start.
- * Exposed for tests (which pass the values instead of touching the
- * environment). */
+ * TERM_PROGRAM for others, COLORTERM / TERM for the color depth). Not
+ * queries; applied once at probe start, and readable before `resolved`
+ * (see the field-provenance note in the header). Exposed for tests
+ * (which pass the values instead of touching the environment). */
 void tui_term_profile_env(TuiTerminalProfile *p, const char *term_program,
-                          const char *lc_terminal);
+                          const char *lc_terminal, const char *colorterm,
+                          const char *term);
 
 #endif /* BOBA_TERMINAL_PROFILE_H */

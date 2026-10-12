@@ -67,12 +67,57 @@ size_t tui_term_probe_query(char *buf, size_t cap)
 /* Environment hints                                                   */
 /* ------------------------------------------------------------------ */
 
+/* ASCII case-insensitive compare (strcasecmp is POSIX, _stricmp is
+ * MSVC — neither is portable C, and boba's Windows build is MSVC
+ * clean). */
+static int ci_equal(const char *a, const char *b)
+{
+    if (!a || !b)
+        return 0;
+    for (; *a && *b; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb - 'A' + 'a');
+        if (ca != cb)
+            return 0;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+/* Does `s` end with `suffix`, case-insensitively? */
+static int ci_ends_with(const char *s, const char *suffix)
+{
+    if (!s || !suffix)
+        return 0;
+    size_t ls = strlen(s), lx = strlen(suffix);
+    return ls >= lx && ci_equal(s + (ls - lx), suffix);
+}
+
+/* 24-bit color, from the environment alone: COLORTERM is the de-facto
+ * standard (kitty, foot, WezTerm, iTerm2, ghostty all set it), and the
+ * `-direct` / `-truecolor` TERM variants (xterm-direct, foot-direct,
+ * tmux-direct) name it in the terminal name itself. There is
+ * deliberately no 256-color rung here: a consumer that needs to know
+ * "how many colors" would have to guess, while "is it truecolor" is
+ * the question every terminal actually answers. */
+static int env_truecolor(const char *colorterm, const char *term)
+{
+    if (ci_equal(colorterm, "truecolor") || ci_equal(colorterm, "24bit"))
+        return 1;
+    if (ci_ends_with(term, "-direct") || ci_ends_with(term, "-truecolor"))
+        return 1;
+    return 0;
+}
+
 /* iTerm2 and WezTerm advertise themselves in the environment, and both
  * support a protocol family without answering a query for it (iTerm2's
  * own image protocol; WezTerm answers the kitty query but also
  * implements sixel). Only env-visible families are inferred here. */
 void tui_term_profile_env(TuiTerminalProfile *p, const char *term_program,
-                          const char *lc_terminal)
+                          const char *lc_terminal, const char *colorterm,
+                          const char *term)
 {
     if (!p)
         return;
@@ -88,6 +133,9 @@ void tui_term_profile_env(TuiTerminalProfile *p, const char *term_program,
     if (term_program &&
         (strcmp(term_program, "WezTerm") == 0 || strcmp(term_program, "foot") == 0))
         p->sixel = 1;
+
+    if (env_truecolor(colorterm, term))
+        p->truecolor = 1;
 }
 
 /* Apply the process environment (called once, at probe start). */
@@ -95,7 +143,8 @@ void tui_term_profile_apply_env(TuiTerminalProfile *p)
 {
     if (!p)
         return;
-    tui_term_profile_env(p, getenv("TERM_PROGRAM"), getenv("LC_TERMINAL"));
+    tui_term_profile_env(p, getenv("TERM_PROGRAM"), getenv("LC_TERMINAL"),
+                         getenv("COLORTERM"), getenv("TERM"));
 }
 
 /* ------------------------------------------------------------------ */
