@@ -203,13 +203,18 @@ int tui_cluster_width(const uint32_t *cps, uint32_t len)
         return 2;
     /* Presentation selectors, scanned from the END: the last one in the
      * cluster wins. VS16 forces emoji presentation (two cells) even on a
-     * Narrow base; VS15 cancels the doubling but never narrows a Wide
-     * base — CJK and emoji-presentation codepoints have no 1-cell glyph. */
+     * Narrow base; VS15 requests the TEXT presentation, so it takes one
+     * cell whenever UTS #51 defines a text glyph for the base
+     * (TU_TEXT_PRES) — that is what the selector is for. A base with no
+     * text sequence (a CJK ideograph, an SMP emoji like U+1F600) has no
+     * one-cell glyph to fall back to, so it keeps its East Asian width. */
     for (uint32_t i = len; i-- > 0;) {
         if (cps[i] == 0xFE0Fu)
             return 2;
         if (cps[i] == 0xFE0Eu)
-            return tui_codepoint_width(cps[0]);
+            return range_lookup(TU_TEXT_PRES, TU_TEXT_PRES_LEN, cps[0])
+                       ? 1
+                       : tui_codepoint_width(cps[0]);
     }
     return tui_codepoint_width(cps[0]);
 }

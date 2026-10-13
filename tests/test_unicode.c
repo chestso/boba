@@ -90,10 +90,20 @@ static void test_cluster_width(void)
     assert(tui_cluster_width((const uint32_t[]){ 0x270F, 0xFE0F }, 2) == 2);
     assert(tui_cluster_width((const uint32_t[]){ 0x2764, 0xFE0F }, 2) == 2);
 
-    /* VS15 asks for text presentation: cancels the doubling on a
-     * Narrow base, but never narrows a Wide one. */
+    /* VS15 asks for text presentation, so it takes one cell where UTS
+     * #51 defines a text glyph — including a Wide base like ⚡ U+26A1,
+     * whose bare and VS16 forms are two cells. */
+    assert(tui_cluster_width((const uint32_t[]){ 0x26A1 }, 1) == 2);
+    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0E }, 2) == 1);
+    assert(tui_cluster_width((const uint32_t[]){ 0x2B50, 0xFE0E }, 2) == 1);
     assert(tui_cluster_width((const uint32_t[]){ 0x2764, 0xFE0E }, 2) == 1);
+    /* ... and the last selector still wins, either way round. */
+    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0F, 0xFE0E }, 3) == 1);
+    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0E, 0xFE0F }, 3) == 2);
+    /* A base with no text sequence keeps its width: a CJK ideograph and
+     * an SMP emoji have no one-cell glyph to ask for. */
     assert(tui_cluster_width((const uint32_t[]){ 0x4E2D, 0xFE0E }, 2) == 2);
+    assert(tui_cluster_width((const uint32_t[]){ 0x1F600, 0xFE0E }, 2) == 2);
 
     /* Regional indicator pair is one flag, two cells. */
     assert(tui_cluster_width((const uint32_t[]){ 0x1F1FA, 0x1F1F8 }, 2) == 2);
