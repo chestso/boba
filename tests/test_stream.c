@@ -73,16 +73,21 @@ static int g_img_rendered = 0;    /* render_image invocations   */
 static int g_img_block_calls = 0; /* render_block IMAGE calls   */
 static TuiImageTransport g_img_transport = TUI_IMAGE_KITTY;
 static TuiTerminalProfile g_img_profile_seen;
+/* The block text measure_image was handed (the app parses it), and its
+ * length: the evidence for what CONTINUES put inside a live block. */
+static char g_img_text[256];
+static size_t g_img_text_len = 0;
 
 static int test_measure_image(const TuiBlock *blk, const char *text,
                               size_t len, const TuiTerminalProfile *profile,
                               int *out_rows, void *ud)
 {
     (void)blk;
-    (void)text;
-    (void)len;
     (void)ud;
     g_img_calls++;
+    g_img_text_len = len < sizeof(g_img_text) - 1 ? len : sizeof(g_img_text) - 1;
+    memcpy(g_img_text, text, g_img_text_len);
+    g_img_text[g_img_text_len] = '\0';
     g_img_profile_seen = *profile;
     if (profile->kitty_graphics) {
         g_img_transport = TUI_IMAGE_KITTY;
@@ -274,6 +279,8 @@ static H *h_new(const TuiStreamSpec *streams,
     g_img_calls = 0;
     g_img_rendered = 0;
     g_img_block_calls = 0;
+    g_img_text[0] = '\0';
+    g_img_text_len = 0;
     memset(&g_img_profile_seen, 0, sizeof(g_img_profile_seen));
     g_img_payload = IMG_PAYLOAD;
     g_img_payload_len = IMG_PAYLOAD_LEN;
@@ -1447,6 +1454,38 @@ static const TuiClassifier image_cls = {
     .reset = NULL,
 };
 
+/* CONTINUES EXTENDS whatever is live — block-granular kinds included.
+ * That is the other half of the verdict contract (stream.h), and it is
+ * why a kind whose text is ONE line has to be ended from the classifier
+ * side: boba obeys the app's verdict and never second-guesses the
+ * grammar. Pinned here as the mechanism, on a classifier that answers
+ * CONTINUES for the line after an image (the app's own verdicts are the
+ * app's to track — a classifier that forgets is how an image block grew
+ * a second line, degraded to its marker, and lost the text). */
+static void test_continues_extends_a_live_image_block(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_kitty(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\nplain line\n", 20));
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+
+    /* ONE image unit, emitted once, and its text is BOTH lines — what
+     * the app's measure then has to parse. */
+    assert(g_img_calls == 1);
+    assert(g_img_rendered == 1);
+    assert(g_img_text_len == strlen("!img a:b\nplain line\n"));
+    assert(strcmp(g_img_text, "!img a:b\nplain line\n") == 0);
+
+    h_free(h);
+}
+
 /* Direct-posted image unit (tui_msg_stream_image): finalizes pending
  * text, emits one IMAGE unit with a fresh id, and resets the classifier
  * prev so the next line starts at a block boundary. */
@@ -2105,6 +2144,7 @@ int main(void)
     RUN_TEST(test_image_measure_refusal_degrades_to_render_block);
     RUN_TEST(test_image_ids_are_monotonic_across_clear);
     RUN_TEST(test_image_large_payload_is_chunked);
+    RUN_TEST(test_continues_extends_a_live_image_block);
     RUN_TEST(test_stream_image_unit_finalizes_pending_text);
     RUN_TEST(test_stream_image_unit_defers_until_profile_resolves);
     RUN_TEST(test_stream_image_unit_without_measure_degrades);

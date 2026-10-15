@@ -273,7 +273,18 @@ typedef enum
  * before whatever the new verdict starts, so the unit's bytes commit in
  * the order the lines arrived. Container open/close are boundaries too:
  * a fence opening on a still-live table must not let the table commit
- * after the fence. */
+ * after the fence.
+ *
+ * CONTINUES is the other half of that contract, and it EXTENDS whatever
+ * is live — block-granular kinds included (a table's next row; an
+ * IMAGE block's next line, if the app says so). So a kind whose text is
+ * ONE line has to be ended from the classifier side: the app answers
+ * BLOCK_START for a line the live kind cannot own, and boba finalizes
+ * the unit there. boba cannot do it for the app — which line a kind can
+ * own is grammar, and boba never parses any. The explicit
+ * tui_msg_stream_image route needs no such care: it resets `prev`, so
+ * the next line classifies against a blank and an image unit is a
+ * boundary by construction. */
 typedef struct TuiClassifier
 {
     void *state; /* app-owned */
