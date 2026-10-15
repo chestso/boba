@@ -1387,6 +1387,13 @@ static void process_line(TuiTranscript *t, TuiStream *s, size_t ls, size_t le,
         break;
 
     case TUI_LINE_CONTAINER_OPEN:
+        /* A container open is a BLOCK BOUNDARY: a block-granular block
+         * (table, image) that is still live ends here, exactly as it
+         * would on a blank or a block start. Otherwise its bytes would
+         * commit after the container's lines — the scrollback's order
+         * is its truth. */
+        if (s->has_block)
+            stream_finalize_block(t, s);
         stream_freeze_pend(t, s);
         s->in_container = 1;
         s->container_byte =
@@ -1405,7 +1412,10 @@ static void process_line(TuiTranscript *t, TuiStream *s, size_t ls, size_t le,
         break;
 
     case TUI_LINE_CONTAINER_CLOSE:
-        /* defensive: close without open — treat as a content line */
+        /* defensive: close without open — treat as a content line (and
+         * end a live block first: a container verdict is a boundary) */
+        if (s->has_block)
+            stream_finalize_block(t, s);
         stream_freeze_pend(t, s);
         s->has_pend = 1;
         s->pend_off = ls;

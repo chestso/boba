@@ -266,7 +266,14 @@ typedef enum
 } TuiLineClass;
 
 /* One classifier instance per stream (state is per stream; content
- * and reasoning must not share fence state). */
+ * and reasoning must not share fence state).
+ *
+ * Every verdict but CONTINUES is a BLOCK BOUNDARY: a live block-granular
+ * unit (a table or an image — the kinds retained whole) is finalized
+ * before whatever the new verdict starts, so the unit's bytes commit in
+ * the order the lines arrived. Container open/close are boundaries too:
+ * a fence opening on a still-live table must not let the table commit
+ * after the fence. */
 typedef struct TuiClassifier
 {
     void *state; /* app-owned */

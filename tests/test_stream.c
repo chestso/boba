@@ -1984,6 +1984,90 @@ static void test_partial_row_exact_wrap_extends_on_row(void)
     h_free(h);
 }
 
+/* A container's open verdict is a block boundary for a LIVE block, not
+ * just a pend-freezing line: a table (or image) still live when a fence
+ * opens must commit FIRST, or the scrollback order inverts. */
+typedef struct
+{
+    int in_table;
+    int in_fence;
+} FenceAfterTableState;
+
+static TuiLineClass fence_after_table_classify(void *state, const char *line,
+                                               size_t len, const char *prev,
+                                               size_t prev_len,
+                                               TuiBlockKind *out_kind)
+{
+    FenceAfterTableState *st = state;
+    (void)prev;
+    (void)prev_len;
+    int fence = (len >= 3 && line[0] == '`' && line[1] == '`' && line[2] == '`');
+    if (st->in_fence) {
+        if (fence) {
+            st->in_fence = 0;
+            return TUI_LINE_CONTAINER_CLOSE;
+        }
+        return TUI_LINE_CONTINUES;
+    }
+    if (fence) {
+        st->in_table = 0;
+        st->in_fence = 1;
+        *out_kind = TUI_BLOCK_FENCE; /* labeled: line-emitted */
+        return TUI_LINE_CONTAINER_OPEN;
+    }
+    if (len == 0) {
+        st->in_table = 0;
+        return TUI_LINE_BLANK;
+    }
+    if (!st->in_table) {
+        st->in_table = 1;
+        *out_kind = TUI_BLOCK_TABLE;
+        return TUI_LINE_BLOCK_START;
+    }
+    return TUI_LINE_CONTINUES; /* a table row extends the live block */
+}
+
+static void test_container_open_finalizes_live_block(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    FenceAfterTableState st = { 0, 0 };
+    const TuiClassifier cls = {
+        .state = &st,
+        .classify = fence_after_table_classify,
+        .reset = NULL,
+    };
+    const TuiClassifier *classifiers[1] = { &cls };
+    H *h = h_new(streams, classifiers, 1);
+    assert(h);
+
+    /* a table is live (block-granular: nothing committed yet) … */
+    h_send(h, tui_msg_stream_delta(0, "| a |\n| b |\n", 12));
+    h_flush(h);
+    assert(strstr(h_read(h), "R|") == NULL);
+
+    /* … and a fence opens with NO blank between (legal markdown): the
+     * table's rows commit here, as one unit, before the fence */
+    h_send(h, tui_msg_stream_delta(0, "```c\n", 5));
+    h_flush(h);
+    const char *out = h_read(h);
+    assert(strstr(out, "R|| a |\r\n") != NULL);
+    assert(strstr(out, "R|| b |\r\n") != NULL);
+    assert(tui_transcript_commit_count(h->t) == 1);
+
+    /* the fence's own lines follow the table, in the scrollback */
+    h_send(h, tui_msg_stream_delta(0, "code\n```\n", 9));
+    h_flush(h);
+    out = h_read(h);
+    const char *table = strstr(out, "R|| a |");
+    const char *fence = strstr(out, "R|```c");
+    assert(table != NULL);
+    assert(fence != NULL);
+    assert(table < fence); /* the order the wire wrote */
+    assert(count_substr(out, "R|| a |\r\n") == 1);
+
+    h_free(h);
+}
+
 int main(void)
 {
     printf("test_stream: streaming transcript component\n");
@@ -1994,6 +2078,7 @@ int main(void)
     RUN_TEST(test_unlabeled_fence_streams_verbatim);
     RUN_TEST(test_labeled_fence_line_granular);
     RUN_TEST(test_table_block_holds_to_finalize);
+    RUN_TEST(test_container_open_finalizes_live_block);
     RUN_TEST(test_reclassify_splits_live_block);
     RUN_TEST(test_tall_table_windows_to_tail);
     RUN_TEST(test_multi_stream_global_order);
