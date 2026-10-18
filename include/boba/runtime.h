@@ -218,6 +218,10 @@ struct TuiRuntime
     TuiKeyboardEnhancements cur_kbd_enhancements;
     int cur_report_focus;
     int cur_bracketed_paste;
+    /* Cursor visibility as the terminal has it: 1 visible, 0 hidden, -1 not
+     * established (no frame yet, or a screen-buffer swap since the last one).
+     * Edge-triggered like the modes above; see runtime_reconcile_cursor. */
+    int cur_cursor_visible;
 #ifndef _WIN32
     struct termios orig_termios; /* Saved terminal settings */
     int raw_mode_active;         /* Raw mode currently enabled */
@@ -406,7 +410,9 @@ void tui_runtime_probe_ensure(TuiRuntime *runtime);
  * probe reached its verdict. */
 const TuiTerminalProfile *tui_runtime_terminal_profile(TuiRuntime *rt);
 
-/* Render view and write to output (with cursor hide/show) */
+/* Render view and write to output. Cursor visibility is reconciled
+ * against the frame's declaration, never toggled per frame (see
+ * runtime_reconcile_cursor in runtime.c — the ConPTY frame-tearing note). */
 void tui_runtime_flush(TuiRuntime *runtime);
 
 /* Execute a TuiCmd synchronously, outside the runtime's event loop.

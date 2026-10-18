@@ -1734,7 +1734,9 @@ static void test_flush_emits_cursor_when_visible(void)
     tui_runtime_flush(rt);
     fflush(fp);
 
-    assert(strstr(outbuf, ANSI_HIDE_CURSOR) != NULL);
+    /* A frame that ends visible carries no visibility byte up front: the
+     * caret is only shown, once, after its placement. */
+    assert(strstr(outbuf, ANSI_HIDE_CURSOR) == NULL);
     assert(strstr(outbuf, "\x1b[7;12H") != NULL);
     assert(strstr(outbuf, ANSI_SHOW_CURSOR) != NULL);
 
@@ -3037,6 +3039,164 @@ static void test_kbd_legacy_and_text_only_declare_nothing(void)
     fclose(out);
 }
 
+/* ========================================================================
+ * Cursor-visibility reconcile (the ConPTY strobe fix)
+ *
+ * A TUI repaints on its own cadence (a spinner tick is 10 Hz). When every
+ * frame carries a hide/show pair, a transport that can split a frame's
+ * bytes (ConPTY delivers on its own schedule) leaves the emulator showing
+ * frames caught with the cursor off — a strobe. Reconciled, a steady
+ * declaration emits ZERO visibility bytes, and there is no pair to tear.
+ * ======================================================================== */
+
+/* End-of-data offset of everything written so far. */
+static long out_end(FILE *out)
+{
+    fflush(out);
+    long pos = ftell(out);
+    assert(pos >= 0);
+    return pos;
+}
+
+/* Inline steady frames (nevermore's shape: cursor declared visible every
+ * frame): establishment shows once, hides never; the frames after it carry
+ * no ?25 byte at all; only actual transitions emit one. */
+static void test_flush_cursor_reconcile_inline_steady(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+    tui_runtime_start(rt);
+
+    char buf[8192];
+    reset_view_stub();
+    s_view_content = "frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+
+    /* Frame 1 establishes visibility: exactly one SHOW, no HIDE anywhere,
+     * and the show lands in this frame's own bytes. */
+    long end0 = out_end(out);
+    tui_runtime_flush(rt);
+    long end1 = out_end(out);
+    const char *seg = kbd_capture(out, buf, sizeof(buf)) + end0;
+    assert(kbd_count(seg, ANSI_HIDE_CURSOR) == 0);
+    assert(kbd_count(seg, ANSI_SHOW_CURSOR) == 1);
+    assert(rt->cur_cursor_visible == 1);
+
+    /* The spinner keeps ticking (5 more frames, same declaration): no
+     * visibility byte may appear between end1 and the new end. */
+    for (int i = 0; i < 5; i++) {
+        reset_view_stub();
+        s_view_content = "frame\r\n";
+        s_view_to_return.render_mode = TUI_RENDER_INLINE;
+        s_view_to_return.cursor = tui_cursor_at(1, 1);
+        tui_runtime_flush(rt);
+        long end2 = out_end(out);
+        seg = kbd_capture(out, buf, sizeof(buf)) + end1;
+        assert(strstr(seg, "?25") == NULL);
+        end1 = end2;
+    }
+
+    /* A transition to hidden emits exactly one HIDE (and no SHOW) — before
+     * the frame's content moves the caret. */
+    reset_view_stub();
+    s_view_content = "frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    /* cursor.visible = 0 */
+    tui_runtime_flush(rt);
+    long end3 = out_end(out);
+    seg = kbd_capture(out, buf, sizeof(buf)) + end1;
+    assert(kbd_count(seg, ANSI_HIDE_CURSOR) == 1);
+    assert(kbd_count(seg, ANSI_SHOW_CURSOR) == 0);
+    assert(rt->cur_cursor_visible == 0);
+
+    /* Steady hidden frames emit nothing either. */
+    reset_view_stub();
+    s_view_content = "frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    tui_runtime_flush(rt);
+    long end4 = out_end(out);
+    seg = kbd_capture(out, buf, sizeof(buf)) + end3;
+    assert(strstr(seg, "?25") == NULL);
+    end3 = end4;
+
+    /* Back to visible: one SHOW, no HIDE. */
+    reset_view_stub();
+    s_view_content = "frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+    tui_runtime_flush(rt);
+    end4 = out_end(out);
+    seg = kbd_capture(out, buf, sizeof(buf)) + end3;
+    assert(kbd_count(seg, ANSI_HIDE_CURSOR) == 0);
+    assert(kbd_count(seg, ANSI_SHOW_CURSOR) == 1);
+    assert(rt->cur_cursor_visible == 1);
+
+    /* Stop shows the cursor for the shell (explicit, tracked). */
+    tui_runtime_stop(rt);
+    seg = kbd_capture(out, buf, sizeof(buf)) + end4;
+    assert(kbd_count(seg, ANSI_SHOW_CURSOR) == 1);
+    assert(rt->cur_cursor_visible == 1);
+
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
+/* A screen-buffer swap (1049h/l) restores a visibility boba never set, so
+ * the tracked state is forgotten and the next frame re-establishes it with
+ * an explicit byte. */
+static void test_flush_cursor_alt_swap_reestablishes(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    char buf[8192];
+
+    /* Frame 1 (primary buffer, cursor visible): one SHOW, no HIDE. */
+    reset_view_stub();
+    s_view_content = "x\r\n";
+    s_view_to_return.cursor = tui_cursor_at(3, 4);
+    long end0 = out_end(out);
+    tui_runtime_flush(rt);
+    long end1 = out_end(out);
+    const char *seg = kbd_capture(out, buf, sizeof(buf)) + end0;
+    assert(kbd_count(seg, ANSI_HIDE_CURSOR) == 0);
+    assert(kbd_count(seg, ANSI_SHOW_CURSOR) == 1);
+
+    /* Frame 2 enters the alt screen: the swap clears the tracked
+     * visibility, and the frame re-establishes it — one SHOW in this
+     * frame's bytes, still no HIDE. */
+    reset_view_stub();
+    s_view_content = "x\r\n";
+    s_view_to_return.alt_screen = 1;
+    s_view_to_return.cursor = tui_cursor_at(3, 4);
+    tui_runtime_flush(rt);
+    long end2 = out_end(out);
+    seg = kbd_capture(out, buf, sizeof(buf)) + end1;
+    assert(strstr(seg, ANSI_ENTER_ALT_SCREEN) != NULL);
+    assert(kbd_count(seg, ANSI_HIDE_CURSOR) == 0);
+    assert(kbd_count(seg, ANSI_SHOW_CURSOR) == 1);
+    assert(rt->cur_cursor_visible == 1);
+
+    /* Frame 3, same declaration: no visibility bytes at all. */
+    reset_view_stub();
+    s_view_content = "x\r\n";
+    s_view_to_return.alt_screen = 1;
+    s_view_to_return.cursor = tui_cursor_at(3, 4);
+    tui_runtime_flush(rt);
+    seg = kbd_capture(out, buf, sizeof(buf)) + end2;
+    assert(strstr(seg, "?25") == NULL);
+
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
 int main(void)
 {
     printf("runtime tests:\n");
@@ -3049,6 +3209,8 @@ int main(void)
     RUN_TEST(test_kbd_change_pops_then_pushes);
     RUN_TEST(test_kbd_inline_declares_and_stops);
     RUN_TEST(test_kbd_legacy_and_text_only_declare_nothing);
+    RUN_TEST(test_flush_cursor_reconcile_inline_steady);
+    RUN_TEST(test_flush_cursor_alt_swap_reestablishes);
     RUN_TEST(test_get_dimensions_null);
     RUN_TEST(test_null_callbacks_in_config);
     RUN_TEST(test_default_config_raw_mode);

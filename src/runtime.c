@@ -304,6 +304,33 @@ static void runtime_reconcile_kbd(TuiRuntime *runtime, FILE *fp,
     runtime->cur_kbd_enhancements = declared;
 }
 
+/* Reconcile the terminal's cursor visibility toward `visible`, emitting the
+ * one mode byte a CHANGE needs — and nothing at all when the terminal
+ * already has it. A tracked state of -1 (not established) makes the next
+ * frame emit its byte explicitly.
+ *
+ * Why edge-triggered rather than a hide/show pair around every paint: a
+ * transport can split one logical frame's bytes across several deliveries
+ * (ConPTY re-renders the child's output and flushes on its own schedule),
+ * and a frame whose hide lands in one delivery with its show in the next
+ * reaches the emulator as a cursor that vanishes at the repaint cadence —
+ * a strobe that cannot appear on a byte-atomic PTY, where the pair parses
+ * inside one frame. Steady declarations (nevermore's cursor staying on
+ * while its spinner repaints at 10 Hz) therefore emit ZERO visibility
+ * bytes per frame, leaving no pair to tear.
+ *
+ * Call sites give the transaction its ordering: a frame that ENDS hidden
+ * reconciles to 0 before any content moves the caret; a frame that ends
+ * visible reconciles to 1 only after its cursor placement. */
+static void runtime_reconcile_cursor(TuiRuntime *runtime, FILE *fp,
+                                     int visible)
+{
+    if (runtime->cur_cursor_visible == visible)
+        return;
+    fputs(visible ? ANSI_SHOW_CURSOR : ANSI_HIDE_CURSOR, fp);
+    runtime->cur_cursor_visible = visible;
+}
+
 /* ------------------------------------------------------------------ */
 /* Terminal capability probe (see terminal_profile.h)                  */
 /* ------------------------------------------------------------------ */
@@ -466,6 +493,10 @@ TuiRuntime *tui_runtime_create(TuiComponent *component, void *component_config,
 
     /* Resolve output target */
     runtime->output = runtime->config.output ? runtime->config.output : stdout;
+
+    /* No frame has run, so the terminal's cursor visibility is unknown to
+     * boba; the first frame establishes it (runtime_reconcile_cursor). */
+    runtime->cur_cursor_visible = -1;
 
     runtime->running = 1;
     runtime->quit_requested = 0;
@@ -722,6 +753,9 @@ void tui_runtime_stop(TuiRuntime *runtime)
 
     runtime_write(runtime, SGR_RESET);
     runtime_write(runtime, ANSI_SHOW_CURSOR);
+    /* The shell wants a visible cursor at exit; say so explicitly and
+     * track it (a later start() resumes from here). */
+    runtime->cur_cursor_visible = 1;
 
     if (runtime->in_inline_mode) {
         /* Inline mode: write \r\n to end the current input line, then
@@ -1065,8 +1099,14 @@ static void inline_clear_reflowed(TuiRuntime *runtime)
  * order matters — mode toggles MUST precede content so the content
  * lands on the right screen buffer / sees the right mouse mode.
  *
+ * Cursor visibility is reconciled, never brute-toggled (see
+ * runtime_reconcile_cursor): a frame that ends hidden hides before its
+ * content moves the caret; a frame that ends visible shows only after its
+ * cursor placement. A steady declaration emits no visibility byte at all.
+ *
  * Output sequence:
- *   HIDE_CURSOR → mode toggles → content → window title → cursor placement → SHOW_CURSOR
+ *   mode toggles → [HIDE_CURSOR if the frame ends hidden] → content →
+ *   window title → cursor placement → [SHOW_CURSOR if it changed]
  */
 void tui_runtime_flush(TuiRuntime *runtime)
 {
@@ -1108,8 +1148,14 @@ void tui_runtime_flush(TuiRuntime *runtime)
         tui_runtime_probe_check(runtime);
     }
 
-    /* 1. Hide cursor while painting to prevent flicker. */
-    fputs(ANSI_HIDE_CURSOR, fp);
+    /* 1. Cursor visibility is reconciled toward what the frame declares
+     * (see runtime_reconcile_cursor): a frame that ENDS hidden hides now,
+     * before its content moves the caret; a frame that ends visible emits
+     * no visibility byte up front and shows only after its cursor
+     * placement below. No frame ever carries a hide/show PAIR — the shape
+     * a splitting transport tears apart. */
+    if (!v.cursor.visible)
+        runtime_reconcile_cursor(runtime, fp, 0);
 
     if (v.render_mode == TUI_RENDER_INLINE) {
         runtime->in_inline_mode = 1;
@@ -1216,7 +1262,7 @@ void tui_runtime_flush(TuiRuntime *runtime)
                                        v.cursor.col - 1);
                 fputs(fwd_buf, fp);
             }
-            fputs(ANSI_SHOW_CURSOR, fp);
+            runtime_reconcile_cursor(runtime, fp, 1);
         } else {
             /* Cursor hidden — stays at end of last line */
             runtime->inline_cursor_row = line_count - 1;
@@ -1248,6 +1294,10 @@ void tui_runtime_flush(TuiRuntime *runtime)
     if (v.alt_screen != runtime->in_alt_screen) {
         fputs(v.alt_screen ? ANSI_ENTER_ALT_SCREEN : ANSI_EXIT_ALT_SCREEN, fp);
         runtime->in_alt_screen = v.alt_screen;
+        /* A screen-buffer swap restores a cursor visibility the runtime
+         * never set; the next frame re-establishes it with an explicit
+         * byte. */
+        runtime->cur_cursor_visible = -1;
     }
     if (v.mouse_mode != runtime->cur_mouse_mode) {
         if (runtime->cur_mouse_mode != TUI_MOUSE_MODE_NONE)
@@ -1281,7 +1331,7 @@ void tui_runtime_flush(TuiRuntime *runtime)
         ansi_format_cursor_pos(cur_buf, sizeof(cur_buf), v.cursor.row,
                                v.cursor.col);
         fputs(cur_buf, fp);
-        fputs(ANSI_SHOW_CURSOR, fp);
+        runtime_reconcile_cursor(runtime, fp, 1);
     }
 
     fflush(fp);
