@@ -15,7 +15,12 @@
 /* Commit pass: write staged bytes (if any) through the atomic
  * transcript seam. Returns 1 when a batch was written (the seam
  * already re-rendered the live region), 0 when there was nothing to
- * do. Called by tui_runtime_flush(). */
+ * do. Called by the reconcile step at the top of tui_runtime_flush().
+ *
+ * "Atomic" here means GEOMETRY-atomic (erase + write + repaint share
+ * one baseline). Delivery atomicity — the whole paint leaves in ONE
+ * write — is the runtime's paint transaction, which this pass runs
+ * inside (tui_runtime_transcript_write joins the enclosing paint). */
 int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt);
 
 /* Forget an open partial row without emitting anything (used on

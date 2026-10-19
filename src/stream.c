@@ -17,9 +17,10 @@
  * freezes into emission units and renders through the row sink into
  * staging. Committed bytes carry no width breaks — the terminal owns
  * soft-wrapping (and reflow); only logical line breaks are emitted.
- * tui_runtime_flush() runs the commit pass, so all units staged since
- * the last flush reach the scrollback through exactly one
- * transcript_write.
+ * tui_runtime_flush() runs the commit pass (the first half of the
+ * runtime's reconcile step), so all units staged since the last flush
+ * reach the scrollback through exactly one transcript_write — and that
+ * whole paint is delivered to the terminal in exactly one write.
  */
 
 #include <assert.h>

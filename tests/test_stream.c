@@ -401,9 +401,33 @@ static void test_coalescing_one_write_per_batch(void)
     h_free(h);
 }
 
-/* ------------------------------------------------------------------ */
-/* A non-markdown fake classifier proves boba is app-agnostic          */
-/* ------------------------------------------------------------------ */
+/* The SAME batch, at the delivery boundary: committing it is a paint —
+ * commit pass → transcript_write → nested live repaint — and it must
+ * reach the terminal in exactly ONE write. The commit count above says
+ * how many geometry baselines it used; this says how many times those
+ * bytes crossed the terminal's write boundary, which is what ConPTY
+ * presents. */
+static void test_commit_batch_is_one_delivery(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    h_send(h, tui_msg_stream_delta(0, "l0\nl1\nl2\nl3\n", 12));
+    unsigned long before = h->rt->out_write_count;
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == 1);
+    assert(h->rt->out_write_count - before == 1);
+    assert(h->rt->paint_depth == 0);
+
+    /* A flush with nothing staged is still one paint (a repaint of the
+     * live region alone). */
+    before = h->rt->out_write_count;
+    h_flush(h);
+    assert(h->rt->out_write_count - before == 1);
+
+    h_free(h);
+}
 
 typedef struct
 {
@@ -2112,6 +2136,7 @@ int main(void)
     printf("test_stream: streaming transcript component\n");
     RUN_TEST(test_default_blank_line_flow);
     RUN_TEST(test_coalescing_one_write_per_batch);
+    RUN_TEST(test_commit_batch_is_one_delivery);
     RUN_TEST(test_fake_classifier_drives_component);
     RUN_TEST(test_byte_batch_extends_partial_row);
     RUN_TEST(test_unlabeled_fence_streams_verbatim);

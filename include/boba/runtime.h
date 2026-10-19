@@ -268,6 +268,31 @@ struct TuiRuntime
     TuiTranscript *transcript;
     int committing; /* re-entrancy guard for the commit pass */
 
+    /* --- Paint: the emit/deliver transaction ------------------------
+     *
+     * A PAINT is the runtime's unit of terminal work and its unit of
+     * DELIVERY: everything one public entry point emits (tui_runtime_flush,
+     * tui_runtime_transcript_write, clear/finish_inline, start/stop)
+     * reaches the terminal in ONE write. paint_depth > 0 while a paint is
+     * open; nested paints — the commit pass's transcript_write, its nested
+     * live repaint — join the enclosing paint and deliver nothing
+     * themselves. The outermost close is the single delivery.
+     *
+     * This is a correctness property, not an optimization: under ConPTY
+     * the presentation boundary IS the write boundary, so a paint that
+     * delivers more than once publishes its intermediate cursor positions
+     * as frames of their own (the "caret hop"). Note that this is
+     * DELIVERY atomicity, distinct from the GEOMETRY atomicity of
+     * tui_runtime_transcript_write (erase + write + repaint share one
+     * baseline) — conflating the two is how the bug shipped. See the
+     * Paint section in runtime.c. */
+    int paint_depth;               /* >0: a paint is open; interior emits
+                                    * buffer instead of delivering */
+    DynamicBuffer *out_stage;      /* bytes staged for the open paint */
+    unsigned long out_write_count; /* deliveries (writes pushed to the
+                                    * terminal), for tests asserting the
+                                    * boundary rather than byte content */
+
     /* Terminal capability probe (see terminal_profile.h).
      *
      * probe_state: 0 = idle, 1 = declared and about to be emitted,
@@ -379,7 +404,13 @@ void tui_runtime_clear_inline(TuiRuntime *runtime);
  * and the next transcript_write moves back up and continues it —
  * one call, one geometry baseline, same atomicity family. The
  * transcript component drives this via its commit pass; direct
- * callers should end with \r\n. */
+ * callers should end with \r\n.
+ *
+ * DELIVERY-atomic as well: this whole call — erase, bytes, and the
+ * nested live repaint — leaves in exactly ONE write (a paint; see the
+ * paint fields on TuiRuntime). Geometry atomicity alone does not save
+ * the caret under ConPTY, where each write is presented as its own
+ * frame. */
 void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
                                   size_t len);
 
@@ -410,9 +441,28 @@ void tui_runtime_probe_ensure(TuiRuntime *runtime);
  * probe reached its verdict. */
 const TuiTerminalProfile *tui_runtime_terminal_profile(TuiRuntime *rt);
 
-/* Render view and write to output. Cursor visibility is reconciled
- * against the frame's declaration, never toggled per frame (see
- * runtime_reconcile_cursor in runtime.c — the ConPTY frame-tearing note). */
+/* Render the view and paint the frame.
+ *
+ * A paint is two phases (see the paint fields on TuiRuntime):
+ *   1. RECONCILE — decide what the frame means before any byte leaves:
+ *      run the transcript commit pass, call view(), and advance the
+ *      capability probe. It touches no output.
+ *   2. EMIT + DELIVER — reconcile the declared terminal state (alt
+ *      screen, mouse, keyboard flags, bracketed paste, cursor
+ *      visibility) against what the terminal already has, emit the
+ *      bytes, and push the whole paint to the output in ONE write.
+ *
+ * DELIVERY atomicity is the invariant: one paint = one write. Under
+ * ConPTY the presentation boundary IS the write boundary, so a paint
+ * that writes twice publishes its intermediate cursor positions as
+ * frames of their own (the caret hop between the prompt and the last
+ * committed row). This is why interior sites (clear_inline,
+ * transcript_write, the commit pass's nested repaint) join the enclosing
+ * paint instead of flushing their own way out. See the Paint section in
+ * runtime.c.
+ *
+ * Cursor visibility is reconciled against the frame's declaration, never
+ * toggled per frame (see runtime_reconcile_cursor in runtime.c). */
 void tui_runtime_flush(TuiRuntime *runtime);
 
 /* Execute a TuiCmd synchronously, outside the runtime's event loop.

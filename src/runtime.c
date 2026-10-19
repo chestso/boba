@@ -5,6 +5,7 @@
 #include <boba/unicode.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "stream_internal.h"
 #include "terminal_profile_internal.h"
@@ -264,6 +265,167 @@ static void runtime_tick_maybe(TuiRuntime *runtime, int interval_ms)
 }
 
 /* ------------------------------------------------------------------ */
+/* Paint: the emit/deliver transaction                                 */
+/* ------------------------------------------------------------------ */
+
+/* A PAINT is the runtime's unit of terminal work AND its unit of
+ * delivery. Every public entry point that emits (flush, a transcript
+ * write, a clear, start/stop) opens one; everything it emits is staged
+ * in out_stage and pushed to the terminal by the OUTERMOST paint's
+ * close, in ONE write. Nested paints — the commit pass's
+ * transcript_write, its nested live repaint — join the enclosing paint
+ * instead of delivering their own.
+ *
+ * Why this is not an optimization: under ConPTY the presentation
+ * boundary IS the write boundary (each WriteFile is re-rendered and
+ * presented as its own frame). A paint that delivers more than once
+ * publishes every intermediate cursor position as a visible frame —
+ * the caret hop between the prompt and the last committed row.
+ *
+ * Two properties, named separately because conflating them is how the
+ * bug shipped:
+ *   - geometry-atomic: erase + write + repaint share one baseline
+ *     (tui_runtime_transcript_write, since 45843dd's family);
+ *   - delivery-atomic: all of it leaves in one write (this section).
+ *
+ * The delivery goes through the fd, not the stdio buffer, whenever the
+ * output is a terminal or pipe: a line-buffered stdio stream may split
+ * one fwrite at a row terminator (and a payload larger than the stdio
+ * buffer is written in buffer-sized chunks), which would re-create the
+ * very boundaries this exists to remove. Seekable sinks (files, test
+ * captures) keep the stdio path so the FILE's position stays truthful.
+ * The write loop below is the residual: a short write is a second
+ * delivery on the wire, unavoidable without an owned event loop. */
+
+/* Push the paint's staged bytes to the output in one write. */
+static void runtime_deliver(TuiRuntime *runtime);
+
+/* Append bytes to the open paint (or, when no paint is open, deliver
+ * them immediately — a direct call from an embedding). */
+static void runtime_emit(TuiRuntime *runtime, const char *bytes, size_t len)
+{
+    if (!runtime || !bytes || len == 0)
+        return;
+
+    if (!runtime->out_stage)
+        runtime->out_stage = dynamic_buffer_create(len > 4096 ? len : 4096);
+
+    if (runtime->out_stage)
+        dynamic_buffer_append(runtime->out_stage, bytes, len);
+    else /* out of memory: degrade to a direct write, never lose bytes */
+        fwrite(bytes, 1, len, runtime->output);
+
+    if (runtime->paint_depth == 0)
+        runtime_deliver(runtime);
+}
+
+static void runtime_emit_str(TuiRuntime *runtime, const char *s)
+{
+    if (s)
+        runtime_emit(runtime, s, strlen(s));
+}
+
+/* Open a paint. Nested paints are legal and normal (a commit pass). */
+static void runtime_paint_begin(TuiRuntime *runtime)
+{
+    runtime->paint_depth++;
+}
+
+/* Close a paint. Only the outermost close delivers: this is the ONE
+ * write of everything the paint staged. */
+static void runtime_paint_end(TuiRuntime *runtime)
+{
+    if (runtime->paint_depth > 0)
+        runtime->paint_depth--;
+    if (runtime->paint_depth == 0)
+        runtime_deliver(runtime);
+}
+
+/* The descriptor to deliver through, or -1 when the sink is not
+ * terminal-like (or has no descriptor at all, as with fmemopen/memory
+ * streams). A regular file keeps the stdio path: raw writes would move
+ * the fd under the FILE and make ftell() lie about the position. */
+static int runtime_delivery_fd(FILE *fp)
+{
+#ifdef _WIN32
+    int fd = _fileno(fp);
+#else
+    int fd = fileno(fp);
+#endif
+    if (fd < 0)
+        return -1;
+#ifdef _WIN32
+    struct _stat st;
+    if (_fstat(fd, &st) != 0)
+        return -1;
+    if ((st.st_mode & _S_IFMT) == _S_IFREG)
+        return -1;
+#else
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+        return -1;
+    if (S_ISREG(st.st_mode))
+        return -1;
+#endif
+    return fd;
+}
+
+/* Write `len` bytes to `fd`, retrying on EINTR/short writes. */
+static void runtime_write_fd(int fd, const char *bytes, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+#ifndef _WIN32
+        ssize_t n = write(fd, bytes + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (n == 0)
+            break;
+        off += (size_t)n;
+#else
+        size_t chunk = len - off;
+        if (chunk > 0x40000000u)
+            chunk = 0x40000000u;
+        int n = _write(fd, bytes + off, (unsigned)chunk);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+#endif
+    }
+}
+
+/* The single delivery of a paint. */
+static void runtime_deliver(TuiRuntime *runtime)
+{
+    FILE *fp = runtime->output;
+    if (!fp)
+        return;
+
+    /* Whatever is already pending in the stream (an app write, a
+     * fallback emit) is ordered before this paint's bytes. */
+    fflush(fp);
+
+    DynamicBuffer *stage = runtime->out_stage;
+    size_t len = stage ? dynamic_buffer_len(stage) : 0;
+    if (len > 0) {
+        const char *data = dynamic_buffer_data(stage);
+        int fd = runtime_delivery_fd(fp);
+        if (fd >= 0) {
+            runtime_write_fd(fd, data, len);
+        } else {
+            fwrite(data, 1, len, fp);
+            fflush(fp);
+        }
+        dynamic_buffer_clear(stage);
+    }
+
+    runtime->out_write_count++;
+}
+
+/* ------------------------------------------------------------------ */
 /* Keyboard protocol                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -290,17 +452,17 @@ static int kbd_wire_flags(TuiKeyboardEnhancements k)
 /* Reconcile the terminal's pushed flag set with the declared mask: pop
  * the previous entry (when there was one), push the new. One pop per
  * push, so the terminal's stack is left as we found it. */
-static void runtime_reconcile_kbd(TuiRuntime *runtime, FILE *fp,
+static void runtime_reconcile_kbd(TuiRuntime *runtime,
                                   TuiKeyboardEnhancements declared)
 {
     if (declared == runtime->cur_kbd_enhancements)
         return;
     if (kbd_wire_flags(runtime->cur_kbd_enhancements) != 0)
-        fputs(ANSI_DISABLE_KITTY_KBD, fp);
+        runtime_emit_str(runtime, ANSI_DISABLE_KITTY_KBD);
     char push[ANSI_KBD_PUSH_BUFSIZE];
     ansi_format_kbd_push(push, sizeof(push), kbd_wire_flags(declared));
     if (push[0] != '\0')
-        fputs(push, fp);
+        runtime_emit_str(runtime, push);
     runtime->cur_kbd_enhancements = declared;
 }
 
@@ -322,12 +484,12 @@ static void runtime_reconcile_kbd(TuiRuntime *runtime, FILE *fp,
  * Call sites give the transaction its ordering: a frame that ENDS hidden
  * reconciles to 0 before any content moves the caret; a frame that ends
  * visible reconciles to 1 only after its cursor placement. */
-static void runtime_reconcile_cursor(TuiRuntime *runtime, FILE *fp,
-                                     int visible)
+static void runtime_reconcile_cursor(TuiRuntime *runtime, int visible)
 {
     if (runtime->cur_cursor_visible == visible)
         return;
-    fputs(visible ? ANSI_SHOW_CURSOR : ANSI_HIDE_CURSOR, fp);
+    runtime_emit_str(runtime,
+                     visible ? ANSI_SHOW_CURSOR : ANSI_HIDE_CURSOR);
     runtime->cur_cursor_visible = visible;
 }
 
@@ -543,6 +705,9 @@ void tui_runtime_free(TuiRuntime *runtime)
     if (runtime->inline_last_frame)
         dynamic_buffer_destroy(runtime->inline_last_frame);
 
+    if (runtime->out_stage)
+        dynamic_buffer_destroy(runtime->out_stage);
+
     if (runtime->parser)
         tui_input_parser_free(runtime->parser);
 
@@ -568,12 +733,11 @@ void tui_runtime_free(TuiRuntime *runtime)
     free(runtime);
 }
 
-/* Write a string to the runtime's output */
+/* Write a string to the runtime's output (through the open paint, or as
+ * an immediate delivery of its own when no paint is open). */
 static void runtime_write(TuiRuntime *runtime, const char *s)
 {
-    if (s) {
-        fputs(s, runtime->output);
-    }
+    runtime_emit_str(runtime, s);
 }
 
 /* Execute a command */
@@ -609,14 +773,16 @@ static int execute_cmd(TuiRuntime *runtime, TuiCmd *cmd)
             runtime->config.clipboard_handler(
                 text, text_len, runtime->config.clipboard_handler_data);
         } else if (text && text_len > 0) {
-            /* Default: emit OSC 52 to terminal. */
+            /* Default: emit OSC 52 to terminal, as its own paint — one
+             * delivery, ordered with whatever the current frame emits. */
             size_t needed = ANSI_OSC52_BUFSIZE(text_len);
             char *seq = (char *)malloc(needed);
             if (seq) {
                 size_t n = ansi_format_osc52(seq, needed, text, text_len);
                 if (n > 0) {
-                    fwrite(seq, 1, n, runtime->output);
-                    fflush(runtime->output);
+                    runtime_paint_begin(runtime);
+                    runtime_emit(runtime, seq, n);
+                    runtime_paint_end(runtime);
                 }
                 free(seq);
             }
@@ -732,6 +898,7 @@ void tui_runtime_start(TuiRuntime *runtime)
 {
     if (!runtime || runtime->started)
         return;
+    runtime_paint_begin(runtime);
     /* In inline mode, don't save cursor — stop() moves past content
      * and writes a newline; start() just begins from current position.
      * Reset inline_lines_rendered so the first flush doesn't cursor-up
@@ -741,7 +908,7 @@ void tui_runtime_start(TuiRuntime *runtime)
     else
         runtime->inline_lines_rendered = 0;
     inline_forget_frame(runtime);
-    fflush(runtime->output);
+    runtime_paint_end(runtime);
     runtime->started = 1;
 }
 
@@ -750,6 +917,8 @@ void tui_runtime_stop(TuiRuntime *runtime)
 {
     if (!runtime || !runtime->started)
         return;
+
+    runtime_paint_begin(runtime);
 
     runtime_write(runtime, SGR_RESET);
     runtime_write(runtime, ANSI_SHOW_CURSOR);
@@ -778,7 +947,7 @@ void tui_runtime_stop(TuiRuntime *runtime)
         runtime->inline_partial_open = 0;
         runtime->inline_partial_cols = 0;
         runtime->in_inline_mode = 0;
-        fflush(runtime->output);
+        runtime_paint_end(runtime);
         runtime->started = 0;
         return;
     }
@@ -801,7 +970,7 @@ void tui_runtime_stop(TuiRuntime *runtime)
     }
     runtime_write(runtime, DECRC); /* Restore saved cursor position */
 
-    fflush(runtime->output);
+    runtime_paint_end(runtime);
     runtime->started = 0;
 }
 
@@ -828,7 +997,7 @@ void tui_runtime_finish_inline(TuiRuntime *runtime)
     if (!runtime || !runtime->in_inline_mode)
         return;
 
-    FILE *fp = runtime->output;
+    runtime_paint_begin(runtime);
 
     /* Move from current cursor row to the last rendered row */
     int last_row = runtime->inline_lines_rendered - 1;
@@ -836,11 +1005,11 @@ void tui_runtime_finish_inline(TuiRuntime *runtime)
     if (down > 0) {
         char down_buf[16];
         ansi_format_cursor_down(down_buf, sizeof(down_buf), down);
-        fputs(down_buf, fp);
+        runtime_emit_str(runtime, down_buf);
     }
 
     /* End the input line and start a fresh line for output */
-    fputs("\r\n", fp);
+    runtime_emit_str(runtime, "\r\n");
 
     /* Reset so the next flush doesn't cursor-up into old content */
     runtime->inline_lines_rendered = 0;
@@ -849,7 +1018,7 @@ void tui_runtime_finish_inline(TuiRuntime *runtime)
     runtime->inline_partial_cols = 0;
     inline_forget_frame(runtime);
 
-    fflush(fp);
+    runtime_paint_end(runtime);
 }
 
 /* Clear inline frame: erase the rendered frame IN PLACE and leave the
@@ -862,12 +1031,10 @@ void tui_runtime_finish_inline(TuiRuntime *runtime)
  * count as previously-rendered lines, so the next flush's stale-line
  * erase also wipes blank rows left below a shrunk frame. Only
  * inline_cursor_row resets (the cursor is now on frame row 0). */
-void tui_runtime_clear_inline(TuiRuntime *runtime)
+/* The erase itself: the body of tui_runtime_clear_inline, in its own
+ * paint so a direct call is still ONE delivery. */
+static void clear_inline_paint(TuiRuntime *runtime)
 {
-    if (!runtime || !runtime->in_inline_mode)
-        return;
-
-    FILE *fp = runtime->output;
     int lines = runtime->inline_lines_rendered;
     if (lines <= 0) {
         runtime->inline_cursor_row = 0;
@@ -879,7 +1046,7 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
         char up_buf[16];
         ansi_format_cursor_up(up_buf, sizeof(up_buf),
                               runtime->inline_cursor_row);
-        fputs(up_buf, fp);
+        runtime_emit_str(runtime, up_buf);
     }
 
     /* Erase each rendered row, walking down to the last one.
@@ -891,10 +1058,10 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
      * and skews every later cursor-up — the "duplicated partial line"
      * class. CUD clamps at the last row; no scroll, frame intact. */
     for (int i = 0; i < lines; i++) {
-        fputs("\r", fp);
-        fputs(EL_TO_END, fp);
+        runtime_emit_str(runtime, "\r");
+        runtime_emit_str(runtime, EL_TO_END);
         if (i < lines - 1)
-            fputs("\x1b[1B", fp); /* CUD 1 */
+            runtime_emit_str(runtime, "\x1b[1B"); /* CUD 1 */
     }
 
     /* Walk back up to frame row 0 so app output overwrites the area
@@ -903,15 +1070,22 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
     if (lines > 1) {
         char up_buf[16];
         ansi_format_cursor_up(up_buf, sizeof(up_buf), lines - 1);
-        fputs(up_buf, fp);
+        runtime_emit_str(runtime, up_buf);
     }
 
     runtime->inline_cursor_row = 0;
     /* The frame's bytes are erased; a later width change must not try to
      * erase them again. */
     inline_forget_frame(runtime);
+}
 
-    fflush(fp);
+void tui_runtime_clear_inline(TuiRuntime *runtime)
+{
+    if (!runtime || !runtime->in_inline_mode)
+        return;
+    runtime_paint_begin(runtime);
+    clear_inline_paint(runtime);
+    runtime_paint_end(runtime);
 }
 
 /* Transcript write: the ATOMIC inline-print seam. Erase the live frame
@@ -937,13 +1111,17 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
  *
  * Without an inline frame yet (before the first flush) the erase is a
  * no-op — the bytes still go out and the next flush renders below
- * them. */
-void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
-                                  size_t len)
+ * them.
+ *
+ * DELIVERY-ATOMIC too (the paint, see the Paint section): the erase,
+ * the bytes, and the nested live repaint leave in ONE write. Geometry
+ * atomicity alone was never enough — under ConPTY a write boundary is
+ * a presentation boundary, so the erase's cursor position and the
+ * write's would each be presented as a frame of their own (the caret
+ * hop). */
+static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
+                                   size_t len)
 {
-    if (!runtime || !bytes || len == 0)
-        return;
-
     int extend = runtime->inline_partial_open && runtime->in_inline_mode;
     int cols = extend ? runtime->inline_partial_cols : 0;
 
@@ -968,19 +1146,18 @@ void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
         int up = (cols > 0 && cols % width == 0) ? 0 : 1;
         int fwd = cols % width;
         if (up)
-            fputs("\x1b[1A", runtime->output);
-        fputs("\r", runtime->output);
+            runtime_emit_str(runtime, "\x1b[1A");
+        runtime_emit_str(runtime, "\r");
         if (fwd > 0) {
             char fwd_buf[16];
             ansi_format_cursor_fwd(fwd_buf, sizeof(fwd_buf), fwd);
-            fputs(fwd_buf, runtime->output);
+            runtime_emit_str(runtime, fwd_buf);
         }
     }
 
     /* Write the transcript bytes; a payload that does not end on \n
      * leaves the row open for the next call to extend. */
-    fwrite(bytes, 1, len, runtime->output);
-    fflush(runtime->output);
+    runtime_emit(runtime, bytes, len);
 
     int open = bytes[len - 1] != '\n';
     int esc = 0;
@@ -990,8 +1167,7 @@ void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
         runtime->inline_partial_cols = col;
         /* move below the open row so the live region renders on its
          * own rows; the next call moves back up to extend it */
-        fputs("\r\n", runtime->output);
-        fflush(runtime->output);
+        runtime_emit_str(runtime, "\r\n");
     } else {
         runtime->inline_partial_open = 0;
         runtime->inline_partial_cols = 0;
@@ -1007,6 +1183,16 @@ void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
      * geometry is re-established from the post-write cursor inside
      * this same call — no window for divergence. */
     tui_runtime_flush(runtime);
+}
+
+void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
+                                  size_t len)
+{
+    if (!runtime || !bytes || len == 0)
+        return;
+    runtime_paint_begin(runtime);
+    transcript_write_paint(runtime, bytes, len);
+    runtime_paint_end(runtime);
 }
 
 /* Attach a streaming transcript; the commit pass then runs at the top
@@ -1039,7 +1225,6 @@ void tui_runtime_transcript_orphan(TuiRuntime *runtime)
  * its top rows are stranded on screen (the "duplicated status line"). */
 static void inline_clear_reflowed(TuiRuntime *runtime)
 {
-    FILE *fp = runtime->output;
     const char *data = dynamic_buffer_data(runtime->inline_last_frame);
     size_t len = dynamic_buffer_len(runtime->inline_last_frame);
     int w = runtime->term_width > 1 ? runtime->term_width : 80;
@@ -1075,25 +1260,82 @@ static void inline_clear_reflowed(TuiRuntime *runtime)
     char buf[16];
     if (phys_cursor > 0) {
         ansi_format_cursor_up(buf, sizeof(buf), phys_cursor);
-        fputs(buf, fp);
+        runtime_emit_str(runtime, buf);
     }
     /* Cursor-DOWN, never a line feed: at the screen bottom a feed scrolls
      * (same reason clear_inline uses CUD). */
     for (int r = 0; r < phys_total; r++) {
-        fputs("\r", fp);
-        fputs(EL_TO_END, fp);
+        runtime_emit_str(runtime, "\r");
+        runtime_emit_str(runtime, EL_TO_END);
         if (r + 1 < phys_total) {
             ansi_format_cursor_down(buf, sizeof(buf), 1);
-            fputs(buf, fp);
+            runtime_emit_str(runtime, buf);
         }
     }
     ansi_format_cursor_up(buf, sizeof(buf), phys_total - 1);
-    fputs(buf, fp);
-    fputs("\r", fp);
+    runtime_emit_str(runtime, buf);
+    runtime_emit_str(runtime, "\r");
 }
 
-/* Render view, reconcile terminal mode against the View's declarations,
- * and write the resulting bytes.
+/* ------------------------------------------------------------------ */
+/* The frame: reconcile, then paint                                    */
+/* ------------------------------------------------------------------ */
+
+/* What the reconcile step decided this frame means. Today the mode and
+ * cursor diffs are still computed by the paint as it emits; this struct
+ * is the seam the reconcile architecture grows through (terminal-state
+ * plan, capability gating, anything that must be decided BEFORE a byte
+ * leaves). */
+typedef struct RuntimeFrame
+{
+    TuiView view;   /* the rendered frame's declarations */
+    int emit_probe; /* capability query goes out ahead of content */
+} RuntimeFrame;
+
+/* The reconcile step: stage this frame's MEANING from the model and the
+ * runtime's tracked state, before any byte is emitted.
+ *
+ * It runs first because everything after it is mechanical emission:
+ *  - the transcript commit pass (all units staged since the last flush
+ *    become ONE transcript_write, one geometry baseline per batch);
+ *  - view(): the frame's declaration of content + terminal modes;
+ *  - the capability probe: start it (so the query precedes this frame's
+ *    content) or advance it, and see any replies that landed.
+ *
+ * Returns 0 when there is nothing to paint — a committed batch painted
+ * the live region itself. */
+static int runtime_reconcile(TuiRuntime *runtime, RuntimeFrame *frame)
+{
+    memset(frame, 0, sizeof(*frame));
+
+    /* Commit pass (streaming transcripts). The seam re-renders the live
+     * region itself (its flush runs with committing set, so no
+     * recursion), so a successful commit ends this frame's work. */
+    if (runtime->transcript && !runtime->committing) {
+        runtime->committing = 1;
+        int wrote = tui_transcript_commit_pending(runtime->transcript, runtime);
+        runtime->committing = 0;
+        if (wrote)
+            return 0;
+    }
+
+    /* Render content into the view buffer. */
+    dynamic_buffer_clear(runtime->view_buf);
+    frame->view = runtime->component->view(runtime->model, runtime->view_buf);
+
+    /* Capability probe: start it (before this frame's bytes, so the
+     * query precedes content and a terminal's reply arrives as the
+     * next input) or advance it and drain what has landed since the
+     * last flush — the transcript commit gate reads the profile. The
+     * query itself is emitted exactly once, at the transition. */
+    frame->emit_probe = runtime_probe_maybe_start(runtime, &frame->view);
+    if (!frame->emit_probe && runtime->probe_state == 2)
+        tui_runtime_probe_check(runtime);
+
+    return 1;
+}
+
+/* Paint the reconciled frame: mode toggles, content, cursor placement.
  *
  * Bubbletea v2 alignment: components return a TuiView from view(). The
  * order matters — mode toggles MUST precede content so the content
@@ -1107,45 +1349,19 @@ static void inline_clear_reflowed(TuiRuntime *runtime)
  * Output sequence:
  *   mode toggles → [HIDE_CURSOR if the frame ends hidden] → content →
  *   window title → cursor placement → [SHOW_CURSOR if it changed]
- */
-void tui_runtime_flush(TuiRuntime *runtime)
+ *
+ * Nothing here delivers: the bytes are staged and the enclosing paint
+ * pushes them in ONE write. */
+static void runtime_paint(TuiRuntime *runtime, const RuntimeFrame *frame)
 {
-    if (!runtime || !runtime->component || !runtime->model)
-        return;
-
-    /* Commit pass (streaming transcripts): all emission units staged
-     * since the last flush go out through ONE transcript_write — one
-     * geometry baseline per batch. The seam re-renders the live region
-     * itself (its flush runs with committing set, so no recursion), so
-     * a successful commit ends this flush. */
-    if (runtime->transcript && !runtime->committing) {
-        runtime->committing = 1;
-        int wrote = tui_transcript_commit_pending(runtime->transcript, runtime);
-        runtime->committing = 0;
-        if (wrote)
-            return;
-    }
-
-    /* Render content into the view buffer. */
+    const TuiView *v = &frame->view;
     DynamicBuffer *content = runtime->view_buf;
-    dynamic_buffer_clear(content);
-    TuiView v = runtime->component->view(runtime->model, content);
 
-    FILE *fp = runtime->output;
-
-    /* Capability probe: start it (before this frame's bytes, so the
-     * query precedes content and a terminal's reply arrives as the
-     * next input) and drain any replies that landed since the last
-     * flush before the commit gate below inspects the profile. The
-     * query itself is emitted exactly once, at the transition. */
-    int probe_emit = runtime_probe_maybe_start(runtime, &v);
-    if (probe_emit) {
+    if (frame->emit_probe) {
         char query[TUI_TERM_PROBE_QUERY_MAX];
         size_t qlen = tui_term_probe_query(query, sizeof(query));
         if (qlen > 0)
-            fwrite(query, 1, qlen, fp);
-    } else if (runtime->probe_state == 2) {
-        tui_runtime_probe_check(runtime);
+            runtime_emit(runtime, query, qlen);
     }
 
     /* 1. Cursor visibility is reconciled toward what the frame declares
@@ -1154,22 +1370,23 @@ void tui_runtime_flush(TuiRuntime *runtime)
      * no visibility byte up front and shows only after its cursor
      * placement below. No frame ever carries a hide/show PAIR — the shape
      * a splitting transport tears apart. */
-    if (!v.cursor.visible)
-        runtime_reconcile_cursor(runtime, fp, 0);
+    if (!v->cursor.visible)
+        runtime_reconcile_cursor(runtime, 0);
 
-    if (v.render_mode == TUI_RENDER_INLINE) {
+    if (v->render_mode == TUI_RENDER_INLINE) {
         runtime->in_inline_mode = 1;
 
         /* Inline mode: no alt screen and no mouse. The keyboard
          * protocol is independent of the screen buffer, so it is
          * reconciled here too (an inline app is exactly the shape that
          * wants Shift+Enter and an unambiguous Esc). */
-        runtime_reconcile_kbd(runtime, fp, v.kbd_enhancements);
-        if (v.bracketed_paste != runtime->cur_bracketed_paste) {
-            fputs(v.bracketed_paste ? ANSI_ENABLE_BRACKETED_PASTE
-                                    : ANSI_DISABLE_BRACKETED_PASTE,
-                  fp);
-            runtime->cur_bracketed_paste = v.bracketed_paste;
+        runtime_reconcile_kbd(runtime, v->kbd_enhancements);
+        if (v->bracketed_paste != runtime->cur_bracketed_paste) {
+            runtime_emit_str(runtime,
+                             v->bracketed_paste
+                                 ? ANSI_ENABLE_BRACKETED_PASTE
+                                 : ANSI_DISABLE_BRACKETED_PASTE);
+            runtime->cur_bracketed_paste = v->bracketed_paste;
         }
 
         /* Save previous state before overwriting */
@@ -1198,11 +1415,12 @@ void tui_runtime_flush(TuiRuntime *runtime)
             char up_buf[16];
             ansi_format_cursor_up(up_buf, sizeof(up_buf),
                                   prev_cursor_row);
-            fputs(up_buf, fp);
+            runtime_emit_str(runtime, up_buf);
         }
 
         /* Write content. */
-        fwrite(dynamic_buffer_data(content), 1, dynamic_buffer_len(content), fp);
+        runtime_emit(runtime, dynamic_buffer_data(content),
+                     dynamic_buffer_len(content));
 
         /* Count visual lines rendered for next frame's cursor-up.
          * Each \n produces a line break, plus the initial line = \n count + 1.
@@ -1228,14 +1446,14 @@ void tui_runtime_flush(TuiRuntime *runtime)
         if (prev_lines > line_count) {
             int stale = prev_lines - line_count;
             for (int i = 0; i < stale; i++) {
-                fputs("\x1b[1B", fp); /* CUD 1 */
-                fputs("\r", fp);
-                fputs(EL_TO_END, fp);
+                runtime_emit_str(runtime, "\x1b[1B"); /* CUD 1 */
+                runtime_emit_str(runtime, "\r");
+                runtime_emit_str(runtime, EL_TO_END);
             }
             /* Move back up to the last content line */
             char up_buf[16];
             ansi_format_cursor_up(up_buf, sizeof(up_buf), stale);
-            fputs(up_buf, fp);
+            runtime_emit_str(runtime, up_buf);
         }
 
         /* Cursor placement — relative positioning in inline mode.
@@ -1243,26 +1461,26 @@ void tui_runtime_flush(TuiRuntime *runtime)
          * where N = line_count). Move up to the cursor's row, then
          * carriage return + forward to the cursor's column.
          * Save the cursor row for next frame's cursor-up. */
-        if (v.cursor.visible) {
-            int cursor_row_in_content = v.cursor.row - 1; /* 0-indexed */
-            int last_row = line_count - 1;                /* 0-indexed last row */
+        if (v->cursor.visible) {
+            int cursor_row_in_content = v->cursor.row - 1; /* 0-indexed */
+            int last_row = line_count - 1;                 /* 0-indexed last row */
             int lines_to_move_up = last_row - cursor_row_in_content;
             if (lines_to_move_up > 0) {
                 char up_buf[16];
                 ansi_format_cursor_up(up_buf, sizeof(up_buf),
                                       lines_to_move_up);
-                fputs(up_buf, fp);
+                runtime_emit_str(runtime, up_buf);
             }
             runtime->inline_cursor_row = cursor_row_in_content;
             /* Move to column: \r + cursor forward */
-            fputs("\r", fp);
-            if (v.cursor.col > 1) {
+            runtime_emit_str(runtime, "\r");
+            if (v->cursor.col > 1) {
                 char fwd_buf[16];
                 ansi_format_cursor_fwd(fwd_buf, sizeof(fwd_buf),
-                                       v.cursor.col - 1);
-                fputs(fwd_buf, fp);
+                                       v->cursor.col - 1);
+                runtime_emit_str(runtime, fwd_buf);
             }
-            runtime_reconcile_cursor(runtime, fp, 1);
+            runtime_reconcile_cursor(runtime, 1);
         } else {
             /* Cursor hidden — stays at end of last line */
             runtime->inline_cursor_row = line_count - 1;
@@ -1278,9 +1496,9 @@ void tui_runtime_flush(TuiRuntime *runtime)
             dynamic_buffer_append(runtime->inline_last_frame, data, len);
         }
         runtime->inline_last_width = runtime->term_width;
-        runtime->inline_last_cursor_col = v.cursor.visible ? v.cursor.col : 0;
+        runtime->inline_last_cursor_col =
+            v->cursor.visible ? v->cursor.col : 0;
 
-        fflush(fp);
         return;
     }
 
@@ -1291,50 +1509,66 @@ void tui_runtime_flush(TuiRuntime *runtime)
     inline_forget_frame(runtime);
 
     /* 2. Reconcile mode toggles before content. */
-    if (v.alt_screen != runtime->in_alt_screen) {
-        fputs(v.alt_screen ? ANSI_ENTER_ALT_SCREEN : ANSI_EXIT_ALT_SCREEN, fp);
-        runtime->in_alt_screen = v.alt_screen;
+    if (v->alt_screen != runtime->in_alt_screen) {
+        runtime_emit_str(runtime, v->alt_screen ? ANSI_ENTER_ALT_SCREEN
+                                                : ANSI_EXIT_ALT_SCREEN);
+        runtime->in_alt_screen = v->alt_screen;
         /* A screen-buffer swap restores a cursor visibility the runtime
          * never set; the next frame re-establishes it with an explicit
          * byte. */
         runtime->cur_cursor_visible = -1;
     }
-    if (v.mouse_mode != runtime->cur_mouse_mode) {
+    if (v->mouse_mode != runtime->cur_mouse_mode) {
         if (runtime->cur_mouse_mode != TUI_MOUSE_MODE_NONE)
-            fputs(ANSI_DISABLE_MOUSE, fp);
-        if (v.mouse_mode != TUI_MOUSE_MODE_NONE)
-            fputs(ANSI_ENABLE_MOUSE, fp);
-        runtime->cur_mouse_mode = v.mouse_mode;
+            runtime_emit_str(runtime, ANSI_DISABLE_MOUSE);
+        if (v->mouse_mode != TUI_MOUSE_MODE_NONE)
+            runtime_emit_str(runtime, ANSI_ENABLE_MOUSE);
+        runtime->cur_mouse_mode = v->mouse_mode;
     }
-    if (v.kbd_enhancements != runtime->cur_kbd_enhancements)
-        runtime_reconcile_kbd(runtime, fp, v.kbd_enhancements);
-    if (v.bracketed_paste != runtime->cur_bracketed_paste) {
-        fputs(v.bracketed_paste ? ANSI_ENABLE_BRACKETED_PASTE
-                                : ANSI_DISABLE_BRACKETED_PASTE,
-              fp);
-        runtime->cur_bracketed_paste = v.bracketed_paste;
+    if (v->kbd_enhancements != runtime->cur_kbd_enhancements)
+        runtime_reconcile_kbd(runtime, v->kbd_enhancements);
+    if (v->bracketed_paste != runtime->cur_bracketed_paste) {
+        runtime_emit_str(runtime, v->bracketed_paste
+                                      ? ANSI_ENABLE_BRACKETED_PASTE
+                                      : ANSI_DISABLE_BRACKETED_PASTE);
+        runtime->cur_bracketed_paste = v->bracketed_paste;
     }
 
     /* 3. Content. */
-    fwrite(dynamic_buffer_data(content), 1, dynamic_buffer_len(content), fp);
+    runtime_emit(runtime, dynamic_buffer_data(content),
+                 dynamic_buffer_len(content));
 
     /* 4. Window title. */
-    if (v.window_title) {
+    if (v->window_title) {
         char title_buf[512];
-        ansi_set_window_title(title_buf, sizeof(title_buf), v.window_title);
-        fputs(title_buf, fp);
+        ansi_set_window_title(title_buf, sizeof(title_buf), v->window_title);
+        runtime_emit_str(runtime, title_buf);
     }
 
     /* 5. Cursor placement. */
-    if (v.cursor.visible) {
+    if (v->cursor.visible) {
         char cur_buf[32];
-        ansi_format_cursor_pos(cur_buf, sizeof(cur_buf), v.cursor.row,
-                               v.cursor.col);
-        fputs(cur_buf, fp);
-        runtime_reconcile_cursor(runtime, fp, 1);
+        ansi_format_cursor_pos(cur_buf, sizeof(cur_buf), v->cursor.row,
+                               v->cursor.col);
+        runtime_emit_str(runtime, cur_buf);
+        runtime_reconcile_cursor(runtime, 1);
     }
+}
 
-    fflush(fp);
+/* Render the view and paint the frame: the reconcile step (commit
+ * pass, view, probe) followed by ONE delivery of everything the paint
+ * emits — including any nested paint a commit pass opened. A paint is
+ * the unit of delivery; see the Paint section. */
+void tui_runtime_flush(TuiRuntime *runtime)
+{
+    if (!runtime || !runtime->component || !runtime->model)
+        return;
+
+    runtime_paint_begin(runtime);
+    RuntimeFrame frame;
+    if (runtime_reconcile(runtime, &frame))
+        runtime_paint(runtime, &frame);
+    runtime_paint_end(runtime);
 }
 
 /* Execute a TuiCmd synchronously, outside the runtime's event loop.

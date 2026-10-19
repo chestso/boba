@@ -61,6 +61,28 @@ display_col)`; textinput tracks `cursor_byte`. They only share the
   `TUI_CMD_CLIPBOARD_COPY` pipeline. Revisit only if a third consumer
   with the same shape appears.
 
+## FIXED — one paint is four writes (ConPTY caret hop)
+
+Fixed 2026-10-19 by the **paint** transaction: `paint_depth` + `out_stage`
+on `TuiRuntime`, `runtime_emit()` staging, and ONE delivery at the
+outermost close; terminal-like sinks are delivered through the fd so stdio
+buffering cannot split a paint. Asserts on `out_write_count`, not bytes.
+`6acd0b5` kept; the per-frame `?25l`/`?25h` pair must never come back.
+Diagnosis and the residual work: a Windows pseudoconsole harness that logs
+`ReadFile` boundaries (nothing in CI can see the caret). The rationale is
+in the Paint section of `src/runtime.c`.
+
+## Reconciliation architecture (step 1 landed, step 2 open)
+
+`tui_runtime_flush()` is now `paint_begin → runtime_reconcile() →
+runtime_paint() → paint_end`: the reconcile step decides the frame's meaning
+(commit pass, `view()`, capability probe) before a byte leaves, and the paint
+emits + delivers it. The mode/cursor diffs are still computed *while*
+emitting — the next step is to make reconcile produce a real terminal-state
+plan (transitions, capability gating, per-row placement) that the paint
+executes mechanically, so "reconcile" is a pure function of (model, tracked
+state) that tests can call on its own.
+
 ## Streaming transcript (step 3+)
 
 The transcript component landed in `include/boba/stream.h` (see

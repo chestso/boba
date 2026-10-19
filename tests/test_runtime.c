@@ -22,6 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 #else
+#include <fcntl.h>
+#include <io.h>
 #include <winsock2.h>
 #include <windows.h>
 #endif
@@ -3145,6 +3147,200 @@ static void test_flush_cursor_reconcile_inline_steady(void)
     fclose(out);
 }
 
+/* ========================================================================
+ * Delivery atomicity: one paint = ONE write
+ *
+ * The invariant that byte-content tests cannot see. Under ConPTY the
+ * presentation boundary IS the write boundary, so a paint that flushes
+ * more than once publishes its intermediate cursor positions as frames
+ * of their own — the caret hop between the prompt and the last
+ * committed row. Assert on
+ * rt->out_write_count, not on the bytes a frame carries: 6acd0b5
+ * counted torn "?25" pairs (the wrong invariant) and shipped a worse
+ * bug than the one it fixed.
+ * ======================================================================== */
+
+/* A plain inline frame: exactly one delivery, and the bytes still say
+ * what the byte-content tests expect. */
+static void test_paint_steady_flush_delivers_once(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+    tui_runtime_start(rt);
+
+    reset_view_stub();
+    s_view_content = "frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+
+    unsigned long before = rt->out_write_count;
+    tui_runtime_flush(rt);
+    assert(rt->out_write_count - before == 1);
+    assert(rt->paint_depth == 0); /* the paint closed */
+
+    /* The spinner keeps ticking: still one write per paint, and the
+     * frame's content is there. */
+    reset_view_stub();
+    s_view_content = "frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+    before = rt->out_write_count;
+    tui_runtime_flush(rt);
+    assert(rt->out_write_count - before == 1);
+
+    tui_runtime_stop(rt);
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
+/* The streaming paint: transcript_write erases the live frame, writes
+ * the bytes, and re-renders the live region through a NESTED flush.
+ * Three emissions, one delivery — the nested paint must join the
+ * enclosing one. */
+static void test_paint_transcript_write_delivers_once(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+    tui_runtime_start(rt);
+
+    reset_view_stub();
+    s_view_content = "frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+    tui_runtime_flush(rt);
+
+    unsigned long before = rt->out_write_count;
+    tui_runtime_transcript_write(rt, "scrollback\r\n", 12);
+    assert(rt->out_write_count - before == 1);
+    assert(rt->paint_depth == 0);
+
+    /* A partial row (open) is the same paint shape: extend + write +
+     * move below + nested repaint, still ONE delivery. */
+    before = rt->out_write_count;
+    tui_runtime_transcript_write(rt, "chunk", 5);
+    assert(rt->out_write_count - before == 1);
+
+    tui_runtime_stop(rt);
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
+/* The erase-only entry point too: a direct clear_inline is a paint of
+ * its own (an embedding calls it outside any flush) — one delivery. */
+static void test_paint_clear_inline_delivers_once(void)
+{
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+    tui_runtime_start(rt);
+
+    reset_view_stub();
+    s_view_content = "a\r\nb\r\nc\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+    tui_runtime_flush(rt);
+
+    unsigned long before = rt->out_write_count;
+    tui_runtime_clear_inline(rt);
+    assert(rt->out_write_count - before == 1);
+
+    tui_runtime_stop(rt);
+    tui_runtime_free(rt);
+    fclose(out);
+}
+
+/* One delivery even when the terminal's slice is not stdio's: a pipe (or
+ * a console under ConPTY) is delivered through the descriptor, so the
+ * stdio buffer cannot split the paint at a row terminator. The bytes
+ * must still arrive, in order. */
+static void test_paint_delivery_through_a_pipe(void)
+{
+#ifdef _WIN32
+    int fds[2];
+    assert(_pipe(fds, 65536, _O_BINARY) == 0);
+    FILE *out = _fdopen(fds[1], "wb");
+#else
+    int fds[2];
+    assert(pipe(fds) == 0);
+    FILE *out = fdopen(fds[1], "w");
+#endif
+    assert(out != NULL);
+
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out };
+    TuiRuntime *rt = tui_runtime_create(&view_stub_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    reset_view_stub();
+    s_view_content = "pipe frame\r\n";
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+
+    unsigned long before = rt->out_write_count;
+    tui_runtime_flush(rt);
+    assert(rt->out_write_count - before == 1);
+
+    /* The staged bytes really left: read them back off the pipe. */
+    char buf[512];
+    memset(buf, 0, sizeof(buf));
+#ifdef _WIN32
+    int n = _read(fds[0], buf, sizeof(buf) - 1);
+#else
+    ssize_t n = read(fds[0], buf, sizeof(buf) - 1);
+#endif
+    assert(n > 0);
+    assert(strstr(buf, "pipe frame") != NULL);
+
+    /* A payload bigger than any stdio buffer is the case the descriptor
+     * write exists for: one delivery, and every byte intact (not
+     * truncated by a buffer-sized chunk). */
+    static char big[20000];
+    memset(big, 'x', sizeof(big));
+    big[sizeof(big) - 3] = '\r';
+    big[sizeof(big) - 2] = '\n';
+    big[sizeof(big) - 1] = '\0';
+    reset_view_stub();
+    s_view_content = big;
+    s_view_to_return.render_mode = TUI_RENDER_INLINE;
+    s_view_to_return.cursor = tui_cursor_at(1, 1);
+    before = rt->out_write_count;
+    tui_runtime_flush(rt);
+    assert(rt->out_write_count - before == 1);
+
+    size_t total = strlen(big);
+    size_t want_x = total - 2; /* content, minus its trailing \r\n */
+    size_t got = 0;
+    char sink[4096];
+    while (got < total) {
+#ifdef _WIN32
+        int r = _read(fds[0], sink, sizeof(sink));
+#else
+        ssize_t r = read(fds[0], sink, sizeof(sink));
+#endif
+        assert(r > 0);
+        for (int i = 0; i < r && got < total; i++, got++) {
+            unsigned char c = (unsigned char)sink[i];
+            if (got < want_x)
+                assert(c == 'x');
+        }
+    }
+
+    tui_runtime_free(rt);
+    fclose(out);
+#ifdef _WIN32
+    _close(fds[0]);
+#else
+    close(fds[0]);
+#endif
+}
+
 /* A screen-buffer swap (1049h/l) restores a visibility boba never set, so
  * the tracked state is forgotten and the next frame re-establishes it with
  * an explicit byte. */
@@ -3211,6 +3407,10 @@ int main(void)
     RUN_TEST(test_kbd_legacy_and_text_only_declare_nothing);
     RUN_TEST(test_flush_cursor_reconcile_inline_steady);
     RUN_TEST(test_flush_cursor_alt_swap_reestablishes);
+    RUN_TEST(test_paint_steady_flush_delivers_once);
+    RUN_TEST(test_paint_transcript_write_delivers_once);
+    RUN_TEST(test_paint_clear_inline_delivers_once);
+    RUN_TEST(test_paint_delivery_through_a_pipe);
     RUN_TEST(test_get_dimensions_null);
     RUN_TEST(test_null_callbacks_in_config);
     RUN_TEST(test_default_config_raw_mode);
