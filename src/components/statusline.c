@@ -31,6 +31,7 @@
 
 #include <boba/ansi_sequences.h>
 #include <boba/components/statusline.h>
+#include <boba/text.h>
 #include <boba/unicode.h>
 
 #include <stdint.h>
@@ -123,23 +124,14 @@ static void row_fill(TuiStatusLine *sl, const char *unit, size_t unit_len,
 /* How much of a segment's text survives a fit into `cols` columns: the
  * byte count of the longest grapheme-cluster prefix that fits in `cols - 1`
  * columns (one column is reserved for the `…`), and that prefix's width.
- * `cols` must be >= 1. */
+ * `cols` must be >= 1. The fit itself is boba's one width-aware walk
+ * (text.h). */
 static size_t cluster_prefix(const char *text, size_t tlen, int cols,
                              int *out_cols)
 {
-    int limit = cols - 1; /* one column for the ellipsis */
-    size_t i = 0;
-    int have = 0;
-    while (i < tlen) {
-        size_t bytes = 0;
-        int cw = tui_next_cluster(text + i, tlen - i, &bytes);
-        if (bytes == 0 || have + cw > limit)
-            break;
-        have += cw;
-        i += bytes;
-    }
-    *out_cols = have;
-    return i;
+    TuiTextFit fit = tui_text_fit(text, tlen, cols - 1, 0);
+    *out_cols = fit.cols;
+    return fit.bytes;
 }
 
 /* The width a segment's text occupies when fitted into `cols` display

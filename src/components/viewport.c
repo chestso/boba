@@ -11,6 +11,7 @@
 #include <boba/ansi_sequences.h>
 #include <boba/cmd.h>
 #include <boba/components/viewport.h>
+#include <boba/text.h>
 #include <boba/unicode.h>
 #include <limits.h>
 #include <stdint.h>
@@ -31,57 +32,37 @@
  * the same display-column space as the returned column count.
  *
  * Returns number of display columns emitted. */
+typedef struct
+{
+    int sel_start, sel_end;
+    int reversed;
+} EmitSel;
+
+static void emit_sel_hook(DynamicBuffer *out, int col, int width, void *user)
+{
+    (void)width;
+    EmitSel *s = (EmitSel *)user;
+    int in_sel = (col >= s->sel_start && col < s->sel_end);
+    if (in_sel && !s->reversed) {
+        dynamic_buffer_append_str(out, SGR_REVERSE);
+        s->reversed = 1;
+    } else if (!in_sel && s->reversed) {
+        dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
+        s->reversed = 0;
+    }
+}
+
 static int emit_cols(const char *text, size_t len, size_t *pos, int max_cols,
                      DynamicBuffer *out, int sel_start, int sel_end)
 {
-    int col = 0;
-    TuiAnsiScan scan = { 0 };
-    int reversed = 0;
-    int has_sel = sel_end > sel_start;
-
-    for (; *pos < len; (*pos)++) {
-        unsigned char ch = (unsigned char)text[*pos];
-        if (scan.state != 0 || ch == 0x1b) {
-            /* A sequence is passed through byte for byte and occupies no
-             * columns; the shared grammar (ansi_scan.h) decides where it
-             * ends, so an OSC/DCS payload is not mistaken for text. */
-            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
-            dynamic_buffer_append(out, &text[*pos], 1);
-            if (tui_ansi_scan_feed(&scan, ch, &kind)) {
-                scan.len = 0;
-                scan.nostore = 0;
-            }
-        } else if (ch >= 0x20) {
-            size_t clen = 0;
-            int w = tui_next_cluster(&text[*pos], len - *pos, &clen);
-            if (clen < 1)
-                clen = 1; /* invalid tail: consume a byte to progress */
-            if (w > 0 && col + w > max_cols)
-                break;
-
-            if (has_sel) {
-                int in_sel = (col >= sel_start && col < sel_end);
-                if (in_sel && !reversed) {
-                    dynamic_buffer_append_str(out, SGR_REVERSE);
-                    reversed = 1;
-                } else if (!in_sel && reversed) {
-                    dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
-                    reversed = 0;
-                }
-            }
-
-            col += w;
-            dynamic_buffer_append(out, &text[*pos], clen);
-            *pos += clen - 1; /* -1 because loop increments */
-        } else {
-            dynamic_buffer_append(out, &text[*pos], 1);
-        }
-    }
-
-    if (reversed)
+    EmitSel sel = { sel_start, sel_end, 0 };
+    TuiTextFit fit = tui_text_emit(out, text + *pos, len - *pos, max_cols, 0,
+                                   sel_end > sel_start ? emit_sel_hook : NULL,
+                                   &sel);
+    *pos += fit.bytes;
+    if (sel.reversed)
         dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
-
-    return col;
+    return fit.cols;
 }
 
 /* Calculate how many visual (screen) rows a line occupies */
@@ -909,39 +890,14 @@ int tui_viewport_contains(const TuiViewport *vp, int row, int col)
 /* --- Selection extraction --- */
 
 /* Return the byte offset in `text` where display column `target` begins.
- * ANSI CSI sequences are skipped (count as zero width). If target is past
+ * ANSI escape sequences are skipped (count as zero width). If target is past
  * the end of the displayable text, returns `len`. */
 static size_t byte_offset_for_display_col(const char *text, size_t len,
                                           int target)
 {
     if (target <= 0)
         return 0;
-    size_t i = 0;
-    int col = 0;
-    TuiAnsiScan scan = { 0 };
-    while (i < len) {
-        unsigned char ch = (unsigned char)text[i];
-        if (scan.state != 0 || ch == 0x1b) {
-            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
-            i++;
-            if (tui_ansi_scan_feed(&scan, ch, &kind)) {
-                scan.len = 0;
-                scan.nostore = 0;
-            }
-        } else if (ch >= 0x20) {
-            size_t clen = 0;
-            int w = tui_next_cluster(&text[i], len - i, &clen);
-            if (clen < 1)
-                clen = 1;
-            if (col + w > target)
-                break;
-            col += w;
-            i += clen;
-        } else {
-            i++;
-        }
-    }
-    return i;
+    return tui_text_fit(text, len, target, 0).bytes;
 }
 
 /* Append text[start..end), with ANSI escape sequences stripped, to `out`. */

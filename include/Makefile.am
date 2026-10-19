@@ -10,6 +10,7 @@ boba_HEADERS = \
     boba/runtime.h \
     boba/dynamic_buffer.h \
     boba/ansi_sequences.h \
+    boba/text.h \
     boba/unicode.h \
     boba/style.h \
     boba/stream.h \

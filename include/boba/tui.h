@@ -13,6 +13,7 @@
 #include "ansi_sequences.h"
 #include "dynamic_buffer.h"
 #include "style.h"
+#include "text.h"
 #include "unicode.h"
 
 /* Elm Architecture types */

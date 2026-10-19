@@ -3,6 +3,7 @@
 #include <boba/ansi_sequences.h>
 #include <boba/cmd.h>
 #include <boba/components/textinput.h>
+#include <boba/text.h>
 #include <boba/unicode.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,22 +48,10 @@ static size_t fit_cols(const char *text, size_t len, int cols)
 {
     if (cols <= 0)
         return 0;
-
-    size_t pos = 0;
-    int used = 0;
-    int consumed = 0;
-    while (pos < len) {
-        size_t clen = 0;
-        int w = tui_next_cluster(text + pos, len - pos, &clen);
-        if (clen < 1)
-            clen = 1; /* invalid tail: consume a byte to progress */
-        if (consumed && used + w > cols)
-            break;
-        used += w;
-        consumed = 1;
-        pos += clen;
-    }
-    return pos;
+    /* at_least_one: the first cluster is taken even when it alone exceeds
+     * the budget, so a chunk walk always progresses and a row never
+     * splits a grapheme cluster. */
+    return tui_text_fit(text, len, cols, 1).bytes;
 }
 
 /* Display width of a rendered prompt string — NULL is zero, and any SGR the

@@ -13,13 +13,12 @@
 
 #include <boba/ansi_sequences.h>
 #include <boba/components/list_popup.h>
+#include <boba/text.h>
 #include <boba/unicode.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "ansi_scan.h"
 
 #define INITIAL_ITEM_CAPACITY 8
 #define DEFAULT_MAX_VISIBLE   8
@@ -608,36 +607,9 @@ static int emit_clipped(DynamicBuffer *out, const char *s, int max_cols)
 {
     if (max_cols <= 0)
         return 0;
-    size_t len = strlen(s);
-    int col = 0;
-    TuiAnsiScan scan = { 0 };
-    for (size_t i = 0; i < len && col < max_cols; i++) {
-        unsigned char ch = (unsigned char)s[i];
-        if (scan.state != 0 || ch == 0x1b) {
-            /* Sequences pass through (the caller may embed styling) and
-             * consume no columns; the shared grammar (ansi_scan.h) knows
-             * where they end, so an OSC/DCS payload is not clipped as
-             * text and a lowercase SGR final (`m`) terminates the
-             * sequence. */
-            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
-            dynamic_buffer_append(out, &s[i], 1);
-            if (tui_ansi_scan_feed(&scan, ch, &kind)) {
-                scan.len = 0;
-                scan.nostore = 0;
-            }
-        } else {
-            size_t clen = 0;
-            int w = tui_next_cluster(&s[i], len - i, &clen);
-            if (clen < 1)
-                clen = 1;
-            if (col + w > max_cols)
-                break;
-            dynamic_buffer_append(out, &s[i], clen);
-            col += w;
-            i += clen - 1;
-        }
-    }
-    return col;
+    TuiTextFit fit = tui_text_fit(s, strlen(s), max_cols, 0);
+    dynamic_buffer_append(out, s, fit.bytes);
+    return fit.cols;
 }
 
 static void emit_pad(DynamicBuffer *out, int cols)
