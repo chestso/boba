@@ -155,6 +155,18 @@ typedef struct TuiRuntimeConfig
     TuiCmdHandler cmd_handler; /* App command callback */
     void *cmd_handler_data;    /* Callback context */
 
+    /* The terminal's cell-width model (see unicode.h). AUTO (zero)
+     * resolves from the startup environment before the component's
+     * init() runs — see terminal_profile.h for the grammar. An explicit
+     * value overrides detection, which is the escape hatch for a
+     * terminal whose identity is not visible (kitty over ssh without
+     * the ssh kitten, an unusual terminfo override).
+     *
+     * The model is pinned for the runtime's lifetime: it decides the
+     * geometry of committed scrollback, so it must not change after
+     * the first byte is emitted. */
+    TuiWidthModel width_model;
+
     /* Event loop callbacks (used by tui_runtime_run) */
     TuiFillIoSources fill_io_sources;        /* Declare I/O sources (per wait) */
     TuiOnIoReady on_io_ready;                /* Per-source: (handle, bits) fired */
@@ -185,6 +197,15 @@ struct TuiRuntime
     int started;             /* Idempotent start/stop guard */
     int term_width;          /* Current terminal width */
     int term_height;         /* Current terminal height */
+
+    /* Cell-width model installed before the component's init(). The
+     * runtime pins the ambient model while it is alive and restores
+     * prev_width_model on free. owns_width_model_pin is 0 when another
+     * live runtime already held the pin (this runtime joins its model
+     * rather than measuring with a different one). */
+    TuiWidthModel width_model;
+    TuiWidthModel prev_width_model;
+    int owns_width_model_pin;
 
     /* Tracked terminal state — diffed against TuiView each flush. */
     int in_alt_screen;

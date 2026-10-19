@@ -481,6 +481,37 @@ static void test_style_change_detected(void)
     tui_statusline_free(sl);
 }
 
+/* A row composed before a runtime exists (or in a test that changes the
+ * ambient model) must not keep stale columns: update() sees the model
+ * differ and relays out, still eagerly. */
+static void test_width_model_change_relayouts(void)
+{
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+
+    TuiStatusLine *sl = tui_statusline_create();
+    tui_statusline_set_terminal_width(sl, 8);
+    TuiSegment segs[2];
+    segs[0] = seg("\xE2\x9A\xA1\xEF\xB8\x8E", TUI_SEGMENT_LEFT, 0, 0, 0); /* ⚡︎ */
+    segs[1] = seg(".", TUI_SEGMENT_FILL, 1, 0, 0);
+    tui_statusline_set_segments(sl, segs, 2);
+
+    /* GRID: ⚡︎ is two cells, the fill absorbs six. */
+    assert(sl->width_model == TUI_WIDTH_MODEL_GRID);
+    assert(sl->row_len == 12); /* 6 bytes of ⚡︎ + 6 fill columns */
+    assert(memcmp(sl->row, "\xE2\x9A\xA1\xEF\xB8\x8E......", 12) == 0);
+
+    /* UTS51 (portty, kitty): one cell, so the fill takes seven. A
+     * message that is not a resize triggers the model check. */
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_UTS51) == 1);
+    tui_statusline_update(sl, tui_msg_none());
+    assert(sl->width_model == TUI_WIDTH_MODEL_UTS51);
+    assert(sl->row_len == 13); /* 6 bytes of ⚡︎ + 7 fill columns */
+    assert(memcmp(sl->row, "\xE2\x9A\xA1\xEF\xB8\x8E.......", 13) == 0);
+
+    tui_statusline_free(sl);
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+}
+
 /* The layout is EAGER: the setters compose the row, so a caller that never
  * calls view() still has the bytes, and view() only emits them. */
 static void test_layout_is_eager(void)
@@ -662,6 +693,7 @@ int main(void)
     /* change detection */
     RUN_TEST(test_identical_segments_are_a_noop);
     RUN_TEST(test_style_change_detected);
+    RUN_TEST(test_width_model_change_relayouts);
     RUN_TEST(test_layout_is_eager);
     RUN_TEST(test_layout_scratch_is_reused);
 

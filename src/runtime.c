@@ -9,6 +9,7 @@
 
 #include "stream_internal.h"
 #include "terminal_profile_internal.h"
+#include "width_internal.h"
 
 #ifndef _WIN32
 #include <errno.h>
@@ -616,13 +617,50 @@ TuiRuntime *tui_runtime_create(TuiComponent *component, void *component_config,
 
     memset(runtime, 0, sizeof(TuiRuntime));
 
+    /* Zero is a valid fd, not "unset": initialize the self-pipe here so
+     * an early create failure can go through tui_runtime_free(). */
+    runtime->wakeup_pipe[0] = -1;
+    runtime->wakeup_pipe[1] = -1;
+
     /* Store component interface */
     runtime->component = component;
+
+    /* Apply configuration BEFORE init: components may compose and
+     * measure eagerly inside init() (statusline lays its row out in its
+     * setters), so the terminal's width model must already be installed.
+     *
+     * AUTO resolves from the startup environment; an explicit value is
+     * the caller's verdict. An out-of-range value is a configuration
+     * error and degrades to the conservative grid rule. */
+    if (runtime_config) {
+        runtime->config = *runtime_config;
+    } else {
+        /* Defaults */
+        memset(&runtime->config, 0, sizeof(runtime->config));
+        runtime->config.raw_mode = 1;
+    }
+
+    TuiWidthModel requested = runtime->config.width_model;
+    if (requested == TUI_WIDTH_MODEL_AUTO)
+        requested = tui_width_model_detect_env();
+    else if (requested != TUI_WIDTH_MODEL_GRID &&
+             requested != TUI_WIDTH_MODEL_WCWIDTH &&
+             requested != TUI_WIDTH_MODEL_UTS51)
+        requested = TUI_WIDTH_MODEL_GRID;
+
+    runtime->prev_width_model = tui_width_model();
+    runtime->owns_width_model_pin = tui_width_model_pin(requested);
+    /* A second live runtime cannot re-model the process. It joins the
+     * model already in force rather than measuring with a different
+     * one. */
+    runtime->width_model =
+        runtime->owns_width_model_pin ? requested : tui_width_model();
 
     /* Initialize model (Elm Architecture: init returns (Model, Cmd)) */
     TuiInitResult init_result = component->init(component_config);
     if (!init_result.model) {
-        free(runtime);
+        runtime->component = NULL;
+        tui_runtime_free(runtime);
         return NULL;
     }
     runtime->model = init_result.model;
@@ -630,8 +668,9 @@ TuiRuntime *tui_runtime_create(TuiComponent *component, void *component_config,
     /* Create input parser */
     runtime->parser = tui_input_parser_create();
     if (!runtime->parser) {
-        component->free(runtime->model);
-        free(runtime);
+        runtime->component->free(runtime->model);
+        runtime->model = NULL;
+        tui_runtime_free(runtime);
         return NULL;
     }
 
@@ -639,18 +678,11 @@ TuiRuntime *tui_runtime_create(TuiComponent *component, void *component_config,
     runtime->view_buf = dynamic_buffer_create(4096);
     if (!runtime->view_buf) {
         tui_input_parser_free(runtime->parser);
-        component->free(runtime->model);
-        free(runtime);
+        runtime->parser = NULL;
+        runtime->component->free(runtime->model);
+        runtime->model = NULL;
+        tui_runtime_free(runtime);
         return NULL;
-    }
-
-    /* Apply configuration */
-    if (runtime_config) {
-        runtime->config = *runtime_config;
-    } else {
-        /* Defaults */
-        memset(&runtime->config, 0, sizeof(runtime->config));
-        runtime->config.raw_mode = 1;
     }
 
     /* Resolve output target */
@@ -729,6 +761,14 @@ void tui_runtime_free(TuiRuntime *runtime)
     if (runtime->wakeup_pipe[1] >= 0)
         close(runtime->wakeup_pipe[1]);
 #endif
+
+    /* Release the width-model pin and restore whatever was in force
+     * before this runtime was created. */
+    if (runtime->owns_width_model_pin) {
+        tui_width_model_unpin();
+        (void)tui_width_model_set(runtime->prev_width_model);
+        runtime->owns_width_model_pin = 0;
+    }
 
     free(runtime);
 }

@@ -25,6 +25,7 @@
 #include "../dynamic_buffer.h"
 #include "../msg.h"
 #include "../style.h"
+#include "../unicode.h"
 
 #include <stddef.h>
 
@@ -101,6 +102,11 @@ typedef struct TuiStatusLine
     char *row;
     size_t row_len;
     size_t row_cap;
+    /* The width model the row was composed under. The component is
+     * standalone-composable (before any runtime exists), so a later
+     * model change is detected in update() and relaid out rather than
+     * silently keeping stale columns. */
+    TuiWidthModel width_model;
     struct
     {
         size_t off;

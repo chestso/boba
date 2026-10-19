@@ -263,6 +263,7 @@ static void statusline_layout(TuiStatusLine *sl)
 {
     sl->row_len = 0;
     sl->n_pieces = 0;
+    sl->width_model = tui_width_model();
 
     size_t n = sl->n_segs;
     if (n == 0)
@@ -568,8 +569,16 @@ static TuiInitResult statusline_init(void *config)
 
 TuiUpdateResult tui_statusline_update(TuiStatusLine *sl, TuiMsg msg)
 {
-    if (sl && msg.type == TUI_MSG_WINDOW_SIZE)
+    if (!sl)
+        return tui_update_result_none();
+    if (msg.type == TUI_MSG_WINDOW_SIZE)
         tui_statusline_set_terminal_width(sl, msg.data.size.width);
+    /* The model is pinned for a runtime's lifetime, but a row composed
+     * standalone before a runtime exists (or in a test that changed the
+     * ambient model) must not keep stale columns. Relayout is eager
+     * here, never in view(). */
+    else if (sl->n_segs > 0 && sl->width_model != tui_width_model())
+        statusline_layout(sl);
     return tui_update_result_none();
 }
 

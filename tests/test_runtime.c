@@ -3393,6 +3393,248 @@ static void test_flush_cursor_alt_swap_reestablishes(void)
     fclose(out);
 }
 
+/* ========================================================================
+ * Width model installation
+ * ======================================================================== */
+
+typedef struct
+{
+    TuiModel base;
+} WidthModel;
+
+static TuiWidthModel s_init_width_model;
+static int s_init_ran;
+
+static TuiInitResult width_model_init(void *config)
+{
+    (void)config;
+    s_init_ran = 1;
+    s_init_width_model = tui_width_model();
+    WidthModel *m = calloc(1, sizeof(WidthModel));
+    if (!m)
+        return tui_init_result_none(NULL);
+    m->base.type = 998;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+static TuiUpdateResult width_model_update(TuiModel *model, TuiMsg msg)
+{
+    (void)model;
+    (void)msg;
+    return tui_update_result_none();
+}
+
+static TuiView width_model_view(const TuiModel *model, DynamicBuffer *out)
+{
+    (void)model;
+    dynamic_buffer_append_str(out, "x\r\n");
+    return tui_view_default(out);
+}
+
+static void width_model_free(TuiModel *model)
+{
+    free(model);
+}
+
+static const TuiComponent width_model_component = {
+    .init = width_model_init,
+    .update = width_model_update,
+    .view = width_model_view,
+    .free = width_model_free,
+};
+
+static TuiInitResult fail_init(void *config)
+{
+    (void)config;
+    s_init_ran = 1;
+    return tui_init_result_none(NULL);
+}
+
+static TuiUpdateResult fail_update(TuiModel *model, TuiMsg msg)
+{
+    (void)model;
+    (void)msg;
+    return tui_update_result_none();
+}
+
+static TuiView fail_view(const TuiModel *model, DynamicBuffer *out)
+{
+    (void)model;
+    dynamic_buffer_append_str(out, "x\r\n");
+    return tui_view_default(out);
+}
+
+static void fail_free(TuiModel *model)
+{
+    free(model);
+}
+
+static const TuiComponent fail_component = {
+    .init = fail_init,
+    .update = fail_update,
+    .view = fail_view,
+    .free = fail_free,
+};
+
+static void env_set(const char *name, const char *value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value ? value : "");
+#else
+    if (value)
+        setenv(name, value, 1);
+    else
+        unsetenv(name);
+#endif
+}
+
+static void env_save(const char *name, char *buf, size_t cap, int *had)
+{
+    const char *v = getenv(name);
+    *had = v != NULL;
+    if (v)
+        snprintf(buf, cap, "%s", v);
+    else
+        buf[0] = '\0';
+}
+
+static void env_restore(const char *name, const char *value, int had)
+{
+    env_set(name, had ? value : NULL);
+}
+
+/* The model is installed BEFORE init(), so a component that composes (and
+ * measures) eagerly inside init sees the terminal's rule, and it stays
+ * pinned for the runtime's life. */
+static void test_width_model_explicit_before_init(void)
+{
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0,
+                             .output = out,
+                             .width_model = TUI_WIDTH_MODEL_UTS51 };
+    s_init_ran = 0;
+    TuiRuntime *rt = tui_runtime_create(&width_model_component, NULL, &cfg);
+    assert(rt != NULL);
+    assert(s_init_ran);
+    assert(s_init_width_model == TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_UTS51);
+    assert(rt->width_model == TUI_WIDTH_MODEL_UTS51);
+    assert(rt->owns_width_model_pin == 1);
+
+    /* Committed geometry depends on the model: a live runtime refuses a
+     * change. */
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 0);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_UTS51);
+
+    tui_runtime_free(rt);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_GRID);
+    fclose(out);
+}
+
+/* AUTO resolves from the environment before init: portty in the TERM is
+ * the UTS51 contract. */
+static void test_width_model_auto_detects_before_init(void)
+{
+    const char *names[] = { "TERM", "TMUX", "KITTY_WINDOW_ID", "PORTTY",
+                            "PORTTY_WIDTH" };
+    char saved[5][256];
+    int had[5];
+    for (size_t i = 0; i < 5; i++)
+        env_save(names[i], saved[i], sizeof(saved[i]), &had[i]);
+
+    env_set("TERM", "portty-vty-256color");
+    env_set("TMUX", NULL);
+    env_set("KITTY_WINDOW_ID", NULL);
+    env_set("PORTTY", NULL);
+    env_set("PORTTY_WIDTH", NULL);
+
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out }; /* AUTO */
+    s_init_ran = 0;
+    TuiRuntime *rt = tui_runtime_create(&width_model_component, NULL, &cfg);
+    assert(rt != NULL);
+    assert(s_init_ran);
+    assert(s_init_width_model == TUI_WIDTH_MODEL_UTS51);
+    assert(rt->width_model == TUI_WIDTH_MODEL_UTS51);
+
+    /* And the same environment under tmux is the grid: the multiplexer
+     * owns the grid, not the terminal behind it. */
+    tui_runtime_free(rt);
+    fclose(out);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_GRID);
+
+    env_set("TMUX", "/tmp/tmux-1000/default,123,0");
+    out = tmpfile();
+    assert(out != NULL);
+    cfg.output = out;
+    s_init_ran = 0;
+    rt = tui_runtime_create(&width_model_component, NULL, &cfg);
+    assert(rt != NULL);
+    assert(s_init_width_model == TUI_WIDTH_MODEL_GRID);
+    tui_runtime_free(rt);
+    fclose(out);
+
+    for (size_t i = 0; i < 5; i++)
+        env_restore(names[i], saved[i], had[i]);
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+}
+
+/* A second live runtime cannot re-model the process: it joins the model
+ * already in force (and does not own the pin, so it does not restore it
+ * on free). */
+static void test_width_model_second_runtime_joins(void)
+{
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+    FILE *out1 = tmpfile(), *out2 = tmpfile();
+    assert(out1 && out2);
+
+    TuiRuntimeConfig cfg1 = { .raw_mode = 0,
+                              .output = out1,
+                              .width_model = TUI_WIDTH_MODEL_UTS51 };
+    TuiRuntime *rt1 = tui_runtime_create(&width_model_component, NULL, &cfg1);
+    assert(rt1 != NULL);
+    assert(rt1->owns_width_model_pin == 1);
+
+    TuiRuntimeConfig cfg2 = { .raw_mode = 0,
+                              .output = out2,
+                              .width_model = TUI_WIDTH_MODEL_GRID };
+    TuiRuntime *rt2 = tui_runtime_create(&width_model_component, NULL, &cfg2);
+    assert(rt2 != NULL);
+    assert(rt2->owns_width_model_pin == 0);
+    assert(rt2->width_model == TUI_WIDTH_MODEL_UTS51);
+
+    tui_runtime_free(rt2);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_UTS51); /* rt1 still owns */
+    tui_runtime_free(rt1);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_GRID);
+    fclose(out1);
+    fclose(out2);
+}
+
+/* A failed init must not leak the pin: the next runtime can install its
+ * own model. */
+static void test_width_model_failed_create_restores(void)
+{
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+    TuiRuntimeConfig cfg = { .raw_mode = 0,
+                             .output = tmpfile(),
+                             .width_model = TUI_WIDTH_MODEL_UTS51 };
+    assert(cfg.output != NULL);
+    s_init_ran = 0;
+    TuiRuntime *rt = tui_runtime_create(&fail_component, NULL, &cfg);
+    assert(rt == NULL);
+    assert(s_init_ran);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_UTS51) == 1); /* not pinned */
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+    fclose(cfg.output);
+}
+
 int main(void)
 {
     printf("runtime tests:\n");
@@ -3411,6 +3653,10 @@ int main(void)
     RUN_TEST(test_paint_transcript_write_delivers_once);
     RUN_TEST(test_paint_clear_inline_delivers_once);
     RUN_TEST(test_paint_delivery_through_a_pipe);
+    RUN_TEST(test_width_model_explicit_before_init);
+    RUN_TEST(test_width_model_auto_detects_before_init);
+    RUN_TEST(test_width_model_second_runtime_joins);
+    RUN_TEST(test_width_model_failed_create_restores);
     RUN_TEST(test_get_dimensions_null);
     RUN_TEST(test_null_callbacks_in_config);
     RUN_TEST(test_default_config_raw_mode);
