@@ -19,6 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ansi_scan.h"
+
 #define INITIAL_ITEM_CAPACITY 8
 #define DEFAULT_MAX_VISIBLE   8
 #define MIN_POPUP_WIDTH       20
@@ -608,18 +610,20 @@ static int emit_clipped(DynamicBuffer *out, const char *s, int max_cols)
         return 0;
     size_t len = strlen(s);
     int col = 0;
+    TuiAnsiScan scan = { 0 };
     for (size_t i = 0; i < len && col < max_cols; i++) {
-        if ((unsigned char)s[i] == 0x1b && s[i + 1] == '[') {
+        unsigned char ch = (unsigned char)s[i];
+        if (scan.state != 0 || ch == 0x1b) {
+            /* Sequences pass through (the caller may embed styling) and
+             * consume no columns; the shared grammar (ansi_scan.h) knows
+             * where they end, so an OSC/DCS payload is not clipped as
+             * text and a lowercase SGR final (`m`) terminates the
+             * sequence. */
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
             dynamic_buffer_append(out, &s[i], 1);
-            size_t j = i + 1;
-            while (s[j] && !((unsigned char)s[j] >= 'A' &&
-                             (unsigned char)s[j] <= 'Z')) {
-                dynamic_buffer_append(out, &s[j], 1);
-                j++;
-            }
-            if (s[j]) {
-                dynamic_buffer_append(out, &s[j], 1);
-                i = j;
+            if (tui_ansi_scan_feed(&scan, ch, &kind)) {
+                scan.len = 0;
+                scan.nostore = 0;
             }
         } else {
             size_t clen = 0;

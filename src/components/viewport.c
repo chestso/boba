@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ansi_scan.h"
+
 #define VIEWPORT_TYPE_ID      (TUI_COMPONENT_TYPE_BASE + 20)
 #define INITIAL_LINE_CAPACITY 64
 #define SGR_STATE_BUF_SIZE    256
@@ -33,19 +35,22 @@ static int emit_cols(const char *text, size_t len, size_t *pos, int max_cols,
                      DynamicBuffer *out, int sel_start, int sel_end)
 {
     int col = 0;
-    int in_escape = 0;
+    TuiAnsiScan scan = { 0 };
     int reversed = 0;
     int has_sel = sel_end > sel_start;
 
     for (; *pos < len; (*pos)++) {
         unsigned char ch = (unsigned char)text[*pos];
-        if (in_escape) {
+        if (scan.state != 0 || ch == 0x1b) {
+            /* A sequence is passed through byte for byte and occupies no
+             * columns; the shared grammar (ansi_scan.h) decides where it
+             * ends, so an OSC/DCS payload is not mistaken for text. */
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
             dynamic_buffer_append(out, &text[*pos], 1);
-            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))
-                in_escape = 0;
-        } else if (ch == '\033' && *pos + 1 < len && text[*pos + 1] == '[') {
-            in_escape = 1;
-            dynamic_buffer_append(out, &text[*pos], 1); /* ESC */
+            if (tui_ansi_scan_feed(&scan, ch, &kind)) {
+                scan.len = 0;
+                scan.nostore = 0;
+            }
         } else if (ch >= 0x20) {
             size_t clen = 0;
             int w = tui_next_cluster(&text[*pos], len - *pos, &clen);
@@ -114,7 +119,7 @@ static int scan_word_wrapped_lines(const char *text, size_t len,
      * current visual line (i.e., the start of the next word). */
     size_t last_word_start = 0;
     int last_word_start_col = 0;
-    int in_escape = 0;
+    TuiAnsiScan scan = { 0 };
 
     /* Fall-back threshold: if the available word break is too far from the
      * line edge, prefer the column break. 25% feels like a reasonable
@@ -125,16 +130,14 @@ static int scan_word_wrapped_lines(const char *text, size_t len,
 
     size_t i = 0;
     while (i < len) {
-        if (in_escape) {
-            if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z')) {
-                in_escape = 0;
-            }
+        if (scan.state != 0 || text[i] == '\033') {
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
+            unsigned char c = (unsigned char)text[i];
             i++;
-            continue;
-        }
-        if (text[i] == '\033' && i + 1 < len && text[i + 1] == '[') {
-            in_escape = 1;
-            i += 2;
+            if (tui_ansi_scan_feed(&scan, c, &kind)) {
+                scan.len = 0;
+                scan.nostore = 0;
+            }
             continue;
         }
 
@@ -336,34 +339,29 @@ static void collect_sgr_state_to_offset(const char *text, size_t end,
                                         char *sgr_buf, size_t *sgr_len,
                                         size_t sgr_buf_size)
 {
-    int in_escape = 0;
-    int in_csi = 0;
-    size_t csi_start = 0;
+    TuiAnsiScan scan = { 0 };
     for (size_t i = 0; i < end; i++) {
-        if (in_escape) {
-            if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z')) {
-                in_escape = 0;
-                if (text[i] == 'm' && in_csi) {
-                    size_t seq_len = i - csi_start + 1;
-                    int is_reset = 0;
-                    if (seq_len == 4 && text[csi_start + 2] == '0')
-                        is_reset = 1;
-                    if (seq_len == 3)
-                        is_reset = 1;
-                    if (is_reset) {
-                        *sgr_len = 0;
-                    } else if (*sgr_len + seq_len < sgr_buf_size) {
-                        memcpy(sgr_buf + *sgr_len, text + csi_start, seq_len);
-                        *sgr_len += seq_len;
-                    }
+        unsigned char c = (unsigned char)text[i];
+        if (scan.state == 0 && c != 0x1b)
+            continue;
+        TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
+        if (tui_ansi_scan_feed(&scan, c, &kind)) {
+            if (kind == TUI_ANSI_KIND_SGR) {
+                size_t seq_len = scan.len;
+                int is_reset = 0;
+                if (seq_len == 4 && scan.buf[2] == '0')
+                    is_reset = 1;
+                if (seq_len == 3)
+                    is_reset = 1;
+                if (is_reset) {
+                    *sgr_len = 0;
+                } else if (*sgr_len + seq_len < sgr_buf_size) {
+                    memcpy(sgr_buf + *sgr_len, scan.buf, seq_len);
+                    *sgr_len += seq_len;
                 }
-                in_csi = 0;
             }
-        } else if (text[i] == '\033' && i + 1 < end && text[i + 1] == '[') {
-            in_escape = 1;
-            in_csi = 1;
-            csi_start = i;
-            i++;
+            scan.len = 0;
+            scan.nostore = 0;
         }
     }
 }
@@ -382,22 +380,21 @@ static size_t find_word_wrap_subline_offset(const char *text, size_t len,
     int col = 0;
     size_t last_word_start = 0;
     int last_word_start_col = 0;
-    int in_escape = 0;
+    TuiAnsiScan scan = { 0 };
     int fallback_threshold = (viewport_width * 3) / 4;
     if (fallback_threshold < 1)
         fallback_threshold = 1;
 
     size_t i = 0;
     while (i < len) {
-        if (in_escape) {
-            if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z'))
-                in_escape = 0;
+        if (scan.state != 0 || text[i] == '\033') {
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
+            unsigned char c = (unsigned char)text[i];
             i++;
-            continue;
-        }
-        if (text[i] == '\033' && i + 1 < len && text[i + 1] == '[') {
-            in_escape = 1;
-            i += 2;
+            if (tui_ansi_scan_feed(&scan, c, &kind)) {
+                scan.len = 0;
+                scan.nostore = 0;
+            }
             continue;
         }
 
@@ -468,38 +465,32 @@ static void render_line_segment(const TuiViewportLine *line, int viewport_width,
          * collecting SGR along the way. */
         int skip_target = sub_line * viewport_width;
         int skipped = 0;
-        int in_escape = 0;
-        size_t csi_start = 0;
-        int in_csi = 0;
+        TuiAnsiScan scan = { 0 };
 
         i = 0;
         for (; i < len && skipped < skip_target; i++) {
-            if (in_escape) {
-                if ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z')) {
-                    in_escape = 0;
-                    if (text[i] == 'm' && in_csi) {
-                        size_t seq_len = i - csi_start + 1;
+            unsigned char c = (unsigned char)text[i];
+            if (scan.state != 0 || c == 0x1b) {
+                TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
+                if (tui_ansi_scan_feed(&scan, c, &kind)) {
+                    if (kind == TUI_ANSI_KIND_SGR) {
+                        size_t seq_len = scan.len;
                         int is_reset = 0;
-                        if (seq_len == 4 && text[csi_start + 2] == '0')
+                        if (seq_len == 4 && scan.buf[2] == '0')
                             is_reset = 1;
                         if (seq_len == 3)
                             is_reset = 1;
                         if (is_reset) {
                             sgr_len = 0;
                         } else if (sgr_len + seq_len < SGR_STATE_BUF_SIZE) {
-                            memcpy(sgr_buf + sgr_len, text + csi_start,
-                                   seq_len);
+                            memcpy(sgr_buf + sgr_len, scan.buf, seq_len);
                             sgr_len += seq_len;
                         }
                     }
-                    in_csi = 0;
+                    scan.len = 0;
+                    scan.nostore = 0;
                 }
-            } else if (text[i] == '\033' && i + 1 < len && text[i + 1] == '[') {
-                in_escape = 1;
-                in_csi = 1;
-                csi_start = i;
-                i++;
-            } else if ((unsigned char)text[i] >= 0x20) {
+            } else if (c >= 0x20) {
                 size_t clen = 0;
                 int w = tui_next_cluster(&text[i], len - i, &clen);
                 if (clen < 1)
@@ -927,16 +918,16 @@ static size_t byte_offset_for_display_col(const char *text, size_t len,
         return 0;
     size_t i = 0;
     int col = 0;
-    int in_escape = 0;
+    TuiAnsiScan scan = { 0 };
     while (i < len) {
         unsigned char ch = (unsigned char)text[i];
-        if (in_escape) {
-            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))
-                in_escape = 0;
+        if (scan.state != 0 || ch == 0x1b) {
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
             i++;
-        } else if (ch == '\033' && i + 1 < len && text[i + 1] == '[') {
-            in_escape = 1;
-            i++; /* ESC */
+            if (tui_ansi_scan_feed(&scan, ch, &kind)) {
+                scan.len = 0;
+                scan.nostore = 0;
+            }
         } else if (ch >= 0x20) {
             size_t clen = 0;
             int w = tui_next_cluster(&text[i], len - i, &clen);
@@ -953,21 +944,22 @@ static size_t byte_offset_for_display_col(const char *text, size_t len,
     return i;
 }
 
-/* Append text[start..end), with ANSI CSI sequences stripped, to `out`. */
+/* Append text[start..end), with ANSI escape sequences stripped, to `out`. */
 static void append_stripped(DynamicBuffer *out, const char *text, size_t start,
                             size_t end)
 {
-    int in_escape = 0;
+    TuiAnsiScan scan = { 0 };
     for (size_t i = start; i < end; i++) {
         unsigned char ch = (unsigned char)text[i];
-        if (in_escape) {
-            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))
-                in_escape = 0;
-        } else if (ch == '\033' && i + 1 < end && text[i + 1] == '[') {
-            in_escape = 1;
-        } else {
-            dynamic_buffer_append(out, &text[i], 1);
+        if (scan.state != 0 || ch == 0x1b) {
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
+            if (tui_ansi_scan_feed(&scan, ch, &kind)) {
+                scan.len = 0;
+                scan.nostore = 0;
+            }
+            continue;
         }
+        dynamic_buffer_append(out, &text[i], 1);
     }
 }
 

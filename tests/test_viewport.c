@@ -430,6 +430,59 @@ static void test_extract_selection_strips_ansi(void)
     tui_viewport_free(vp);
 }
 
+static void test_osc_hyperlink_is_zero_width(void)
+{
+    /* The one escape grammar (ansi_scan.h): an OSC 8 hyperlink is a
+     * sequence, so its URL occupies no columns in wrapping. Before the
+     * consolidation the CSI-only scanner counted the URL as text, and a
+     * short line inside a link wrapped many times. */
+    TuiViewport *vp = tui_viewport_create();
+    tui_viewport_set_size(vp, 4, 5);
+    tui_viewport_set_wrap_mode(vp, 1);
+
+    const char *line = "\033]8;;http://example.com/\033\\"
+                       "abcd"
+                       "\033]8;;\033\\\n";
+    tui_viewport_append(vp, line, strlen(line));
+    assert(vp->lines[0].visual_lines == 1);
+
+    /* Same through the word-wrap scanner. */
+    tui_viewport_set_word_wrap(vp, 1);
+    assert(vp->lines[0].visual_lines == 1);
+
+    tui_viewport_free(vp);
+}
+
+static void test_extract_selection_strips_osc(void)
+{
+    TuiViewport *vp = tui_viewport_create();
+    tui_viewport_set_size(vp, 80, 5);
+    tui_viewport_set_focused(vp, 1);
+    const char *line = "\033]8;;http://example.com/\033\\"
+                       "RED"
+                       "\033]8;;\033\\\n";
+    tui_viewport_append(vp, line, strlen(line));
+
+    tui_viewport_enter_copy_mode(vp);
+    vp->mark_visual_line = 0;
+    vp->mark_col = 0;
+    vp->has_mark = 1;
+    vp->cursor_visual_line = 0;
+    vp->cursor_col = 2; /* "RED" */
+
+    char *out = NULL;
+    size_t len = 0;
+    tui_viewport_extract_selection(vp, &out, &len);
+    assert(out != NULL);
+    assert(len == 3);
+    assert(memcmp(out, "RED", 3) == 0);
+    for (size_t i = 0; i < len; i++)
+        assert(out[i] != '\033');
+    free(out);
+
+    tui_viewport_free(vp);
+}
+
 static void test_extract_selection_multi_line(void)
 {
     TuiViewport *vp = tui_viewport_create();
@@ -636,6 +689,8 @@ int main(void)
     RUN_TEST(test_cursor_follow_scrolls);
     RUN_TEST(test_extract_selection_same_line);
     RUN_TEST(test_extract_selection_strips_ansi);
+    RUN_TEST(test_osc_hyperlink_is_zero_width);
+    RUN_TEST(test_extract_selection_strips_osc);
     RUN_TEST(test_extract_selection_multi_line);
     RUN_TEST(test_m_w_emits_clipboard_command);
     RUN_TEST(test_mouse_left_press_starts_selection);
