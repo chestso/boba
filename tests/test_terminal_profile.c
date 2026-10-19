@@ -239,6 +239,71 @@ static void test_env_truecolor(void)
     assert(p.resolved == 0 && p.truecolor == 1);
 }
 
+/* The width model is a startup decision, not a probe reply: it decides
+ * committed scrollback geometry, so it must be settled before the first
+ * frame. These cases are the whole grammar; see terminal_profile.h. */
+static void test_width_model_detect(void)
+{
+    /* Unknown and the wcwidth majority: the terminal grid. */
+    assert(tui_width_model_detect(NULL, NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("xterm-256color", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("xterm-ghostty", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_GRID);
+
+    /* Portty: every TERM alias, and the identity marker. */
+    assert(tui_width_model_detect("portty", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("portty-256color", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("portty-vty-256color", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("PORTTY-VTY-256COLOR", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("xterm-256color", NULL, NULL, "1", NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+
+    /* Kitty: the window marker survives a TERM override; xterm-kitty is
+     * the normal name. */
+    assert(tui_width_model_detect("xterm-kitty", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("XTERM-KITTY", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("xterm-256color", NULL, "1", NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+
+    /* An explicit engine contract wins over identity, in both
+     * directions. */
+    assert(tui_width_model_detect("xterm-256color", NULL, NULL, NULL,
+                                  "uts51") == TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("xterm-256color", NULL, NULL, NULL,
+                                  "UTS51") == TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("portty-vty-256color", NULL, NULL, NULL,
+                                  "grid") == TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("portty-vty-256color", NULL, NULL, NULL,
+                                  "wcwidth") == TUI_WIDTH_MODEL_WCWIDTH);
+    /* An unknown declaration is ignored, not treated as a verdict. */
+    assert(tui_width_model_detect("portty-vty-256color", NULL, NULL, NULL,
+                                  "bogus") == TUI_WIDTH_MODEL_UTS51);
+
+    /* tmux is the authority: inherited markers from the outer terminal
+     * must not leak through it. */
+    assert(tui_width_model_detect("portty-vty-256color", "/tmp/tmux-1000",
+                                  NULL, NULL, NULL) == TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("xterm-256color", "/tmp/tmux-1000", "1",
+                                  NULL, NULL) == TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("xterm-256color", "/tmp/tmux-1000", NULL,
+                                  NULL, "uts51") == TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("screen-256color", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("tmux-256color", NULL, NULL, NULL, NULL) ==
+           TUI_WIDTH_MODEL_GRID);
+
+    /* An empty value is a miss, never a marker. */
+    assert(tui_width_model_detect("", "", "", "", "") == TUI_WIDTH_MODEL_GRID);
+}
+
 /* ------------------------------------------------------------------ */
 /* Runtime lifecycle                                                   */
 /* ------------------------------------------------------------------ */
@@ -491,6 +556,7 @@ int main(void)
     RUN_TEST(test_unknown_payload_ignored);
     RUN_TEST(test_env_hints);
     RUN_TEST(test_env_truecolor);
+    RUN_TEST(test_width_model_detect);
 
     RUN_TEST(test_probe_not_declared_no_query);
     RUN_TEST(test_probe_declared_emits_once);

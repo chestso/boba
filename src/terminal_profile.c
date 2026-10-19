@@ -95,6 +95,78 @@ static int ci_ends_with(const char *s, const char *suffix)
     return ls >= lx && ci_equal(s + (ls - lx), suffix);
 }
 
+/* Does `s` begin with `prefix`, case-insensitively? A NULL `s` or
+ * `prefix` is a miss. */
+static int ci_starts_with(const char *s, const char *prefix)
+{
+    if (!s || !prefix)
+        return 0;
+    size_t lp = strlen(prefix);
+    if (strlen(s) < lp)
+        return 0;
+    for (size_t i = 0; i < lp; i++) {
+        char a = s[i], b = prefix[i];
+        if (a >= 'A' && a <= 'Z')
+            a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z')
+            b = (char)(b - 'A' + 'a');
+        if (a != b)
+            return 0;
+    }
+    return 1;
+}
+
+/* PORTTY_WIDTH's vocabulary. AUTO is the "not declared" answer (it is
+ * never a measurement model; see unicode.h). */
+static TuiWidthModel width_model_from_name(const char *name)
+{
+    if (ci_equal(name, "uts51"))
+        return TUI_WIDTH_MODEL_UTS51;
+    if (ci_equal(name, "grid"))
+        return TUI_WIDTH_MODEL_GRID;
+    if (ci_equal(name, "wcwidth"))
+        return TUI_WIDTH_MODEL_WCWIDTH;
+    return TUI_WIDTH_MODEL_AUTO;
+}
+
+TuiWidthModel tui_width_model_detect(const char *term, const char *tmux,
+                                     const char *kitty_window_id,
+                                     const char *portty,
+                                     const char *portty_width)
+{
+    /* The innermost multiplexer owns the grid. Markers inherited from
+     * the terminal outside tmux must not leak through it. */
+    if ((tmux && *tmux) || ci_starts_with(term, "tmux") ||
+        ci_starts_with(term, "screen"))
+        return TUI_WIDTH_MODEL_GRID;
+
+    /* An explicit engine contract beats identity. */
+    TuiWidthModel declared = width_model_from_name(portty_width);
+    if (declared != TUI_WIDTH_MODEL_AUTO)
+        return declared;
+
+    /* Portty: the marker first, then the TERM aliases (older builds). */
+    if ((portty && *portty) || ci_starts_with(term, "portty"))
+        return TUI_WIDTH_MODEL_UTS51;
+
+    /* Kitty: KITTY_WINDOW_ID survives a TERM override; xterm-kitty is
+     * the normal terminfo name. */
+    if ((kitty_window_id && *kitty_window_id) ||
+        ci_starts_with(term, "xterm-kitty"))
+        return TUI_WIDTH_MODEL_UTS51;
+
+    /* xterm, Windows Terminal, and everything unknown: the terminal
+     * grid ignores VS15 for layout. */
+    return TUI_WIDTH_MODEL_GRID;
+}
+
+TuiWidthModel tui_width_model_detect_env(void)
+{
+    return tui_width_model_detect(getenv("TERM"), getenv("TMUX"),
+                                  getenv("KITTY_WINDOW_ID"), getenv("PORTTY"),
+                                  getenv("PORTTY_WIDTH"));
+}
+
 /* 24-bit color, from the environment alone: COLORTERM is the de-facto
  * standard (kitty, foot, WezTerm, iTerm2, ghostty all set it), and the
  * `-direct` / `-truecolor` TERM variants (xterm-direct, foot-direct,

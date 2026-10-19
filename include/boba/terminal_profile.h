@@ -55,6 +55,8 @@
 
 #include <stddef.h>
 
+#include "unicode.h"
+
 /* The runtime (runtime.h) defines this; forward-declared so this header
  * stands alone (stream.h includes it, and stream.h is included by
  * runtime.h). */
@@ -126,5 +128,46 @@ int tui_term_profile_feed(TuiTerminalProfile *p, const char *payload,
 void tui_term_profile_env(TuiTerminalProfile *p, const char *term_program,
                           const char *lc_terminal, const char *colorterm,
                           const char *term);
+
+/* ---- Cell-width model (see unicode.h) -------------------------------
+ *
+ * Width is a terminal property, but unlike the query-derived fields it
+ * is needed BEFORE the first frame: it decides where every column lands
+ * and therefore the geometry of committed scrollback. It is resolved
+ * from the startup environment, never from the async probe (whose
+ * replies arrive later, may be dropped by ConPTY, and answer for the
+ * wrong authority inside tmux).
+ *
+ * Grammar over the values (all case-insensitive):
+ *
+ *   1. TMUX set, or TERM begins "tmux" / "screen"  -> GRID
+ *      The innermost multiplexer owns the grid; inherited KITTY_* or
+ *      PORTTY_* markers must not leak through it.
+ *   2. PORTTY_WIDTH = "uts51" | "grid" | "wcwidth"  -> that model
+ *      Portty declares its engine's contract. The declaration beats
+ *      the identity markers, so an engine change needs one constant.
+ *   3. PORTTY set, or TERM begins "portty"          -> UTS51
+ *      Older portty builds have no PORTTY_WIDTH; TERM carries the
+ *      same fact (portty's aliases all begin with "portty").
+ *   4. KITTY_WINDOW_ID set, or TERM begins "xterm-kitty" -> UTS51
+ *      Kitty re-measures with the presentation selectors.
+ *   5. otherwise                                    -> GRID
+ *      xterm, Windows Terminal, and unknown terminals follow the
+ *      terminal-grid rule (VS15 is presentation only).
+ *
+ * TERM_PROGRAM is deliberately not consulted. Portty sets it to
+ * "ghostty" for third-party keyboard-protocol allowlists; treating that
+ * as a width signal would misclassify both portty and real ghostty.
+ *
+ * A terminal reached without its environment (notably kitty over ssh
+ * without the ssh kitten) falls back to GRID; TuiRuntimeConfig's
+ * explicit width_model is the escape hatch. */
+TuiWidthModel tui_width_model_detect(const char *term, const char *tmux,
+                                     const char *kitty_window_id,
+                                     const char *portty,
+                                     const char *portty_width);
+
+/* tui_width_model_detect() over the process environment. */
+TuiWidthModel tui_width_model_detect_env(void);
 
 #endif /* BOBA_TERMINAL_PROFILE_H */
