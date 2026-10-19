@@ -79,43 +79,121 @@ static void test_zero_width(void)
     assert(tui_codepoint_width(0x1F3FB) == 0); /* emoji modifier */
 }
 
-static void test_cluster_width(void)
+static void test_cluster_width_grid(void)
 {
+    const TuiWidthModel m = TUI_WIDTH_MODEL_GRID;
+
     /* Single codepoint: falls through to codepoint width. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x2713 }, 1) == 1);
-    assert(tui_cluster_width((const uint32_t[]){ 0x2693 }, 1) == 2);
-    assert(tui_cluster_width(NULL, 0) == 0);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2713 }, 1, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2693 }, 1, m) == 2);
+    assert(tui_cluster_width_model(NULL, 0, m) == 0);
 
     /* VS16 forces emoji presentation even on a Narrow base. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x270F, 0xFE0F }, 2) == 2);
-    assert(tui_cluster_width((const uint32_t[]){ 0x2764, 0xFE0F }, 2) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x270F, 0xFE0F }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2764, 0xFE0F }, 2, m) == 2);
 
-    /* VS15 asks for text presentation, so it takes one cell where UTS
-     * #51 defines a text glyph — including a Wide base like ⚡ U+26A1,
-     * whose bare and VS16 forms are two cells. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x26A1 }, 1) == 2);
-    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0E }, 2) == 1);
-    assert(tui_cluster_width((const uint32_t[]){ 0x2B50, 0xFE0E }, 2) == 1);
-    assert(tui_cluster_width((const uint32_t[]){ 0x2764, 0xFE0E }, 2) == 1);
-    /* ... and the last selector still wins, either way round. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0F, 0xFE0E }, 3) == 1);
-    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0E, 0xFE0F }, 3) == 2);
-    /* A base with no text sequence keeps its width: a CJK ideograph and
-     * an SMP emoji have no one-cell glyph to ask for. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x4E2D, 0xFE0E }, 2) == 2);
-    assert(tui_cluster_width((const uint32_t[]){ 0x1F600, 0xFE0E }, 2) == 2);
+    /* GRID: a variation selector picks a glyph, not a cell count. VS15
+     * never narrows a wide base — xterm and Windows Terminal draw ⚡︎
+     * in two cells even though UTS #51 lists a text glyph. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1 }, 1, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2B50, 0xFE0E }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2764, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0F, 0xFE0E }, 3, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E, 0xFE0F }, 3, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x4E2D, 0xFE0E }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F600, 0xFE0E }, 2, m) == 2);
 
     /* Regional indicator pair is one flag, two cells. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x1F1FA, 0x1F1F8 }, 2) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F1FA, 0x1F1F8 }, 2, m) == 2);
 
     /* Combining mark attaches without widening. */
-    assert(tui_cluster_width((const uint32_t[]){ 'e', 0x0301 }, 2) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 'e', 0x0301 }, 2, m) == 1);
 
     /* Emoji modifier (skin tone) is zero-width: the emoji stays two. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x1F44D, 0x1F3FD }, 2) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F44D, 0x1F3FD }, 2, m) == 2);
 
     /* ZWJ sequence measures as its base. */
-    assert(tui_cluster_width((const uint32_t[]){ 0x1F468, 0x200D, 0x1F4BB }, 3) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F468, 0x200D, 0x1F4BB }, 3, m) == 2);
+}
+
+static void test_cluster_width_uts51(void)
+{
+    const TuiWidthModel m = TUI_WIDTH_MODEL_UTS51;
+
+    /* VS15 requests the text presentation, so it takes one cell where
+     * UTS #51 defines a text glyph — including a Wide base like ⚡
+     * U+26A1, whose bare and VS16 forms are two cells. This is the
+     * portty/coffer and kitty rule. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2B50, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2764, 0xFE0E }, 2, m) == 1);
+    /* ... and the last selector still wins, either way round. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0F, 0xFE0E }, 3, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E, 0xFE0F }, 3, m) == 2);
+    /* A base with no text sequence keeps its width: a CJK ideograph and
+     * an SMP emoji have no one-cell glyph to ask for. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x4E2D, 0xFE0E }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F600, 0xFE0E }, 2, m) == 2);
+}
+
+static void test_cluster_width_wcwidth(void)
+{
+    const TuiWidthModel m = TUI_WIDTH_MODEL_WCWIDTH;
+
+    /* Strict wcwidth: neither selector changes the base's width. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x270F, 0xFE0F }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2764, 0xFE0F }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0F }, 2, m) == 2);
+}
+
+static void test_width_model_ambient(void)
+{
+    /* Standalone callers start on the terminal-grid rule. */
+    assert(tui_width_model() == TUI_WIDTH_MODEL_GRID);
+    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0E }, 2) == 2);
+
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_UTS51) == 1);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_UTS51);
+    assert(tui_cluster_width((const uint32_t[]){ 0x26A1, 0xFE0E }, 2) == 1);
+    assert(tui_utf8_display_width("a\xE2\x9A\xA1\xEF\xB8\x8E"
+                                  "b") == 3); /* a + ⚡︎ + b */
+
+    /* AUTO is a configuration value, never a measurement model. */
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_AUTO) == 0);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_set((TuiWidthModel)99) == 0);
+
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_GRID);
+}
+
+/* The model only ever changes width where UTS #51 has a text glyph for
+ * an East Asian Wide base. Pin the difference set so UCD regeneration
+ * cannot silently widen the gap: GRID always measures the base, UTS51
+ * narrows exactly the text-presentation bases. */
+static void test_width_model_difference_set(void)
+{
+    uint32_t narrowed = 0;
+    for (uint32_t cp = 0; cp <= 0x10FFFFu; cp++) {
+        if (cp >= 0xD800u && cp <= 0xDFFFu)
+            continue; /* surrogates are not scalar values */
+        uint32_t cluster[2] = { cp, 0xFE0Eu };
+        int base = tui_codepoint_width(cp);
+        int grid = tui_cluster_width_model(cluster, 2, TUI_WIDTH_MODEL_GRID);
+        int uts = tui_cluster_width_model(cluster, 2, TUI_WIDTH_MODEL_UTS51);
+
+        assert(grid == base);
+        assert(uts == base || uts == 1);
+        if (uts != grid) {
+            assert(base == 2);
+            assert(uts == 1);
+            narrowed++;
+        }
+    }
+    /* UCD 18.0.0: 158 scalar values are Wide ∩ text-presentation. */
+    assert(narrowed == 158);
 }
 
 static void test_next_cluster_advance(void)
@@ -150,6 +228,8 @@ static void test_next_cluster_advance(void)
 
 static void test_string_width(void)
 {
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+
     assert(tui_utf8_display_width(NULL) == 0);
     assert(tui_utf8_display_width("") == 0);
     assert(tui_utf8_display_width("hello") == 5);
@@ -161,6 +241,11 @@ static void test_string_width(void)
     assert(tui_utf8_display_width("e\xCC\x81") == 1);                        /* e + acute */
     assert(tui_utf8_display_width("a\xCC\x81"
                                   "b") == 2);
+
+    /* The whole-run helper follows the model, like the cluster seam. */
+    const char *bolt_text = "\xE2\x9A\xA1\xEF\xB8\x8E"; /* ⚡︎ */
+    assert(tui_utf8_display_width_model(bolt_text, TUI_WIDTH_MODEL_GRID) == 2);
+    assert(tui_utf8_display_width_model(bolt_text, TUI_WIDTH_MODEL_UTS51) == 1);
 }
 
 static void test_string_width_n(void)
@@ -190,16 +275,29 @@ static void test_string_width_ansi(void)
     assert(tui_utf8_display_width_ansi(sgr, strlen(sgr)) == 2);
 
     assert(tui_utf8_display_width_ansi("", 0) == 0);
+
+    /* ANSI skipping and the width model compose. */
+    const char *bolt = "\x1b[31m"
+                       "\xE2\x9A\xA1\xEF\xB8\x8E"
+                       "\x1b[0m"; /* ⚡︎ */
+    assert(tui_utf8_display_width_ansi(bolt, strlen(bolt)) == 2);
+    assert(tui_utf8_display_width_ansi_model(bolt, strlen(bolt), TUI_WIDTH_MODEL_GRID) == 2);
+    assert(tui_utf8_display_width_ansi_model(bolt, strlen(bolt), TUI_WIDTH_MODEL_UTS51) == 1);
 }
 
 int main(void)
 {
     printf("test_unicode: codepoint and cluster widths\n");
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
     RUN_TEST(test_ascii_and_controls);
     RUN_TEST(test_symbol_width);
     RUN_TEST(test_cjk_width);
     RUN_TEST(test_zero_width);
-    RUN_TEST(test_cluster_width);
+    RUN_TEST(test_cluster_width_grid);
+    RUN_TEST(test_cluster_width_uts51);
+    RUN_TEST(test_cluster_width_wcwidth);
+    RUN_TEST(test_width_model_ambient);
+    RUN_TEST(test_width_model_difference_set);
     RUN_TEST(test_next_cluster_advance);
     RUN_TEST(test_string_width);
     RUN_TEST(test_string_width_n);

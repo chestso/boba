@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "width_internal.h"
+
 int tui_utf8_char_len(const char *ptr)
 {
     unsigned char c = (unsigned char)*ptr;
@@ -194,32 +196,100 @@ static bool tu_grapheme_break_before(uint32_t prev, uint32_t cur)
     return true; /* GB999 */
 }
 
-int tui_cluster_width(const uint32_t *cps, uint32_t len)
+/* The ambient model. GRID is deterministic for standalone callers and
+ * for tests; a runtime installs the terminal's model before init(). */
+static TuiWidthModel s_width_model = TUI_WIDTH_MODEL_GRID;
+static int s_width_model_pinned = 0;
+
+TuiWidthModel tui_width_model(void)
+{
+    return s_width_model;
+}
+
+static int width_model_is_measurement(TuiWidthModel model)
+{
+    return model == TUI_WIDTH_MODEL_GRID || model == TUI_WIDTH_MODEL_WCWIDTH ||
+           model == TUI_WIDTH_MODEL_UTS51;
+}
+
+int tui_width_model_set(TuiWidthModel model)
+{
+    if (s_width_model_pinned || !width_model_is_measurement(model))
+        return 0;
+    s_width_model = model;
+    return 1;
+}
+
+int tui_width_model_pin(TuiWidthModel model)
+{
+    if (s_width_model_pinned || !width_model_is_measurement(model))
+        return 0;
+    s_width_model = model;
+    s_width_model_pinned = 1;
+    return 1;
+}
+
+void tui_width_model_unpin(void)
+{
+    s_width_model_pinned = 0;
+}
+
+/* The width rule, parameterized by the terminal model. AUTO means "the
+ * ambient model" (it is a configuration value, not a measurement one). */
+static int cluster_width(const uint32_t *cps, uint32_t len, TuiWidthModel model)
 {
     if (len == 0)
         return 0;
+    if (model == TUI_WIDTH_MODEL_AUTO)
+        model = s_width_model;
     /* A regional indicator pair is one flag, two cells. */
     if (len >= 2 && tu_is_regional_indicator(cps[0]) && tu_is_regional_indicator(cps[1]))
         return 2;
+
+    int base = tui_codepoint_width(cps[0]);
+    /* Strict wcwidth: a variation selector selects a glyph, not a cell
+     * count, so neither selector changes the base's width. */
+    if (model == TUI_WIDTH_MODEL_WCWIDTH)
+        return base;
+
     /* Presentation selectors, scanned from the END: the last one in the
-     * cluster wins. VS16 forces emoji presentation (two cells) even on a
-     * Narrow base; VS15 requests the TEXT presentation, so it takes one
-     * cell whenever UTS #51 defines a text glyph for the base
-     * (TU_TEXT_PRES) — that is what the selector is for. A base with no
-     * text sequence (a CJK ideograph, an SMP emoji like U+1F600) has no
-     * one-cell glyph to fall back to, so it keeps its East Asian width. */
+     * cluster wins.
+     *
+     * VS16 forces emoji presentation (two cells) even on a Narrow base.
+     *
+     * VS15 requests the TEXT presentation. Under UTS51 (portty, kitty)
+     * it takes one cell whenever UTS #51 defines a text glyph for the
+     * base (TU_TEXT_PRES); a base with no text sequence (a CJK
+     * ideograph, an SMP emoji like U+1F600) has no one-cell glyph to
+     * fall back to, so it keeps its East Asian width. Under GRID
+     * (xterm, Windows Terminal) the selector is presentation only: the
+     * base's East Asian width is the cell count either way. */
     for (uint32_t i = len; i-- > 0;) {
         if (cps[i] == 0xFE0Fu)
             return 2;
-        if (cps[i] == 0xFE0Eu)
-            return range_lookup(TU_TEXT_PRES, TU_TEXT_PRES_LEN, cps[0])
-                       ? 1
-                       : tui_codepoint_width(cps[0]);
+        if (cps[i] == 0xFE0Eu) {
+            if (model == TUI_WIDTH_MODEL_UTS51 &&
+                range_lookup(TU_TEXT_PRES, TU_TEXT_PRES_LEN, cps[0]))
+                return 1;
+            return base;
+        }
     }
-    return tui_codepoint_width(cps[0]);
+    return base;
 }
 
-int tui_next_cluster(const char *utf8, size_t len, size_t *bytes)
+int tui_cluster_width(const uint32_t *cps, uint32_t len)
+{
+    return cluster_width(cps, len, s_width_model);
+}
+
+int tui_cluster_width_model(const uint32_t *cps, uint32_t len,
+                            TuiWidthModel model)
+{
+    return cluster_width(cps, len, model);
+}
+
+int tui_next_cluster_model(const char *utf8, size_t len, size_t *bytes,
+                           TuiWidthModel model)
 {
     uint32_t cluster[TU_CLUSTER_MAX];
     uint32_t clen = 0;
@@ -241,12 +311,18 @@ int tui_next_cluster(const char *utf8, size_t len, size_t *bytes)
 
     if (bytes)
         *bytes = i;
-    return tui_cluster_width(cluster, clen);
+    return cluster_width(cluster, clen, model);
+}
+
+int tui_next_cluster(const char *utf8, size_t len, size_t *bytes)
+{
+    return tui_next_cluster_model(utf8, len, bytes, s_width_model);
 }
 
 /* --- Display width ---------------------------------------------------- */
 
-int tui_utf8_display_width_n(const char *text, size_t len)
+int tui_utf8_display_width_n_model(const char *text, size_t len,
+                                   TuiWidthModel model)
 {
     if (!text)
         return 0;
@@ -254,7 +330,7 @@ int tui_utf8_display_width_n(const char *text, size_t len)
     int width = 0;
     while (i < len) {
         size_t bytes = 0;
-        int w = tui_next_cluster(text + i, len - i, &bytes);
+        int w = tui_next_cluster_model(text + i, len - i, &bytes, model);
         if (bytes == 0)
             break;
         width += w;
@@ -263,14 +339,25 @@ int tui_utf8_display_width_n(const char *text, size_t len)
     return width;
 }
 
-int tui_utf8_display_width(const char *str)
+int tui_utf8_display_width_n(const char *text, size_t len)
+{
+    return tui_utf8_display_width_n_model(text, len, s_width_model);
+}
+
+int tui_utf8_display_width_model(const char *str, TuiWidthModel model)
 {
     if (!str)
         return 0;
-    return tui_utf8_display_width_n(str, strlen(str));
+    return tui_utf8_display_width_n_model(str, strlen(str), model);
 }
 
-size_t tui_utf8_display_width_ansi(const char *text, size_t len)
+int tui_utf8_display_width(const char *str)
+{
+    return tui_utf8_display_width_model(str, s_width_model);
+}
+
+size_t tui_utf8_display_width_ansi_model(const char *text, size_t len,
+                                         TuiWidthModel model)
 {
     size_t width = 0;
     int in_escape = 0;
@@ -295,7 +382,7 @@ size_t tui_utf8_display_width_ansi(const char *text, size_t len)
             continue;
         }
         size_t bytes = 0;
-        int w = tui_next_cluster(text + i, len - i, &bytes);
+        int w = tui_next_cluster_model(text + i, len - i, &bytes, model);
         if (bytes == 0)
             break;
         width += (size_t)w;
@@ -303,4 +390,9 @@ size_t tui_utf8_display_width_ansi(const char *text, size_t len)
     }
 
     return width;
+}
+
+size_t tui_utf8_display_width_ansi(const char *text, size_t len)
+{
+    return tui_utf8_display_width_ansi_model(text, len, s_width_model);
 }
