@@ -206,6 +206,21 @@ TuiWidthModel tui_width_model(void)
     return s_width_model;
 }
 
+const char *tui_width_model_name(TuiWidthModel model)
+{
+    switch (model) {
+    case TUI_WIDTH_MODEL_AUTO:
+        return "auto";
+    case TUI_WIDTH_MODEL_GRID:
+        return "grid";
+    case TUI_WIDTH_MODEL_WCWIDTH:
+        return "wcwidth";
+    case TUI_WIDTH_MODEL_UTS51:
+        return "uts51";
+    }
+    return "unknown";
+}
+
 static int width_model_is_measurement(TuiWidthModel model)
 {
     return model == TUI_WIDTH_MODEL_GRID || model == TUI_WIDTH_MODEL_WCWIDTH ||

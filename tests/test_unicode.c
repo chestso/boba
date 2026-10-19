@@ -167,6 +167,12 @@ static void test_width_model_ambient(void)
 
     assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
     assert(tui_width_model() == TUI_WIDTH_MODEL_GRID);
+
+    assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_GRID), "grid") == 0);
+    assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_WCWIDTH), "wcwidth") == 0);
+    assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_UTS51), "uts51") == 0);
+    assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_AUTO), "auto") == 0);
+    assert(strcmp(tui_width_model_name((TuiWidthModel)99), "unknown") == 0);
 }
 
 /* The model only ever changes width where UTS #51 has a text glyph for

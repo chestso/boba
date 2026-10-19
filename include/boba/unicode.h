@@ -72,6 +72,11 @@ typedef enum TuiWidthModel
  * TUI_WIDTH_MODEL_GRID until they set it. */
 TuiWidthModel tui_width_model(void);
 
+/* A stable lowercase name for the model ("auto", "grid", "wcwidth",
+ * "uts51"), for diagnostics and probes; "unknown" for an out-of-range
+ * value. Never NULL. */
+const char *tui_width_model_name(TuiWidthModel model);
+
 /* Set the ambient model. Returns 1 on success, 0 when refused: AUTO is
  * not a measurement model, and a live runtime pins the value (the model
  * decides committed scrollback geometry, so it must not change after
