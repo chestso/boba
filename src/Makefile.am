@@ -9,6 +9,8 @@ libboba_a_SOURCES = \
     runtime.c \
     dynamic_buffer.c \
     ansi_sequences.c \
+    ansi_scan.c \
+    ansi_scan.h \
     unicode.c \
     unicode_tables.h \
     width_internal.h \

@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "ansi_scan.h"
 #include "width_internal.h"
 
 int tui_utf8_char_len(const char *ptr)
@@ -375,21 +376,23 @@ size_t tui_utf8_display_width_ansi_model(const char *text, size_t len,
                                          TuiWidthModel model)
 {
     size_t width = 0;
-    int in_escape = 0;
     size_t i = 0;
+    /* The one escape grammar (ansi_scan.h): CSI, OSC, DCS/APC/PM/SOS and
+     * two-byte escapes are all sequences, and a sequence occupies no
+     * columns. Carrying state here is irrelevant for a whole-buffer
+     * call, but it keeps this walker identical to the stream and row
+     * arithmetic ones. */
+    TuiAnsiScan scan = { 0 };
 
     while (i < len) {
         unsigned char c = (unsigned char)text[i];
-        if (in_escape) {
-            /* End of CSI sequence */
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
-                in_escape = 0;
+        if (scan.state != 0 || c == 0x1b) {
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
             i++;
-            continue;
-        }
-        if (c == '\033' && i + 1 < len && text[i + 1] == '[') {
-            in_escape = 1;
-            i += 2; /* ESC [ */
+            if (tui_ansi_scan_feed(&scan, c, &kind)) {
+                scan.len = 0;
+                scan.nostore = 0;
+            }
             continue;
         }
         if (c < 0x20) { /* control bytes occupy no columns */

@@ -33,6 +33,7 @@
 #include <boba/stream.h>
 #include <boba/unicode.h>
 
+#include "ansi_scan.h"
 #include "base64.h"
 #include "stream_internal.h"
 
@@ -94,84 +95,11 @@ enum
 /* The transcript seam's promise: framing bytes (cursor movement, EL,
  * OSC, APC/DCS, anything out-of-band) are UNREPRESENTABLE in app text.
  * SGR attribute sequences are the one exception — styling, not
- * framing; everything else is scanned, swallowed and dropped. A
- * sequence split across chunks carries its scan state (and its bytes
- * are buffered) so the decision is always made on the whole sequence.
+ * framing; everything else is scanned, swallowed and dropped. The
+ * GRAMMAR lives in ansi_scan.h so measurement (unicode.c) and row
+ * arithmetic (tui_rowcols_advance) classify sequences identically; the
+ * drop-vs-keep decision below is this seam's policy, not the scanner's.
  */
-#define ESC_SEQ_MAX 64
-
-typedef struct
-{
-    int state;  /* 0 ground, 1 after ESC, 2 CSI, 3 OSC, 4 string, 5 ESC-in-string */
-    int resume; /* state to return to from 5 (OSC vs DCS/APC/PM/SOS) */
-    int nostore;
-    size_t len;
-    char buf[ESC_SEQ_MAX];
-} EscScan;
-
-/* Feed one byte. Returns 1 when a complete sequence decision is ready:
- * *emit set, sc->buf/sc->len hold the sequence bytes (may be zero when
- * dropped). Returns 0 while the sequence is still open. The caller
- * only calls this while a sequence is open (sc->state != 0) or the
- * byte is ESC. */
-static int esc_scan_feed(EscScan *sc, unsigned char c, int *emit)
-{
-    if (!sc->nostore && sc->len < ESC_SEQ_MAX)
-        sc->buf[sc->len++] = (char)c;
-    else
-        sc->nostore = 1;
-
-    switch (sc->state) {
-    case 0: /* the ESC that starts the sequence */
-        sc->state = 1;
-        return 0;
-    case 1: /* after ESC: kind selector */
-        if (c == '[')
-            sc->state = 2;
-        else if (c == ']')
-            sc->state = 3;
-        else if (c == 'P' || c == '_' || c == '^' || c == 'X')
-            sc->state = 4;
-        else {
-            sc->state = 0;
-            *emit = 0; /* two-byte escape: never emitted */
-            return 1;
-        }
-        return 0;
-    case 2: /* CSI: final byte in 0x40..0x7E; only SGR (m) is kept */
-        if (c >= 0x40 && c <= 0x7E) {
-            sc->state = 0;
-            *emit = (c == 'm' && !sc->nostore);
-            return 1;
-        }
-        return 0;
-    case 3: /* OSC: BEL or ESC \ terminates; never emitted */
-        if (c == 0x07) {
-            sc->state = 0;
-            *emit = 0;
-            return 1;
-        }
-        if (c == 0x1b) {
-            sc->resume = 3;
-            sc->state = 5;
-        }
-        return 0;
-    case 4: /* DCS / APC / PM / SOS: ESC \ terminates; never emitted */
-        if (c == 0x1b) {
-            sc->resume = 4;
-            sc->state = 5;
-        }
-        return 0;
-    default: /* 5: ESC seen inside a string */
-        if (c == '\\') {
-            sc->state = 0;
-            *emit = 0;
-            return 1;
-        }
-        sc->state = sc->resume;
-        return 0;
-    }
-}
 
 struct TuiRowSink
 {
@@ -183,7 +111,7 @@ struct TuiRowSink
     int open;             /* a row is open (content written since last row end) */
     int image_rows;       /* pending reservation: an image occupies this
                            * many screen rows on the open row (0 = none) */
-    EscScan esc;          /* split escape scan state (shared policy) */
+    TuiAnsiScan esc;      /* split escape scan state (shared grammar) */
     size_t row_start_off; /* content start of the open row */
 
     /* frame row recording (ring of the last N rows) */
@@ -228,9 +156,9 @@ struct TuiTranscript
 
     /* commit staging (shared across streams; order = freeze order) */
     DynamicBuffer *staging;
-    int row_open; /* the output row (staged or committed) is open */
-    int row_col;  /* display cols written on that row */
-    EscScan esc;  /* split escape scan state (see above) */
+    int row_open;    /* the output row (staged or committed) is open */
+    int row_col;     /* display cols written on that row */
+    TuiAnsiScan esc; /* split escape scan state (see above) */
 
     int orphan_partial; /* clear() while a row was open: forget, emit nothing */
     unsigned long commit_count;
@@ -274,55 +202,19 @@ static int defer_push(TuiTranscript *t, int type, int stream_idx,
 /* ------------------------------------------------------------------ */
 
 /* Advance a display column over a byte run (see stream_internal.h). */
-int tui_rowcols_advance(int col, const char *bytes, size_t len, int *esc_state)
+int tui_rowcols_advance(int col, const char *bytes, size_t len,
+                        TuiAnsiScan *scan)
 {
     size_t i = 0;
-    int esc = esc_state ? *esc_state : 0;
     while (i < len) {
         unsigned char c = (unsigned char)bytes[i];
-        if (esc == 1) {
-            if (c == '[') {
-                esc = 2;
-                i++;
-                continue;
+        if (scan->state != 0 || c == 0x1b) {
+            TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
+            i++;
+            if (tui_ansi_scan_feed(scan, c, &kind)) {
+                scan->len = 0;
+                scan->nostore = 0;
             }
-            if (c == ']') {
-                esc = 3;
-                i++;
-                continue;
-            }
-            esc = 0;
-            i++;
-            continue;
-        }
-        if (esc == 2) {
-            if (c >= 0x40 && c <= 0x7E)
-                esc = 0;
-            i++;
-            continue;
-        }
-        if (esc == 3) {
-            if (c == 0x07) {
-                esc = 0;
-                i++;
-                continue;
-            }
-            if (c == 0x1b) {
-                esc = 4;
-                i++;
-                continue;
-            }
-            i++;
-            continue;
-        }
-        if (esc == 4) {
-            esc = 0;
-            i++;
-            continue;
-        }
-        if (c == 0x1b) {
-            esc = 1;
-            i++;
             continue;
         }
         if (c == '\n') {
@@ -350,8 +242,6 @@ int tui_rowcols_advance(int col, const char *bytes, size_t len, int *esc_state)
         col += w;
         i += cl;
     }
-    if (esc_state)
-        *esc_state = esc;
     return col;
 }
 
@@ -387,10 +277,10 @@ static void stage_escape(TuiTranscript *t, const char *bytes, size_t len,
         unsigned char c = (unsigned char)bytes[*i];
         if (t->esc.state == 0 && c != 0x1b)
             return;
-        int emit = 0;
+        TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
         (*i)++;
-        if (esc_scan_feed(&t->esc, c, &emit)) {
-            if (emit) {
+        if (tui_ansi_scan_feed(&t->esc, c, &kind)) {
+            if (kind == TUI_ANSI_KIND_SGR) {
                 dynamic_buffer_append(t->staging, t->esc.buf, t->esc.len);
                 t->row_open = 1; /* bytes (even zero-width) are on the row */
             }
@@ -530,10 +420,10 @@ static void sink_escape(TuiRowSink *s, const char *utf8, size_t len,
         unsigned char c = (unsigned char)utf8[*i];
         if (s->esc.state == 0 && c != 0x1b)
             return;
-        int emit = 0;
+        TuiAnsiKind kind = TUI_ANSI_KIND_NONE;
         (*i)++;
-        if (esc_scan_feed(&s->esc, c, &emit)) {
-            if (emit && s->buf) {
+        if (tui_ansi_scan_feed(&s->esc, c, &kind)) {
+            if (kind == TUI_ANSI_KIND_SGR && s->buf) {
                 /* D9: note the row BEFORE appending — a leading attr
                  * opens the row range, so the frame's recorded range
                  * includes it (capture happens at row end). */

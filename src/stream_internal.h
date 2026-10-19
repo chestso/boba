@@ -12,6 +12,8 @@
 #include <boba/runtime.h>
 #include <boba/stream.h>
 
+#include "ansi_scan.h"
+
 /* Commit pass: write staged bytes (if any) through the atomic
  * transcript seam. Returns 1 when a batch was written (the seam
  * already re-rendered the live region), 0 when there was nothing to
@@ -30,12 +32,13 @@ void tui_runtime_transcript_orphan(TuiRuntime *rt);
 
 /* Advance a display column over a byte run. \n resets the column, \t
  * expands to the next multiple of 8, ESC sequences count zero, UTF-8
- * counts by codepoint width. `esc_state` carries a split escape
- * sequence across calls (0 = none). The result is the running DISPLAY
- * total of the current logical line (no width wrap here): callers
- * derive the physical row/column against the terminal width, since a
- * committed row may soft-wrap. */
+ * counts by codepoint width. `scan` carries a split escape sequence
+ * across calls (zero-initialize it; TuiAnsiScan.state == 0 is ground) and
+ * uses the one escape grammar in ansi_scan.h. The result is the running
+ * DISPLAY total of the current logical line (no width wrap here):
+ * callers derive the physical row/column against the terminal width,
+ * since a committed row may soft-wrap. */
 int tui_rowcols_advance(int col, const char *bytes, size_t len,
-                        int *esc_state);
+                        TuiAnsiScan *scan);
 
 #endif /* BOBA_STREAM_INTERNAL_H */

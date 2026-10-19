@@ -291,6 +291,36 @@ static void test_string_width_ansi(void)
     assert(tui_utf8_display_width_ansi_model(bolt, strlen(bolt), TUI_WIDTH_MODEL_UTS51) == 1);
 }
 
+/* The measuring walker uses the one escape grammar (ansi_scan.h), so a
+ * sequence the transcript drops as framing is zero-width here too: an
+ * OSC 8 hyperlink's URL is not text, and an APC/DCS payload (an image)
+ * occupies no columns. The old CSI-only scanner counted those bytes as
+ * visible, which put every column after the link one URL wide. */
+static void test_string_width_ansi_sequences(void)
+{
+    /* OSC 8 hyperlink, BEL-terminated and ST-terminated. */
+    const char *osc_bel = "\x1b]8;;http://example.com/\x07link\x1b]8;;\x07";
+    assert(tui_utf8_display_width_ansi(osc_bel, strlen(osc_bel)) == 4);
+
+    const char *osc_st = "\x1b]8;;http://example.com/\x1b\\link\x1b]8;;\x1b\\";
+    assert(tui_utf8_display_width_ansi(osc_st, strlen(osc_st)) == 4);
+
+    /* APC (kitty graphics) and DCS (sixel) are sequences, not text. */
+    const char *apc = "\x1b_Ga=T,f=100;AAAA\x1b\\ab";
+    assert(tui_utf8_display_width_ansi(apc, strlen(apc)) == 2);
+
+    const char *dcs = "\x1bPq#0;2;0;0;0\x1b\\ab";
+    assert(tui_utf8_display_width_ansi(dcs, strlen(dcs)) == 2);
+
+    /* A two-byte escape is one sequence: ESC A consumes both bytes. */
+    const char *two_byte = "\x1b"
+                           "Aab";
+    assert(tui_utf8_display_width_ansi(two_byte, strlen(two_byte)) == 2);
+
+    /* A truncated sequence at the end contributes nothing. */
+    assert(tui_utf8_display_width_ansi("ab\x1b[31", 6) == 2);
+}
+
 int main(void)
 {
     printf("test_unicode: codepoint and cluster widths\n");
@@ -308,6 +338,7 @@ int main(void)
     RUN_TEST(test_string_width);
     RUN_TEST(test_string_width_n);
     RUN_TEST(test_string_width_ansi);
+    RUN_TEST(test_string_width_ansi_sequences);
     printf("test_unicode: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

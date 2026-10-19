@@ -1200,7 +1200,7 @@ static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
     runtime_emit(runtime, bytes, len);
 
     int open = bytes[len - 1] != '\n';
-    int esc = 0;
+    TuiAnsiScan esc = { 0 };
     int col = tui_rowcols_advance(cols, bytes, len, &esc);
     if (open) {
         runtime->inline_partial_open = 1;
