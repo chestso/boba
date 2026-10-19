@@ -26,6 +26,13 @@ int tui_utf8_encode(uint32_t cp, char buf[5]);
  * Returns byte offset of the previous character start. */
 size_t tui_utf8_prev_char(const char *text, size_t pos);
 
+/* Find the start of the grapheme cluster ending at `pos` (or containing
+ * it, when `pos` is not a cluster boundary), scanning text[0..len). This
+ * is the editing counterpart of tui_next_cluster: a backspace, a cursor
+ * step or a swap moves by whole clusters, so a combining mark or a ZWJ
+ * sequence is never split. Returns 0 when pos is 0 (or text is NULL). */
+size_t tui_prev_cluster(const char *text, size_t len, size_t pos);
+
 /* Return byte offset of the Nth codepoint (0-indexed).
  * If cp_index >= total codepoints, returns text_len. */
 size_t tui_utf8_byte_offset(const char *text, size_t text_len, int cp_index);

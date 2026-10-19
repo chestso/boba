@@ -29,8 +29,10 @@ static int is_word_char(const TuiTextInput *input, char c)
  * (which this file used to do) shifts every derived column by the number of
  * wide clusters in the measured run. viewport.c measures the same way.
  *
- * Byte offsets stay the string-level unit (cursor_byte, render ranges,
- * tui_utf8_byte_offset lookups); fit_cols is the bridge between the two.
+ * Byte offsets stay the string-level unit (cursor_byte, render ranges);
+ * tui_next_cluster / tui_prev_cluster move between the two, and every fit
+ * (the horizontal scroll window, the wrap budget, where a vertical motion
+ * lands) goes through text.h, so an edit never splits a grapheme cluster.
  *
  * The input buffer is measured with tui_utf8_display_width_n (its bytes are
  * literal glyphs); the prompt / continuation prompt are pre-rendered strings
@@ -300,11 +302,12 @@ static void insert_paste(TuiTextInput *input, const TuiPasteMsg *paste)
             continue;
         }
 
-        int len = tui_utf8_char_len(p);
-        if (len <= 0 || p + len > end)
+        size_t bytes = 0;
+        (void)tui_next_cluster(p, (size_t)(end - p), &bytes);
+        if (bytes == 0)
             break; /* a truncated tail is dropped whole */
-        insert_text(input, p, (size_t)len);
-        p += len;
+        insert_text(input, p, bytes);
+        p += bytes;
     }
 }
 
@@ -314,7 +317,8 @@ static void delete_before(TuiTextInput *input)
     if (input->cursor_byte == 0)
         return;
 
-    size_t prev = tui_utf8_prev_char(input->text, input->cursor_byte);
+    size_t prev = tui_prev_cluster(input->text, input->text_len,
+                                   input->cursor_byte);
     size_t del_len = input->cursor_byte - prev;
 
     memmove(input->text + prev, input->text + input->cursor_byte,
@@ -333,8 +337,12 @@ static void delete_at(TuiTextInput *input)
     if (input->cursor_byte >= input->text_len)
         return;
 
-    int char_len = tui_utf8_char_len(input->text + input->cursor_byte);
-    size_t del_end = input->cursor_byte + char_len;
+    size_t clen = 0;
+    (void)tui_next_cluster(input->text + input->cursor_byte,
+                           input->text_len - input->cursor_byte, &clen);
+    if (clen == 0)
+        clen = 1; /* truncated tail: remove the byte */
+    size_t del_end = input->cursor_byte + clen;
     if (del_end > input->text_len)
         del_end = input->text_len;
 
@@ -346,20 +354,26 @@ static void delete_at(TuiTextInput *input)
     clear_mark_if_set(input);
 }
 
-/* Move cursor left by one character */
+/* Move cursor left by one grapheme cluster */
 static void cursor_left(TuiTextInput *input)
 {
     if (input->cursor_byte > 0) {
-        input->cursor_byte = tui_utf8_prev_char(input->text, input->cursor_byte);
+        input->cursor_byte =
+            tui_prev_cluster(input->text, input->text_len, input->cursor_byte);
         recalculate_cursor_position(input);
     }
 }
 
-/* Move cursor right by one character */
+/* Move cursor right by one grapheme cluster */
 static void cursor_right(TuiTextInput *input)
 {
     if (input->cursor_byte < input->text_len) {
-        input->cursor_byte += tui_utf8_char_len(input->text + input->cursor_byte);
+        size_t clen = 0;
+        (void)tui_next_cluster(input->text + input->cursor_byte,
+                               input->text_len - input->cursor_byte, &clen);
+        if (clen == 0)
+            clen = 1;
+        input->cursor_byte += clen;
         if (input->cursor_byte > input->text_len)
             input->cursor_byte = input->text_len;
         recalculate_cursor_position(input);
@@ -453,8 +467,26 @@ static size_t line_length(const char *text, size_t len, size_t start)
     return end - start;
 }
 
-/* Move cursor up one line, keeping the cursor's character index within the
- * line (clamped to a shorter line's length). */
+/* Display column of the cursor within its logical line (the unit the
+ * horizontal scroll window and cursor_pos use). */
+static int cursor_display_col(const TuiTextInput *input, size_t line_start)
+{
+    return tui_utf8_display_width_n(input->text + line_start,
+                                    input->cursor_byte - line_start);
+}
+
+/* Byte offset of the first cluster at or after display column `col` in a
+ * line; a strict fit, so the landing is always on a cluster boundary and
+ * never past a cluster that alone exceeds the column. */
+static size_t line_byte_for_col(const char *line, size_t len, int col)
+{
+    if (col <= 0)
+        return 0;
+    return tui_text_fit(line, len, col, 0).bytes;
+}
+
+/* Move cursor up one line, keeping the cursor's DISPLAY COLUMN (clamped
+ * to a shorter line's width) and landing on a cluster boundary. */
 static void cursor_up(TuiTextInput *input)
 {
     if (input->cursor_row == 0)
@@ -468,17 +500,15 @@ static void cursor_up(TuiTextInput *input)
 
     size_t cur_line_start =
         find_line_start(input->text, input->text_len, (int)input->cursor_row);
-    int cp = tui_utf8_cp_index(input->text + cur_line_start,
-                               input->cursor_byte - cur_line_start);
+    int col = cursor_display_col(input, cur_line_start);
 
-    input->cursor_byte =
-        prev_line_start +
-        tui_utf8_byte_offset(input->text + prev_line_start, prev_line_len, cp);
+    input->cursor_byte = prev_line_start +
+                         line_byte_for_col(input->text + prev_line_start,
+                                           prev_line_len, col);
     recalculate_cursor_position(input);
 }
 
-/* Move cursor down one line, keeping the cursor's character index within the
- * line (clamped to a shorter line's length). */
+/* Move cursor down one line, keeping the cursor's display column. */
 static void cursor_down(TuiTextInput *input)
 {
     /* Find next line */
@@ -496,12 +526,11 @@ static void cursor_down(TuiTextInput *input)
 
     size_t cur_line_start =
         find_line_start(input->text, input->text_len, (int)input->cursor_row);
-    int cp = tui_utf8_cp_index(input->text + cur_line_start,
-                               input->cursor_byte - cur_line_start);
+    int col = cursor_display_col(input, cur_line_start);
 
-    input->cursor_byte =
-        next_line_start +
-        tui_utf8_byte_offset(input->text + next_line_start, next_line_len, cp);
+    input->cursor_byte = next_line_start +
+                         line_byte_for_col(input->text + next_line_start,
+                                           next_line_len, col);
     recalculate_cursor_position(input);
 }
 
@@ -543,33 +572,42 @@ static TuiCmd *kill_save(TuiTextInput *input, const char *text, size_t len,
     return tui_cmd_clipboard_copy(input->kill_buf, input->kill_buf_len);
 }
 
-/* Transpose the two characters before the cursor (Ctrl+T) */
+/* Transpose the two clusters before the cursor (Ctrl+T) */
 static void transpose_chars(TuiTextInput *input)
 {
     if (input->cursor_byte == 0 || input->text_len < 2)
         return;
 
-    /* If at end of text, transpose the two chars before cursor.
-     * Otherwise, transpose char before and at cursor, then advance. */
+    /* If at end of text, transpose the two clusters before cursor.
+     * Otherwise, transpose the cluster before and at cursor, then
+     * advance. Clusters, not codepoints: swapping a base with its
+     * combining mark (or half a ZWJ sequence) is not an edit a user can
+     * intend. */
     size_t pos = input->cursor_byte;
     if (pos >= input->text_len)
         pos = input->text_len; /* at end */
 
-    /* Find the two characters to swap */
+    /* Find the two clusters to swap */
     size_t c2_start, c2_end, c1_start;
 
     if (pos >= input->text_len) {
-        /* At end: swap last two characters */
+        /* At end: swap the last two clusters */
         c2_end = input->text_len;
-        c2_start = tui_utf8_prev_char(input->text, c2_end);
-        c1_start = tui_utf8_prev_char(input->text, c2_start);
+        c2_start = tui_prev_cluster(input->text, input->text_len, c2_end);
+        c1_start = tui_prev_cluster(input->text, input->text_len, c2_start);
     } else {
-        /* In middle: swap char before cursor with char at cursor */
+        /* In middle: swap the cluster before the cursor with the one at
+         * the cursor */
         c2_start = pos;
-        c2_end = pos + tui_utf8_char_len(input->text + pos);
+        size_t clen = 0;
+        (void)tui_next_cluster(input->text + pos, input->text_len - pos,
+                               &clen);
+        if (clen == 0)
+            clen = 1;
+        c2_end = pos + clen;
         if (c2_end > input->text_len)
             c2_end = input->text_len;
-        c1_start = tui_utf8_prev_char(input->text, c2_start);
+        c1_start = tui_prev_cluster(input->text, input->text_len, c2_start);
     }
 
     size_t c1_len = c2_start - c1_start;
@@ -578,14 +616,21 @@ static void transpose_chars(TuiTextInput *input)
     if (c1_len == 0 || c2_len == 0)
         return;
 
-    /* Swap using a small temp buffer */
-    char tmp[8];
-    if (c1_len + c2_len > sizeof(tmp))
-        return;
+    /* Swap using a temp buffer; a ZWJ cluster can exceed the tiny stack
+     * buffer two ASCII characters need. */
+    char stack_tmp[64];
+    char *tmp = stack_tmp;
+    if (c1_len + c2_len > sizeof(stack_tmp)) {
+        tmp = (char *)malloc(c1_len + c2_len);
+        if (!tmp)
+            return;
+    }
 
     memcpy(tmp, input->text + c2_start, c2_len);
     memcpy(tmp + c2_len, input->text + c1_start, c1_len);
     memcpy(input->text + c1_start, tmp, c1_len + c2_len);
+    if (tmp != stack_tmp)
+        free(tmp);
 
     input->cursor_byte = c2_end;
     clear_mark_if_set(input);
@@ -1276,8 +1321,10 @@ static void render_continuation_prompt(const TuiTextInput *input,
 
 /* Render input->text[byte_start..byte_end) to `out`, applying SGR_REVERSE
  * over any portion that falls inside the active selection (when has_mark
- * is set). Honors echo_mode by emitting '*' per codepoint while still
- * tracking selection toggles at codepoint boundaries. */
+ * is set). Honors echo_mode by emitting one '*' per grapheme cluster —
+ * the unit the cursor and the column math move by — while tracking
+ * selection toggles at cluster boundaries, so a mask never splits a
+ * cluster or disagrees with the rendered width. */
 static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
                               size_t byte_start, size_t byte_end)
 {
@@ -1302,11 +1349,12 @@ static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
     int reversed = 0;
     size_t i = byte_start;
     while (i < byte_end) {
-        int clen = tui_utf8_char_len(input->text + i);
-        if (clen < 1)
+        size_t clen = 0;
+        (void)tui_next_cluster(input->text + i, input->text_len - i, &clen);
+        if (clen == 0)
             clen = 1;
-        if (i + (size_t)clen > byte_end)
-            clen = (int)(byte_end - i);
+        if (i + clen > byte_end)
+            clen = byte_end - i;
 
         if (has_sel) {
             int in_sel = (i >= sel_start && i < sel_end);
@@ -1487,11 +1535,14 @@ static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out
     if (input->text_len > 0) {
         size_t byte_start = 0;
         size_t byte_end = input->text_len;
+        /* offset/offset_right are DISPLAY COLUMNS. fit_cols is the same
+         * cluster-aware bridge the wrap/scroll path uses; the codepoint
+         * lookup that used to live here landed the window one cell early
+         * whenever a wide cluster sat before the edge. */
         if (input->terminal_width > 0 && input->offset_right > input->offset) {
-            byte_start = tui_utf8_byte_offset(input->text, input->text_len,
-                                              input->offset);
-            byte_end = tui_utf8_byte_offset(input->text, input->text_len,
-                                            input->offset_right);
+            byte_start = fit_cols(input->text, input->text_len, input->offset);
+            byte_end =
+                fit_cols(input->text, input->text_len, input->offset_right);
         }
         render_text_range(input, out, byte_start, byte_end);
     }

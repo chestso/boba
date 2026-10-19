@@ -1951,10 +1951,11 @@ static void test_wide_cluster_input_scroll_window(void)
     tui_textinput_free(input);
 }
 
-/* Moving between logical lines keeps the cursor's character index — a
- * display column is not a byte offset into the line (counting bytes landed
- * the cursor inside a multi-byte character). */
-static void test_wide_cluster_vertical_motion_keeps_character(void)
+/* Moving between logical lines keeps the cursor's DISPLAY COLUMN (clamped
+ * to a shorter line) and lands on a cluster boundary. An earlier version
+ * kept the codepoint index instead, which put the cursor inside a cluster
+ * whenever the target line carried a base and its combining mark. */
+static void test_vertical_motion_keeps_display_column(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
@@ -1965,19 +1966,140 @@ static void test_wide_cluster_vertical_motion_keeps_character(void)
         tui_textinput_update(input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
     if (r.cmd)
         tui_cmd_free(r.cmd);
-    send_rune(input, 0x26A1); /* 3 bytes, one character */
+    send_rune(input, 0x26A1); /* 3 bytes, one character, two cells */
     send_string(input, "x");
 
-    /* Back to line 0, then down: character index 2 of line 1 is past "⚡". */
+    /* Line 1 is "⚡x" (three cells). Up to line 0 ("ab", two cells):
+     * column 3 clamps to its end, byte 2. */
     send_key(input, TUI_KEY_UP);
     assert(tui_textinput_cursor(input) == 2);
+
+    /* Down from column 2 lands at column 2 of line 1 — the START of "x"
+     * (byte 6), not after it. A display column is not a codepoint
+     * index. */
     send_key(input, TUI_KEY_DOWN);
-    assert(tui_textinput_cursor(input) == 3 + 3 + 1);
+    assert(tui_textinput_cursor(input) == 3 + 3);
+
+    tui_textinput_free(input);
+}
+
+/* ... and a landing never falls between a base and its mark. */
+static void test_vertical_motion_lands_on_cluster_boundary(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_focus(input, 1);
+
+    send_string(input, "a");
+    TuiUpdateResult r =
+        tui_textinput_update(input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    if (r.cmd)
+        tui_cmd_free(r.cmd);
+    send_paste(input, "e\xCC\x81z"); /* line 1: e + acute, z */
+
+    /* Cursor at the end of line 1 (byte 6). Up: display column 2 clamps
+     * to line 0's end (byte 1). */
+    send_key(input, TUI_KEY_UP);
+    assert(tui_textinput_cursor(input) == 1);
+
+    /* Down: column 1 of line 1 is after the e + acute cluster (byte 5),
+     * never between the base and the mark (which would be byte 3). */
+    send_key(input, TUI_KEY_DOWN);
+    assert(tui_textinput_cursor(input) == 2 + 3);
 
     tui_textinput_free(input);
 }
 
 /* ---------- main ---------- */
+
+/* ---------- grapheme-cluster editing ---------- */
+
+/* Editing moves by grapheme cluster: the cursor's step, backspace, delete
+ * and Ctrl+T all use tui_next_cluster / tui_prev_cluster, so a base is
+ * never separated from its combining mark (or a ZWJ sequence from half of
+ * itself). Input comes in as a paste because that is how a multi-codepoint
+ * cluster arrives as one edit. */
+
+static void test_grapheme_backspace_deletes_cluster(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    send_paste(input, "e\xCC\x81x"); /* e + COMBINING ACUTE + x */
+    assert(tui_textinput_len(input) == 4);
+
+    /* Backspace takes the 'x', then the whole e+acute cluster. */
+    send_key(input, TUI_KEY_BACKSPACE);
+    assert(strcmp(tui_textinput_text(input), "e\xCC\x81") == 0);
+    assert(tui_textinput_len(input) == 3);
+
+    send_key(input, TUI_KEY_BACKSPACE);
+    assert(strcmp(tui_textinput_text(input), "") == 0);
+    assert(tui_textinput_len(input) == 0);
+    assert(tui_textinput_cursor(input) == 0);
+    tui_textinput_free(input);
+}
+
+static void test_grapheme_delete_at_cursor(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    send_paste(input, "e\xCC\x81x");
+    send_key(input, TUI_KEY_HOME);
+    send_key(input, TUI_KEY_DELETE);
+    /* The cluster, not just the 'e'. */
+    assert(strcmp(tui_textinput_text(input), "x") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_grapheme_cursor_steps(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    send_paste(input, "e\xCC\x81x");
+    send_key(input, TUI_KEY_HOME);
+    assert(tui_textinput_cursor(input) == 0);
+
+    send_key(input, TUI_KEY_RIGHT);
+    assert(tui_textinput_cursor(input) == 3); /* over e + acute */
+    send_key(input, TUI_KEY_RIGHT);
+    assert(tui_textinput_cursor(input) == 4);
+    send_key(input, TUI_KEY_LEFT);
+    assert(tui_textinput_cursor(input) == 3);
+    send_key(input, TUI_KEY_LEFT);
+    assert(tui_textinput_cursor(input) == 0);
+    tui_textinput_free(input);
+}
+
+static void test_grapheme_transpose_keeps_clusters(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    send_paste(input, "ae\xCC\x81"); /* a, then e + acute */
+    send_ctrl(input, 't');           /* swap the two clusters before the cursor */
+    assert(strcmp(tui_textinput_text(input), "e\xCC\x81"
+                                             "a") == 0);
+    tui_textinput_free(input);
+}
+
+static void test_grapheme_echo_masks_cluster_once(void)
+{
+    TuiTextInputConfig cfg = { .prompt = "> " };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_terminal_width(input, 20);
+    tui_textinput_set_echo_mode(input, 1);
+    send_paste(input, "e\xCC\x81x");
+
+    char *view = render_view(input);
+    int stars = 0;
+    for (const char *p = view; *p; p++) {
+        if (*p == '*')
+            stars++;
+    }
+    /* One star per cluster (two here), and no part of either cluster's
+     * bytes leaks through the mask. */
+    assert(stars == 2);
+    assert(strstr(view, "e") == NULL);
+    assert(strstr(view, "\xCC\x81") == NULL);
+    free(view);
+    tui_textinput_free(input);
+}
 
 int main(void)
 {
@@ -2048,6 +2170,12 @@ int main(void)
     RUN_TEST(test_escape_clears_mark);
     RUN_TEST(test_view_renders_selection_with_reverse);
 
+    RUN_TEST(test_grapheme_backspace_deletes_cluster);
+    RUN_TEST(test_grapheme_delete_at_cursor);
+    RUN_TEST(test_grapheme_cursor_steps);
+    RUN_TEST(test_grapheme_transpose_keeps_clusters);
+    RUN_TEST(test_grapheme_echo_masks_cluster_once);
+
     RUN_TEST(test_overflow_single_line);
     RUN_TEST(test_overflow_multiline_cursor_line);
     RUN_TEST(test_overflow_resize_recomputes);
@@ -2089,7 +2217,8 @@ int main(void)
     RUN_TEST(test_wide_cluster_prompt_cursor_column);
     RUN_TEST(test_wide_cluster_input_soft_wrap_cursor);
     RUN_TEST(test_wide_cluster_input_scroll_window);
-    RUN_TEST(test_wide_cluster_vertical_motion_keeps_character);
+    RUN_TEST(test_vertical_motion_keeps_display_column);
+    RUN_TEST(test_vertical_motion_lands_on_cluster_boundary);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

@@ -94,7 +94,7 @@ typedef struct TuiTextInput
     size_t snap_cursor;
     int snap_valid; /* Whether snapshot should be committed */
 
-    int echo_mode; /* 0 = normal, 1 = masked (show * per codepoint) */
+    int echo_mode; /* 0 = normal, 1 = masked (one * per grapheme cluster) */
     int soft_wrap; /* 0 = horizontal scroll (default), 1 = soft-wrap long lines */
 
     /* Rows drawn by the last absolute-positioning view() pass. Used to erase
@@ -243,7 +243,7 @@ void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s);
 void tui_textinput_set_continuation_prompt(TuiTextInput *input,
                                            const char *prompt);
 
-/* Set echo mode: 0 = normal, 1 = masked (show * per codepoint) */
+/* Set echo mode: 0 = normal, 1 = masked (one * per grapheme cluster) */
 void tui_textinput_set_echo_mode(TuiTextInput *input, int mode);
 
 /* Set soft wrap mode: 0 = horizontal scroll (default), 1 = soft-wrap

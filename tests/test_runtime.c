@@ -3436,7 +3436,7 @@ static void width_model_free(TuiModel *model)
     free(model);
 }
 
-static const TuiComponent width_model_component = {
+static TuiComponent width_model_component = {
     .init = width_model_init,
     .update = width_model_update,
     .view = width_model_view,
@@ -3469,7 +3469,7 @@ static void fail_free(TuiModel *model)
     free(model);
 }
 
-static const TuiComponent fail_component = {
+static TuiComponent fail_component = {
     .init = fail_init,
     .update = fail_update,
     .view = fail_view,

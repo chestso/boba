@@ -335,6 +335,35 @@ int tui_next_cluster(const char *utf8, size_t len, size_t *bytes)
     return tui_next_cluster_model(utf8, len, bytes, s_width_model);
 }
 
+size_t tui_prev_cluster(const char *text, size_t len, size_t pos)
+{
+    if (!text || pos == 0)
+        return 0;
+    if (pos > len)
+        pos = len;
+
+    /* A cluster boundary is only knowable from the cluster's start (a
+     * leading combining mark forms a cluster of its own, so stepping back
+     * from `pos` by break rules alone can land mid-cluster). Walk forward
+     * from 0 and keep the last boundary before pos; the walker is the
+     * same one the renderer uses, so the two cannot disagree. Editing
+     * buffers are prompt-sized, so the linear scan is the simple, exact
+     * answer. */
+    size_t prev = 0;
+    size_t i = 0;
+    while (i < pos) {
+        size_t bytes = 0;
+        (void)tui_next_cluster(text + i, len - i, &bytes);
+        if (bytes == 0)
+            break; /* truncated tail: no further boundary */
+        if (i + bytes > pos)
+            return i; /* pos sits inside this cluster */
+        prev = i;
+        i += bytes;
+    }
+    return prev;
+}
+
 /* --- Display width ---------------------------------------------------- */
 
 int tui_utf8_display_width_n_model(const char *text, size_t len,

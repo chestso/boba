@@ -232,6 +232,32 @@ static void test_next_cluster_advance(void)
     assert(bytes == 3); /* 'e' + U+0301 */
 }
 
+/* The editing counterpart of tui_next_cluster: a backtracking edit
+ * (backspace, cursor step, transpose) moves by whole clusters, so a base
+ * is never separated from its marks. */
+static void test_prev_cluster(void)
+{
+    const char *s = "e\xCC\x81x"; /* e + acute, x */
+    size_t len = strlen(s);
+    assert(tui_prev_cluster(s, len, 0) == 0);
+    assert(tui_prev_cluster(s, len, 4) == 3); /* back over 'x' */
+    assert(tui_prev_cluster(s, len, 3) == 0); /* back over e + acute */
+    /* A position inside a cluster finds that cluster's start. */
+    assert(tui_prev_cluster(s, len, 1) == 0);
+    assert(tui_prev_cluster(s, len, 2) == 0);
+
+    /* ZWJ sequence: one cluster, so one step from the end reaches 0. */
+    const char *zwj = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x92\xBB"; /* 👨‍💻 */
+    size_t zlen = strlen(zwj);
+    assert(tui_prev_cluster(zwj, zlen, zlen) == 0);
+
+    /* Regional-indicator flag is two codepoints, one cluster. */
+    const char *flag = "\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8"; /* 🇺🇸 */
+    assert(tui_prev_cluster(flag, strlen(flag), strlen(flag)) == 0);
+
+    assert(tui_prev_cluster(NULL, 0, 0) == 0);
+}
+
 static void test_string_width(void)
 {
     assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
@@ -335,6 +361,7 @@ int main(void)
     RUN_TEST(test_width_model_ambient);
     RUN_TEST(test_width_model_difference_set);
     RUN_TEST(test_next_cluster_advance);
+    RUN_TEST(test_prev_cluster);
     RUN_TEST(test_string_width);
     RUN_TEST(test_string_width_n);
     RUN_TEST(test_string_width_ansi);
