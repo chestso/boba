@@ -592,9 +592,23 @@ void tui_row_end(TuiRowSink *s)
         /* An image row reserves N screen rows: the row terminators
          * (and the transcript's row accounting) cover all of them, so
          * the cursor lands exactly one row below the image and the
-         * next unit starts under it. */
-        int n = s->image_rows > 0 ? s->image_rows : 1;
+         * next unit starts under it.
+         *
+         * A reservation of -1 is the image that left the cursor below
+         * itself: the row closes without a break, so the next unit
+         * starts right under the image. */
+        int reserved = s->image_rows;
         s->image_rows = 0;
+        if (reserved < 0) {
+            s->open = 0;
+            s->col = 0;
+            if (s->t) {
+                s->t->row_open = 0;
+                s->t->row_col = 0;
+            }
+            return;
+        }
+        int n = reserved > 0 ? reserved : 1;
         for (int k = 0; k < n; k++)
             sink_row_break(s); /* appends \r\n, closes the row */
         return;
@@ -783,12 +797,12 @@ typedef struct
  *               `#c` then the band's columns run-length encoded
  *               ('?'+bits, LSB = top pixel); `$` returns to the band's
  *               left edge between registers, `-` advances a band. No
- *               trailing `-`: the sixel cursor stays on the last band
- *               — the row the spec leaves the text cursor on.
+ *               trailing `-`: the sixel cursor stays on the last band.
  *
- * The terminal derives the row count from the emitted bands and the
- * cursor advance from the spec, so boba emits ONE row terminator after
- * the image (see tui_row_image), not disp_rows. */
+ * The terminal derives the row count from the emitted bands and lands
+ * the text cursor BELOW the image, so boba closes the row without a
+ * terminator (see tui_row_image) — one would leave a blank line under
+ * the picture. */
 static void image_write_sixel(TuiRowSink *s, const TuiImageSpec *spec)
 {
     int w = spec->src_w;
@@ -933,10 +947,11 @@ void tui_row_image(TuiRowSink *s, const TuiImageSpec *spec)
     s->open = 1;
     /* The row reservation. kitty (C=1) and iTerm2 leave the cursor
      * where it was, so boba emits every reserved row. sixel does not:
-     * the VT340 spec lands the cursor on the image's LAST row, so ONE
-     * terminator leaves the image — disp_rows would gap. */
+     * the terminal lands the cursor BELOW the image, so the row closes
+     * without a break — a terminator would leave a blank line under
+     * the picture. */
     if (spec->transport == TUI_IMAGE_SIXEL)
-        s->image_rows = 1;
+        s->image_rows = -1;
     else
         s->image_rows = spec->disp_rows > 0 ? spec->disp_rows : 1;
     s->col += spec->disp_cols > 0 ? spec->disp_cols : 1;

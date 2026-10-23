@@ -1760,9 +1760,10 @@ static void test_image_sixel_golden_bytes(void)
     h_free(h);
 }
 
-/* The sixel reservation is ONE row: the following unit's bytes come
- * after a single terminator, not disp_rows. */
-static void test_image_sixel_reserves_one_row(void)
+/* The sixel reservation is NO row: the terminal lands the cursor below
+ * the image, so the following unit's bytes come right after the image's
+ * ST — a terminator would leave a blank line under the picture. */
+static void test_image_sixel_reserves_no_row(void)
 {
     TuiStreamSpec streams[1] = { { "content" } };
     const TuiClassifier *classifiers[1] = { &image_cls };
@@ -1780,9 +1781,8 @@ static void test_image_sixel_reserves_one_row(void)
     const char *st = strstr(out, "\x1b\\");
     const char *after = strstr(out, "after");
     assert(st && after);
-    /* exactly "\r\n" between the image's ST and the next unit */
-    assert(strncmp(st + 2, "\r\n", 2) == 0);
-    assert(strncmp(st + 2, "\r\n\r\n", 4) != 0);
+    /* no terminator between the image's ST and the next unit */
+    assert(strncmp(st + 2, "\r\n", 2) != 0);
     assert(after > st);
 
     h_free(h);
@@ -2163,7 +2163,7 @@ int main(void)
     RUN_TEST(test_image_kitty_golden_bytes);
     RUN_TEST(test_image_iterm2_golden_bytes);
     RUN_TEST(test_image_sixel_golden_bytes);
-    RUN_TEST(test_image_sixel_reserves_one_row);
+    RUN_TEST(test_image_sixel_reserves_no_row);
     RUN_TEST(test_image_row_reservation_bounds_the_next_unit);
     RUN_TEST(test_image_defers_until_profile_resolves);
     RUN_TEST(test_image_measure_refusal_degrades_to_render_block);
