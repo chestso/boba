@@ -140,23 +140,50 @@ TuiWidthModel tui_width_model_detect(const char *term, const char *tmux,
         ci_starts_with(term, "screen"))
         return TUI_WIDTH_MODEL_GRID;
 
-    /* An explicit engine contract beats identity. */
+    /* An explicit engine contract beats identity — for the terminal
+     * that DECLARED it (portty). */
     TuiWidthModel declared = width_model_from_name(portty_width);
+
+    /* TERM names the terminal that owns the grid: that terminal wrote
+     * it, so it is the innermost authority. The identity markers
+     * (PORTTY, KITTY_WINDOW_ID) describe the terminal that SPAWNED
+     * this shell, and that is an OUTER terminal whenever a nested
+     * terminal was started from it — an xterm launched inside portty
+     * inherits PORTTY=1 and PORTTY_WIDTH=uts51, and a grid measured
+     * with the outer terminal's rule is a cell off the inner
+     * terminal's: the VS15 cluster is measured one cell narrow, the
+     * terminal draws it two cells wide, and the status row comes out
+     * longer than the row the terminal lays out — it wraps. So a TERM
+     * that names a terminal DECIDES, and the markers are the evidence
+     * only when TERM names no terminal we know. */
+    if (ci_starts_with(term, "portty"))
+        return declared != TUI_WIDTH_MODEL_AUTO ? declared
+                                                : TUI_WIDTH_MODEL_UTS51;
+
+    /* Kitty: its terminfo name. */
+    if (ci_starts_with(term, "xterm-kitty"))
+        return TUI_WIDTH_MODEL_UTS51;
+
+    /* The xterm aliases: xterm itself, and the terminals that share
+     * them (iTerm2, wezterm, VTE, ghostty). The grid rule is the safe
+     * one here: it measures the emoji-presentation cell, so a terminal
+     * that draws it narrower leaves the row a column short — while
+     * measuring narrower overflows the line. */
+    if (ci_starts_with(term, "xterm"))
+        return TUI_WIDTH_MODEL_GRID;
+
+    /* TERM names no terminal we know: the markers are the evidence.
+     * The declaration beats the identity markers (portty states its
+     * engine's contract), and the identity markers come next. */
     if (declared != TUI_WIDTH_MODEL_AUTO)
         return declared;
-
-    /* Portty: the marker first, then the TERM aliases (older builds). */
-    if ((portty && *portty) || ci_starts_with(term, "portty"))
+    if (portty && *portty)
+        return TUI_WIDTH_MODEL_UTS51;
+    if (kitty_window_id && *kitty_window_id)
         return TUI_WIDTH_MODEL_UTS51;
 
-    /* Kitty: KITTY_WINDOW_ID survives a TERM override; xterm-kitty is
-     * the normal terminfo name. */
-    if ((kitty_window_id && *kitty_window_id) ||
-        ci_starts_with(term, "xterm-kitty"))
-        return TUI_WIDTH_MODEL_UTS51;
-
-    /* xterm, Windows Terminal, and everything unknown: the terminal
-     * grid ignores VS15 for layout. */
+    /* Windows Terminal, and everything unknown: the terminal grid
+     * ignores VS15 for layout. */
     return TUI_WIDTH_MODEL_GRID;
 }
 

@@ -252,7 +252,7 @@ static void test_width_model_detect(void)
     assert(tui_width_model_detect("xterm-ghostty", NULL, NULL, NULL, NULL) ==
            TUI_WIDTH_MODEL_GRID);
 
-    /* Portty: every TERM alias, and the identity marker. */
+    /* Portty: every TERM alias. */
     assert(tui_width_model_detect("portty", NULL, NULL, NULL, NULL) ==
            TUI_WIDTH_MODEL_UTS51);
     assert(tui_width_model_detect("portty-256color", NULL, NULL, NULL, NULL) ==
@@ -261,24 +261,28 @@ static void test_width_model_detect(void)
            TUI_WIDTH_MODEL_UTS51);
     assert(tui_width_model_detect("PORTTY-VTY-256COLOR", NULL, NULL, NULL, NULL) ==
            TUI_WIDTH_MODEL_UTS51);
-    assert(tui_width_model_detect("xterm-256color", NULL, NULL, "1", NULL) ==
-           TUI_WIDTH_MODEL_UTS51);
 
-    /* Kitty: the window marker survives a TERM override; xterm-kitty is
-     * the normal name. */
+    /* Kitty: its terminfo name. */
     assert(tui_width_model_detect("xterm-kitty", NULL, NULL, NULL, NULL) ==
            TUI_WIDTH_MODEL_UTS51);
     assert(tui_width_model_detect("XTERM-KITTY", NULL, NULL, NULL, NULL) ==
            TUI_WIDTH_MODEL_UTS51);
-    assert(tui_width_model_detect("xterm-256color", NULL, "1", NULL, NULL) ==
-           TUI_WIDTH_MODEL_UTS51);
 
-    /* An explicit engine contract wins over identity, in both
-     * directions. */
+    /* The NESTED terminal: TERM names the terminal that owns the grid,
+     * so the markers of the OUTER terminal (inherited by every child
+     * process) must not decide it. An xterm started inside portty
+     * inherits PORTTY=1 and PORTTY_WIDTH=uts51; measuring that xterm's
+     * grid with portty's rule makes a VS15 cluster one cell narrow,
+     * the terminal draws it two cells wide, and the row wraps. */
+    assert(tui_width_model_detect("xterm-256color", NULL, NULL, "1", NULL) ==
+           TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("xterm-256color", NULL, "1", NULL, NULL) ==
+           TUI_WIDTH_MODEL_GRID);
     assert(tui_width_model_detect("xterm-256color", NULL, NULL, NULL,
-                                  "uts51") == TUI_WIDTH_MODEL_UTS51);
-    assert(tui_width_model_detect("xterm-256color", NULL, NULL, NULL,
-                                  "UTS51") == TUI_WIDTH_MODEL_UTS51);
+                                  "uts51") == TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("xterm-256color", NULL, NULL, "1",
+                                  "uts51") == TUI_WIDTH_MODEL_GRID);
+    /* The declaration still binds the terminal that DECLARED it. */
     assert(tui_width_model_detect("portty-vty-256color", NULL, NULL, NULL,
                                   "grid") == TUI_WIDTH_MODEL_GRID);
     assert(tui_width_model_detect("portty-vty-256color", NULL, NULL, NULL,
@@ -286,6 +290,18 @@ static void test_width_model_detect(void)
     /* An unknown declaration is ignored, not treated as a verdict. */
     assert(tui_width_model_detect("portty-vty-256color", NULL, NULL, NULL,
                                   "bogus") == TUI_WIDTH_MODEL_UTS51);
+
+    /* TERM names no terminal we know: the markers are the evidence. */
+    assert(tui_width_model_detect(NULL, NULL, NULL, "1", NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect(NULL, NULL, "1", NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect(NULL, NULL, NULL, NULL, "uts51") ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("alacritty", NULL, "1", NULL, NULL) ==
+           TUI_WIDTH_MODEL_UTS51);
+    assert(tui_width_model_detect("alacritty", NULL, NULL, NULL,
+                                  "wcwidth") == TUI_WIDTH_MODEL_WCWIDTH);
 
     /* tmux is the authority: inherited markers from the outer terminal
      * must not leak through it. */

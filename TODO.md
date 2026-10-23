@@ -77,7 +77,7 @@ in the Paint section of `src/runtime.c`.
 `tui_runtime_flush()` is now `paint_begin → runtime_reconcile() →
 runtime_paint() → paint_end`: the reconcile step decides the frame's meaning
 (commit pass, `view()`, capability probe) before a byte leaves, and the paint
-emits + delivers it. The mode/cursor diffs are still computed *while*
+emits + delivers it. The mode/cursor diffs are still computed _while_
 emitting — the next step is to make reconcile produce a real terminal-state
 plan (transitions, capability gating, per-row placement) that the paint
 executes mechanically, so "reconcile" is a pure function of (model, tracked

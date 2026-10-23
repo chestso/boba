@@ -143,17 +143,31 @@ void tui_term_profile_env(TuiTerminalProfile *p, const char *term_program,
  *   1. TMUX set, or TERM begins "tmux" / "screen"  -> GRID
  *      The innermost multiplexer owns the grid; inherited KITTY_* or
  *      PORTTY_* markers must not leak through it.
- *   2. PORTTY_WIDTH = "uts51" | "grid" | "wcwidth"  -> that model
- *      Portty declares its engine's contract. The declaration beats
- *      the identity markers, so an engine change needs one constant.
- *   3. PORTTY set, or TERM begins "portty"          -> UTS51
- *      Older portty builds have no PORTTY_WIDTH; TERM carries the
- *      same fact (portty's aliases all begin with "portty").
- *   4. KITTY_WINDOW_ID set, or TERM begins "xterm-kitty" -> UTS51
+ *   2. TERM begins "portty"                          -> the portty
+ *      contract: PORTTY_WIDTH when it declares one ("uts51" | "grid" |
+ *      "wcwidth"), else UTS51. The declaration beats the identity, so
+ *      an engine change needs one constant.
+ *   3. TERM begins "xterm-kitty"                     -> UTS51
  *      Kitty re-measures with the presentation selectors.
- *   5. otherwise                                    -> GRID
- *      xterm, Windows Terminal, and unknown terminals follow the
- *      terminal-grid rule (VS15 is presentation only).
+ *   4. TERM begins "xterm"                           -> GRID
+ *      xterm itself, and the terminals that share its aliases (iTerm2,
+ *      wezterm, VTE, ghostty): a selector picks a glyph, not a cell.
+ *   5. TERM names no terminal we know                -> the markers:
+ *      PORTTY_WIDTH when it declares one, else PORTTY -> UTS51, else
+ *      KITTY_WINDOW_ID -> UTS51, else GRID.
+ *
+ * Why TERM decides before the markers: TERM is written by the terminal
+ * that owns the grid, so it names the INNERMOST terminal, while the
+ * identity markers describe the terminal that SPAWNED this shell —
+ * which is an outer terminal whenever a nested terminal was started
+ * from it. An xterm launched inside portty inherits PORTTY=1 and
+ * PORTTY_WIDTH=uts51; measuring that xterm's grid with portty's rule
+ * makes a VS15 cluster one cell narrow, the terminal draws it two
+ * cells wide, and the status row comes out longer than the row the
+ * terminal lays out — it wraps. The cost of the rule is the terminal
+ * that overrides its own TERM (kitty with TERM=xterm-256color measures
+ * with the grid rule): a cell off, not a wrapped row, and
+ * TuiRuntimeConfig's explicit width_model is the escape hatch.
  *
  * TERM_PROGRAM is deliberately not consulted. Portty sets it to
  * "ghostty" for third-party keyboard-protocol allowlists; treating that
