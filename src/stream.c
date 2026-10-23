@@ -945,12 +945,13 @@ void tui_row_image(TuiRowSink *s, const TuiImageSpec *spec)
         break;
     }
     s->open = 1;
-    /* The row reservation. kitty (C=1) and iTerm2 leave the cursor
-     * where it was, so boba emits every reserved row. sixel does not:
-     * the terminal lands the cursor BELOW the image, so the row closes
+    /* The row reservation. kitty (C=1) leaves the cursor where it was,
+     * so boba emits every reserved row. sixel and iTerm2 do not: the
+     * terminal lands the cursor BELOW the image, so the row closes
      * without a break — a terminator would leave a blank line under
      * the picture. */
-    if (spec->transport == TUI_IMAGE_SIXEL)
+    if (spec->transport == TUI_IMAGE_SIXEL ||
+        spec->transport == TUI_IMAGE_ITERM2)
         s->image_rows = -1;
     else
         s->image_rows = spec->disp_rows > 0 ? spec->disp_rows : 1;

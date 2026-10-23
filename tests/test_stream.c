@@ -1716,7 +1716,7 @@ static void test_image_iterm2_golden_bytes(void)
     char golden[128];
     snprintf(golden, sizeof(golden),
              "\x1b]1337;File=inline=1;size=12;width=60;height=3:" IMG_B64
-             "\x07\r\n\r\n\r\n");
+             "\x07");
     assert(strstr(out, golden) != NULL);
     assert(g_img_rendered == 1);
 
@@ -1726,9 +1726,8 @@ static void test_image_iterm2_golden_bytes(void)
 /* sixel: one DCS — P1=0/P2=1/P3=0, the square-pixel raster with the
  * payload's pixel dims, the palette, then the bands (register passes
  * with $ between registers and - between bands, run-length encoded) and
- * ST — followed by exactly ONE row terminator. The terminal lands the
- * cursor on the image's LAST row per the VT340 spec, so disp_rows
- * terminators would leave a gap. */
+ * ST. The terminal lands the cursor below the image, so the row closes
+ * without a terminator (see test_image_sixel_reserves_no_row). */
 static void test_image_sixel_golden_bytes(void)
 {
     TuiStreamSpec streams[1] = { { "content" } };
@@ -1749,8 +1748,7 @@ static void test_image_sixel_golden_bytes(void)
         "#0~?~"
         "$#1?~?"
         "-#0!3~"
-        "\x1b\\"
-        "\r\n";
+        "\x1b\\";
     assert(strstr(out, golden) != NULL);
     assert(g_img_calls == 1);
     assert(g_img_rendered == 1);
@@ -1784,6 +1782,34 @@ static void test_image_sixel_reserves_no_row(void)
     /* no terminator between the image's ST and the next unit */
     assert(strncmp(st + 2, "\r\n", 2) != 0);
     assert(after > st);
+
+    h_free(h);
+}
+
+/* The iTerm2 reservation is NO row: the terminal lands the cursor below
+ * the image, so the following unit's bytes come right after the image's
+ * BEL — a terminator would leave a blank line under the picture. */
+static void test_image_iterm2_reserves_no_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+    h_profile_iterm2(h);
+
+    h_send(h, tui_msg_stream_delta(0, "!img a:b\n\n", 10));
+    h_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
+    h_flush(h);
+    const char *out = h_read(h);
+
+    const char *bel = strstr(out, "\x07");
+    const char *after = strstr(out, "after");
+    assert(bel && after);
+    /* no terminator between the image's BEL and the next unit */
+    assert(strncmp(bel + 1, "\r\n", 2) != 0);
+    assert(after > bel);
 
     h_free(h);
 }
@@ -2164,6 +2190,7 @@ int main(void)
     RUN_TEST(test_image_iterm2_golden_bytes);
     RUN_TEST(test_image_sixel_golden_bytes);
     RUN_TEST(test_image_sixel_reserves_no_row);
+    RUN_TEST(test_image_iterm2_reserves_no_row);
     RUN_TEST(test_image_row_reservation_bounds_the_next_unit);
     RUN_TEST(test_image_defers_until_profile_resolves);
     RUN_TEST(test_image_measure_refusal_degrades_to_render_block);
