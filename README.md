@@ -1,5 +1,7 @@
 # boba
 
+**Homepage:** <https://chest.so/boba/>
+
 A C library for building terminal user interfaces. boba is the C
 equivalent of Charm's three v2 projects rolled into a single library:
 the [Bubbletea](https://github.com/charmbracelet/bubbletea) runtime,
