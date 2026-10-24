@@ -51,7 +51,7 @@ from the reported text, and IME results.
   status bar; revisit if a use case shows up.
 
 - **`TuiFocusGroup` helper.** Decided against during planning (parents
-  own focus, per Bubbletea). Reconsider if multiple consumers duplicate
+  own focus). Reconsider if multiple consumers duplicate
   the same cycling boilerplate.
 
 ## Architecture
