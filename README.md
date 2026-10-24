@@ -2,29 +2,23 @@
 
 **Homepage:** <https://chest.so/boba/>
 
-A C library for building terminal user interfaces. boba is the C
-equivalent of Charm's three v2 projects rolled into a single library:
-the [Bubbletea](https://github.com/charmbracelet/bubbletea) runtime,
-the [Lipgloss](https://github.com/charmbracelet/lipgloss) style/layout
-system, and the [Bubbles](https://github.com/charmbracelet/bubbles)
-component collection. The shared spine is the
-[Elm Architecture](https://guide.elm-lang.org/architecture/), translated
-into idiomatic C.
+A C library for building terminal user interfaces with the
+[Elm Architecture](https://guide.elm-lang.org/architecture/)
+(Model-View-Update), translated into idiomatic C. boba ships the whole stack
+in one package: a runtime, a style/layout system, and a component collection.
 
-The Charm ecosystem (now at [charm.land](https://charm.land)) has released a
-[v2 generation](https://charm.land/blog/v2/) with an evolved API. boba
-follows that direction: `view()` returns a `TuiView` that declares cursor
-placement, alt-screen, mouse mode, keyboard enhancements, focus reporting,
-bracketed paste, and window title each frame, and the runtime reconciles
-against tracked terminal state. Focus is message-driven (`TUI_MSG_FOCUS` /
-`TUI_MSG_BLUR`) and a Lipgloss-shaped `TuiStyle` covers colors, text
-attributes, padding/margin, alignment, and borders. A handful of legacy
-imperative setters remain marked `BOBA_DEPRECATED` with their
+The API is declarative by design: `view()` returns a `TuiView` that declares
+cursor placement, alt-screen, mouse mode, keyboard enhancements, focus
+reporting, bracketed paste, and window title each frame, and the runtime
+reconciles against tracked terminal state. Focus is message-driven
+(`TUI_MSG_FOCUS` / `TUI_MSG_BLUR`) and a value-typed `TuiStyle` covers
+colors, text attributes, padding/margin, alignment, and borders. A handful of
+legacy imperative setters remain marked `BOBA_DEPRECATED` with their
 declarative replacements documented inline.
 
 ## Why "boba"?
 
-The name pays homage to Bubbletea. Boba are the tapioca pearls in bubble tea.
+Boba are the tapioca pearls in bubble tea.
 
 ## What boba Provides
 
@@ -40,7 +34,7 @@ boba has three parts:
 - Supports two rendering modes: **alt-screen** (traditional full-screen TUI) and **inline** (renders in the primary buffer like Python's pyrepl — no alt screen, cursor-up + erase + repaint per frame)
 - Repeats
 
-**Style** (`TuiStyle`) — A Lipgloss-shaped, value-typed style record covering
+**Style** (`TuiStyle`) — A value-typed style record covering
 colors (ANSI / 256 / truecolor / adaptive), text attributes, padding/margin,
 alignment, and borders. Composable without mutation.
 
@@ -87,16 +81,16 @@ makes pragmatic choices:
 - **Explicit memory** — Components provide matching `*_create()` / `*_free()` functions
 - **Declarative `TuiView`** — `view()` returns a small struct (content buffer +
   terminal-mode flags + cursor) that the runtime diffs against tracked state.
-  This is the C analogue of returning a Bubbletea v2 `View` value.
+  This is the C analogue of returning a declarative `View` value.
 - **Value-typed styles** — `TuiStyle` is a plain struct; setters take and
   return a value (`s = tui_style_bold(s, 1)`) instead of mutating, giving
-  Lipgloss-style composition without method chains.
+  value-typed composition without method chains.
 
 ## Runtime
 
 The runtime can be used in two modes:
 
-**Bubbletea-style** — `tui_runtime_run()` owns the event loop, raw mode, and signal handling:
+**Event-loop owned** — `tui_runtime_run()` owns the event loop, raw mode, and signal handling:
 
 ```c
 TuiRuntime *rt = tui_runtime_create(&my_component, NULL, NULL);
@@ -158,7 +152,8 @@ printf("result: %s\n", value);
 ### Message and Command Scheduling
 
 External code (callbacks, signal handlers, other modules) can schedule work for the
-event loop to process on its next iteration, following Bubbletea's `p.Send(msg)` pattern.
+event loop to process on its next iteration, following the usual post-and-send
+pattern.
 
 **Posting messages** — goes through the full Elm Architecture cycle (`update()` → command execution):
 
@@ -356,7 +351,7 @@ Features:
 - **Prompt support** - Custom prompt strings with proper UTF-8 width calculation
 - **Configurable word characters** - Whitelist-based word boundaries for completion and movement
 - **Echo mode** - Password masking (shows `*` per codepoint)
-- **Focus-aware styling** - Separate focused / blurred `TuiStyle` for the prompt (Bubbles parity)
+- **Focus-aware styling** - Separate focused / blurred `TuiStyle` for the prompt
 - **Continuation prompt** - Custom prompt for lines after the first in multi-line mode
 - **Soft-wrap mode** - Long lines wrap to the next visual row instead of horizontal scrolling (`tui_textinput_set_soft_wrap`)
 - **Syntax-highlighting callback** - Host applications can inject per-token styling via `tui_textinput_set_text_renderer`; the callback returns a malloc'd ANSI-escaped string that replaces raw text in the rendered output
@@ -375,7 +370,7 @@ tui_textinput_set_terminal_row(input, 23);     /* Absolute positioning */
 tui_textinput_set_word_chars(input, "abc..."); /* Word boundary chars */
 tui_textinput_set_echo_mode(input, 1);         /* Password masking */
 
-/* Lipgloss-shaped focus-aware prompt styling */
+/* Focus-aware prompt styling */
 TuiStyle pink = tui_style_foreground(tui_style_new(), tui_color_hex("#ff06b7"));
 TuiStyle dim  = tui_style_faint(tui_style_new(), 1);
 tui_textinput_set_focused_prompt_style(input, pink);
@@ -446,7 +441,7 @@ return tui_update_result(tui_cmd_clipboard_copy(text, len));
 
 ## Styles
 
-`TuiStyle` is boba's Lipgloss equivalent: a value-typed style record
+`TuiStyle` is boba's value-typed style record
 covering colors, text attributes, padding/margin, alignment, and borders.
 Setters take and return a `TuiStyle` so styles compose without mutation:
 
@@ -469,14 +464,14 @@ right one based on detected background). Borders ship as five prefab
 `tui_style_get_width()` / `tui_style_get_height()` to measure rendered
 content without producing the bytes.
 
-For single horizontal-line dividers — the lipgloss
+For single horizontal-line dividers — the
 `strings.Repeat(border.Top, n)` styled idiom, used when you want a
 decorative line above or below another component rather than a full
 4-sided box — use `tui_border_render_horizontal()`. It tiles the chosen
 edge across the requested width, applies a `TuiStyle` inline, and
 optionally embeds a title at left/center/right alignment (boba's
-small extension over lipgloss, which has no built-in title-in-border
-API):
+small extension over the plain edge, which has no built-in
+title-in-border API):
 
 ```c
 char *line = tui_border_render_horizontal(
@@ -493,7 +488,7 @@ how user code is expected to style its own components.
 
 ## Component Composition
 
-boba follows the same composition pattern as Bubbletea:
+boba follows a single-model composition pattern:
 the runtime manages ONE model, and composition happens inside that model.
 
 ### Embedding Child Components
@@ -578,7 +573,7 @@ return tui_update_result(combined);
 
 ### Focus
 
-Like Bubbletea's `examples/textinputs`, focus is owned by the parent. There is no library-side focus router — the parent tracks which child is active and dispatches `TUI_MSG_FOCUS` / `TUI_MSG_BLUR` when focus moves. Components that care about focus (`textinput`, `viewport`) update their own `focused` flag in response.
+Focus is owned by the parent. There is no library-side focus router — the parent tracks which child is active and dispatches `TUI_MSG_FOCUS` / `TUI_MSG_BLUR` when focus moves. Components that care about focus (`textinput`, `viewport`) update their own `focused` flag in response.
 
 ```c
 typedef struct {
@@ -618,8 +613,8 @@ The parser produces Shift+Tab as `{TUI_KEY_TAB, mods: TUI_MOD_SHIFT}` (xterm `CS
 ### Software Scrolling
 
 Terminals offer ANSI scroll regions (DECSTBM) for hardware-assisted scrolling, but
-boba's viewport redraws content with absolute cursor positioning instead. This
-follows Bubbletea's approach. ANSI scroll regions behave inconsistently across
+boba's viewport redraws content with absolute cursor positioning instead. ANSI
+scroll regions behave inconsistently across
 terminal emulators — cursor positioning at region boundaries causes visual glitches,
 and the host terminal controls what happens in the scrollback buffer. Software
 scrolling avoids all of this: the viewport owns every pixel it draws, wrapping,
@@ -634,8 +629,8 @@ In Elm, commands are opaque values the runtime interprets. boba splits
 ongoing terminal state (alt screen, mouse, keyboard enhancements, cursor,
 focus reporting, bracketed paste, window title) is declared per frame on the
 `TuiView` returned from `view()`. The runtime tracks current terminal state
-and emits only the bytes needed to reach the requested state, the same way
-Bubbletea v2 reconciles its `View`. Application-defined custom commands add a
+and emits only the bytes needed to reach the requested state, reconciling the
+declared view against what the terminal already shows. Application-defined custom commands add a
 callback, because that is the simplest way for application code to define
 arbitrary effects without the runtime needing to know about them in advance.
 
