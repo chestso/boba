@@ -511,6 +511,32 @@ void tui_row_text(TuiRowSink *s, const char *utf8, size_t len)
     }
 }
 
+/* One color as an SGR parameter suffix (the part between the ';'s of a
+ * combined sequence), or nothing for TUI_COLOR_NONE. ANSI16 uses the
+ * 30..37 / 90..97 (and 40..47 / 100..107) pair, which is a palette
+ * INDEX — never a 24-bit sequence, and never an approximation of one:
+ * the caller picked the slot, and the terminal's own palette decides
+ * what it draws. */
+static size_t attr_color(char *dst, size_t cap, int is_bg, TuiColor c)
+{
+    if (c.type == TUI_COLOR_NONE)
+        return 0;
+    if (c.type == TUI_COLOR_ANSI16) {
+        int n = c.v.ansi;
+        int sgr;
+        if (is_bg)
+            sgr = n < 8 ? 40 + n : 100 + n - 8;
+        else
+            sgr = n < 8 ? 30 + n : 90 + n - 8;
+        return (size_t)snprintf(dst, cap, ";%d", sgr);
+    }
+    if (c.type == TUI_COLOR_ANSI256)
+        return (size_t)snprintf(dst, cap, ";%d;5;%d", is_bg ? 48 : 38,
+                                c.v.ansi);
+    return (size_t)snprintf(dst, cap, ";%d;2;%d;%d;%d", is_bg ? 48 : 38,
+                            c.v.rgb.r, c.v.rgb.g, c.v.rgb.b);
+}
+
 void tui_row_attr(TuiRowSink *s, TuiAttr a)
 {
     if (!s || !s->buf || s->dest == SINK_COUNT)
@@ -530,12 +556,8 @@ void tui_row_attr(TuiRowSink *s, TuiAttr a)
         buf[n++] = ';', buf[n++] = '4';
     if (a.strikethrough)
         buf[n++] = ';', buf[n++] = '9';
-    if (a.has_fg)
-        n += (size_t)snprintf(buf + n, sizeof(buf) - n, ";38;2;%d;%d;%d",
-                              a.fg_r, a.fg_g, a.fg_b);
-    if (a.has_bg)
-        n += (size_t)snprintf(buf + n, sizeof(buf) - n, ";48;2;%d;%d;%d",
-                              a.bg_r, a.bg_g, a.bg_b);
+    n += attr_color(buf + n, sizeof(buf) - n, 0, a.fg);
+    n += attr_color(buf + n, sizeof(buf) - n, 1, a.bg);
     buf[n++] = 'm';
     /* D9: the attr may LEAD the row. Open the row range first, or the
      * frame's recorded range (captured at row end) starts after it and

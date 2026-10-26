@@ -526,6 +526,36 @@ static void test_view_has_selected_marker(void)
     tui_list_popup_free(p);
 }
 
+static void test_selected_reverse_highlights_without_a_background(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "alpha", "beta" };
+    tui_list_popup_set_items(p, items, 2);
+    tui_list_popup_set_terminal_size(p, 80, 24);
+    tui_list_popup_show(p, 0);
+    DynamicBuffer *buf = dynamic_buffer_create(0);
+
+    /* Off (the default): no reverse anywhere. */
+    tui_list_popup_view(p, buf);
+    assert(strstr(buf_data(buf), "\033[7m") == NULL);
+    dynamic_buffer_clear(buf);
+
+    /* On: the selected row is drawn in reverse video, which is the
+     * highlight a terminal that cannot show the caller's chosen
+     * background still has. */
+    tui_list_popup_set_selected_reverse(p, 1);
+    tui_list_popup_view(p, buf);
+    assert(strstr(buf_data(buf), "\033[7m") != NULL);
+    /* ...and it is the SELECTED row that carries it: reverse appears
+     * before the row's text, not after the whole popup. */
+    const char *rev = strstr(buf_data(buf), "\033[7m");
+    const char *alpha = strstr(buf_data(buf), "alpha");
+    assert(rev != NULL && alpha != NULL && rev < alpha);
+
+    dynamic_buffer_destroy(buf);
+    tui_list_popup_free(p);
+}
+
 static void test_view_hidden_items_not_rendered(void)
 {
     TuiListPopup *p = tui_list_popup_create();
@@ -721,6 +751,7 @@ int main(void)
     RUN_TEST(test_view_hidden_when_not_visible);
     RUN_TEST(test_view_visible_produces_content);
     RUN_TEST(test_view_has_selected_marker);
+    RUN_TEST(test_selected_reverse_highlights_without_a_background);
     RUN_TEST(test_view_hidden_items_not_rendered);
     RUN_TEST(test_scroll_follows_selection_down);
     RUN_TEST(test_scroll_follows_selection_up);

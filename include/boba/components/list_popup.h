@@ -80,6 +80,13 @@ typedef struct TuiListPopup
      * selected foreground, so an unset meta renders exactly as the
      * item text does. */
     TuiColor meta_color;
+
+    /* Draw the SELECTED row in reverse video (SGR 7) instead of on
+     * selected_bg — the highlight a terminal that cannot show the
+     * caller's chosen background still has. Set via
+     * tui_list_popup_set_selected_reverse; 0 by default, so a caller
+     * that never asks for it paints exactly as before. */
+    int selected_reverse;
 } TuiListPopup;
 
 /* Create a new popup. Returns NULL on failure. */
@@ -157,6 +164,12 @@ void tui_list_popup_set_colors(TuiListPopup *popup, TuiColor border_color,
  * inherits the row's item/selected foreground. Separate from
  * set_colors so callers that never set metadata never touch it. */
 void tui_list_popup_set_meta_color(TuiListPopup *popup, TuiColor meta_color);
+
+/* Draw the selected row in REVERSE VIDEO (SGR 7) rather than on
+ * selected_bg. For a terminal whose color tier cannot show the caller's
+ * chosen background — and, more generally, for the ANSI-idiomatic
+ * highlight, which needs no color at all. Off by default. */
+void tui_list_popup_set_selected_reverse(TuiListPopup *popup, int on);
 
 /* Render popup to output buffer. Produces no output if not visible. */
 void tui_list_popup_view(const TuiListPopup *popup, DynamicBuffer *out);

@@ -87,6 +87,7 @@
 #include "component.h"
 #include "dynamic_buffer.h"
 #include "msg.h"
+#include "style.h"
 #include "terminal_profile.h"
 
 /* ------------------------------------------------------------------ */
@@ -165,7 +166,16 @@ typedef struct TuiRowSink TuiRowSink;
 void tui_row_text(TuiRowSink *s, const char *utf8, size_t len);
 
 /* Apply / reset an SGR attribute for subsequent text on this row.
- * boba maps TuiAttr to SGR byte sequences. */
+ * boba maps TuiAttr to SGR byte sequences.
+ *
+ * The colors are TuiColor, not raw components, so the CALLER owns the
+ * tier decision: an ANSI16 color emits the palette slot (30+n / 90+n),
+ * ANSI256 emits 38;5;n, RGB emits 38;2;r;g;b, and TUI_COLOR_NONE emits
+ * nothing at all — the "no color" that used to be a separate has_fg
+ * flag. A consumer that knows the terminal cannot show 24-bit says so
+ * in the color it hands over, and this function never guesses: a
+ * downsample here would be an approximation of the palette, and the
+ * palette is the caller's to know. */
 typedef struct TuiAttr
 {
     int bold;
@@ -173,10 +183,8 @@ typedef struct TuiAttr
     int italic;
     int underline;
     int strikethrough;
-    int has_fg;
-    int fg_r, fg_g, fg_b;
-    int has_bg;
-    int bg_r, bg_g, bg_b;
+    TuiColor fg; /* TUI_COLOR_NONE = inherit */
+    TuiColor bg; /* TUI_COLOR_NONE = inherit */
 } TuiAttr;
 
 void tui_row_attr(TuiRowSink *s, TuiAttr a);

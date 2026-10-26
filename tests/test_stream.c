@@ -1280,6 +1280,92 @@ static void test_sink_tabs_wide_pad_attrs(void)
     h_free(h);
 }
 
+/* The attr's colors are TuiColor, so the CALLER owns the tier. Pin all
+ * four spellings: an ANSI16 color emits the palette SLOT (30+n for the
+ * standard half, 90+n-8 for the bright one) and never a 24-bit
+ * sequence, ANSI256 its 38;5;n form, RGB its 38;2;r;g;b, and NONE
+ * nothing at all. This is what lets an app hand boba a 16-color
+ * decision: boba never downsamples, because a downsample would be a
+ * guess at a palette the app already knows. */
+static void sink_probe_color_tiers(const TuiBlock *blk, const char *text,
+                                   size_t len, int width, TuiRowSink *sink,
+                                   void *ud)
+{
+    (void)blk;
+    (void)text;
+    (void)len;
+    (void)width;
+    (void)ud;
+
+    TuiAttr rgb = { 0 };
+    rgb.fg = tui_color_rgb(0x62, 0x72, 0xa4);
+    tui_row_attr(sink, rgb);
+    tui_row_text(sink, "rgb", 3);
+    tui_row_attr_reset(sink);
+    tui_row_end(sink);
+
+    TuiAttr a16 = { 0 };
+    a16.fg = tui_color_ansi(6); /* standard half: 30 + 6 */
+    a16.bg = tui_color_ansi(8); /* bright half: 100 + 8 - 8 */
+    tui_row_attr(sink, a16);
+    tui_row_text(sink, "a16", 3);
+    tui_row_attr_reset(sink);
+    tui_row_end(sink);
+
+    TuiAttr a256 = { 0 };
+    a256.fg = tui_color_ansi(200);
+    tui_row_attr(sink, a256);
+    tui_row_text(sink, "a256", 4);
+    tui_row_attr_reset(sink);
+    tui_row_end(sink);
+
+    /* NONE is the "no color" that used to be a has_fg flag: the attrs
+     * that remain (bold here) are all that is emitted. */
+    TuiAttr none = { 0 };
+    none.bold = 1;
+    tui_row_attr(sink, none);
+    tui_row_text(sink, "none", 4);
+    tui_row_attr_reset(sink);
+    tui_row_end(sink);
+}
+
+static void test_sink_attr_colors_are_tier_aware(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    TuiTranscriptConfig cfg = {
+        .render_block = sink_probe_color_tiers,
+        .render_live = test_render_live,
+        .streams = streams,
+        .n_streams = 1,
+    };
+    TuiTranscript *t = tui_transcript_create(&cfg);
+    assert(t);
+    H *h = calloc(1, sizeof(*h));
+    h->text = malloc(OUT_CAP);
+    h->out = tmpfile();
+    h->t = t;
+    TuiRuntimeConfig rcfg = { .raw_mode = 0, .output = h->out };
+    h->rt =
+        tui_runtime_create((TuiComponent *)tui_transcript_component(t), t, &rcfg);
+    tui_runtime_set_transcript(h->rt, t);
+    tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
+
+    h_send(h, tui_msg_stream_delta(0, "unit\nnext\n", 10));
+    h_flush(h);
+    const char *out = h_read(h);
+
+    /* 24-bit: the RGB the caller asked for, verbatim */
+    assert(strstr(out, "\x1b[0;38;2;98;114;164mrgb\x1b[0m") != NULL);
+    /* 16-color: palette indexes, and NO 38;2 anywhere near them */
+    assert(strstr(out, "\x1b[0;36;100ma16\x1b[0m") != NULL);
+    /* 256-color: the 38;5;n form */
+    assert(strstr(out, "\x1b[0;38;5;200ma256\x1b[0m") != NULL);
+    /* NONE: only the flags that were set */
+    assert(strstr(out, "\x1b[0;1mnone\x1b[0m") != NULL);
+
+    h_free(h);
+}
+
 /* ------------------------------------------------------------------ */
 /* Resize: live re-layouts; committed rows stay put                    */
 /* ------------------------------------------------------------------ */
@@ -2180,6 +2266,7 @@ int main(void)
     RUN_TEST(test_clear_resets_and_emits_nothing);
     RUN_TEST(test_trim_after_commit);
     RUN_TEST(test_sink_tabs_wide_pad_attrs);
+    RUN_TEST(test_sink_attr_colors_are_tier_aware);
     RUN_TEST(test_resize_live_relayout);
     RUN_TEST(test_split_escape_sequence_passthrough);
     RUN_TEST(test_no_bare_lf_anywhere);

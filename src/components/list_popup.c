@@ -579,6 +579,13 @@ void tui_list_popup_set_meta_color(TuiListPopup *p, TuiColor meta_color)
     p->meta_color = meta_color;
 }
 
+void tui_list_popup_set_selected_reverse(TuiListPopup *p, int on)
+{
+    if (!p)
+        return;
+    p->selected_reverse = on ? 1 : 0;
+}
+
 /* Helper: emit fg color SGR if color is not NONE */
 static void emit_fg(DynamicBuffer *out, TuiColor c)
 {
@@ -663,6 +670,8 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
         if (is_selected) {
             emit_fg(out, p->selected_marker_color);
             emit_bg(out, p->selected_bg);
+            if (p->selected_reverse)
+                dynamic_buffer_append_str(out, SGR_REVERSE);
         } else {
             emit_fg(out, p->border_color);
             emit_bg(out, p->selected_bg);
@@ -673,6 +682,8 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
         if (is_selected) {
             emit_bg(out, p->selected_bg);
             emit_fg(out, p->selected_fg);
+            if (p->selected_reverse)
+                dynamic_buffer_append_str(out, SGR_REVERSE);
         } else {
             emit_bg(out, p->selected_bg);
             emit_fg(out, p->item_color);
