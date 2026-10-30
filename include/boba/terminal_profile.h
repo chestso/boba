@@ -88,7 +88,18 @@ typedef struct TuiTerminalProfile
      * that the terminal has only 16 colors. */
     int truecolor;
 
-    /* Cell geometry in pixels, 0 when unknown (`CSI 16 t` reply). */
+    /* Cell geometry in pixels, 0 when unknown (`CSI 16 t` reply).
+     *
+     * The UNIT is the terminal's own choice — there is no ecosystem
+     * convention for this report. kitty, foot and wezterm answer in
+     * DEVICE pixels (and draw image pixels 1:1, so the pair is
+     * self-consistent); portty answers in LOGICAL pixels and scales
+     * what a client sends by its content scale; iTerm2 answers via
+     * OSC 1337;ReportCellSize in points plus a device-px-per-point
+     * scale factor. Consume these figures for pixel RESOLUTION
+     * decisions only — never for layout, which belongs in cells — and
+     * ask OSC 1337;ReportCellSize first when it matters: it is the
+     * only report that defines its units. */
     int cell_w_px, cell_h_px;
 
     /* Kitty keyboard protocol support: set when the terminal answered
