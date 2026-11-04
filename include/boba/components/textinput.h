@@ -160,6 +160,10 @@ typedef struct TuiTextInput
     TuiTextInputClipboardFn clipboard_fn; /* NULL = report nothing */
     void *clipboard_ud;
     int clipboard_cmd; /* 0 = emit no TuiCmd at all (default) */
+
+    /* Ctrl+A: 0 = move to line start (readline, the default), 1 = select
+     * all. Declared by the app; never derived from the platform. */
+    int ctrl_a_select_all;
 } TuiTextInput;
 
 /* Configuration for creating text input */
@@ -366,6 +370,14 @@ void tui_textinput_set_clipboard_cmd(TuiTextInput *input, int enable);
  * NULL / 0 before the first one. Kills and cuts fill it; an explicit copy
  * does not. */
 const char *tui_textinput_kill_buffer(const TuiTextInput *input, size_t *len);
+
+/* Ctrl+A: move to the start of the line (the readline/emacs binding, the
+ * default) or select the whole input (the Windows editing convention).
+ * boba does not infer this from the platform — an app that wants Windows
+ * behaviour asks for it, so a terminal session over ssh behaves like the
+ * app it is, not like the kernel underneath. Default 0. Cmd+A selects all
+ * regardless. */
+void tui_textinput_set_ctrl_a_select_all(TuiTextInput *input, int enable);
 
 /* Get echo mode */
 int tui_textinput_get_echo_mode(const TuiTextInput *input);

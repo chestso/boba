@@ -1119,6 +1119,319 @@ void tui_textinput_free(TuiTextInput *input)
     free(input);
 }
 
+/* --- Windows / macOS editing keys ------------------------------------
+ *
+ * The platform never decides a binding: a Mac user over ssh to a Linux
+ * box must still get Mac keys, so an app asks for what it wants and boba
+ * accepts both encodings at once. Modifiers decide; where they collide
+ * with a readline/emacs binding, the readline binding wins (it is
+ * handled by the switch below, which the resolver leaves alone).
+ *
+ * META is Cmd/Super. The switch below has no entry for most of these
+ * chords, so the resolver claims them BEFORE it; every existing emacs
+ * binding is untouched, and Ctrl+C / Ctrl+D keep their parser-level
+ * meanings (interrupt / EOF). */
+
+/* Move to the very start / end of the buffer. */
+static void buffer_home(TuiTextInput *input)
+{
+    input->cursor_byte = 0;
+    recalculate_cursor_position(input);
+}
+
+static void buffer_end(TuiTextInput *input)
+{
+    input->cursor_byte = input->text_len;
+    recalculate_cursor_position(input);
+}
+
+/* Is there a line below the cursor's? */
+static int has_next_line(const TuiTextInput *input)
+{
+    for (size_t i = input->cursor_byte; i < input->text_len; i++) {
+        if (input->text[i] == '\n')
+            return 1;
+    }
+    return 0;
+}
+
+/* Ctrl+Delete / Alt+d: kill from the cursor to the end of the next word. */
+static void kill_word_forward(TuiTextInput *input, int was_kill, ClipEvent *ev)
+{
+    if (input->cursor_byte >= input->text_len)
+        return;
+
+    size_t pos = input->cursor_byte;
+
+    /* Skip the current word */
+    while (pos < input->text_len && is_word_char(input, input->text[pos]))
+        pos++;
+
+    /* Skip the punctuation/spacing after it, as the backward scan does */
+    while (pos < input->text_len && !is_word_char(input, input->text[pos]))
+        pos++;
+
+    kill_range(input, input->cursor_byte, pos, KILL_FORWARD, was_kill,
+               CLIP_KILL, ev);
+}
+
+/* Cmd+A / the Ctrl+A knob: select everything. Shift-made, so the next
+ * insertion replaces it and the next plain motion collapses it. */
+static void select_all(TuiTextInput *input)
+{
+    input->mark_byte = 0;
+    input->cursor_byte = input->text_len;
+    input->has_mark = 1;
+    input->mark_from_shift = 1;
+    recalculate_cursor_position(input);
+}
+
+/* Cmd+C / Ctrl+Insert / Ctrl+Shift+C: fill `ev` with the selection, and
+ * ONLY the selection. No selection copies nothing — whatever happens on a
+ * terminal, an explicit copy never falls back to the whole input (M-w
+ * does, and keeps doing so). The selection stays: a copy is not an edit. */
+static void copy_selection(TuiTextInput *input, ClipEvent *ev)
+{
+    size_t start = 0, end = 0;
+    if (!selection_range(input, &start, &end) || end <= start)
+        return;
+    ev->start = start;
+    ev->end = end;
+    ev->kind = CLIP_COPY;
+}
+
+/* Cmd+X / Shift+Delete: cut the selection. Nothing without one. */
+static void cut_selection(TuiTextInput *input, ClipEvent *ev)
+{
+    size_t start = 0, end = 0;
+    if (!selection_range(input, &start, &end) || end <= start)
+        return;
+    /* was_kill = 0: a cut always starts a fresh ring, so the delivered
+     * text is exactly the cut bytes. */
+    kill_range(input, start, end, KILL_BACKWARD, 0, CLIP_CUT, ev);
+}
+
+/* M-w: copy the selection, or (no mark) the whole input — the
+ * viewport's "no-mark = current line" rule. This fallback lives on M-w
+ * only; see copy_selection(). */
+static void copy_region_or_all(TuiTextInput *input, ClipEvent *ev)
+{
+    size_t start = 0, end = 0;
+    if (selection_range(input, &start, &end) && end > start) {
+        ev->start = start;
+        ev->end = end;
+        ev->kind = CLIP_COPY;
+    } else if (input->text_len > 0) {
+        ev->start = 0;
+        ev->end = input->text_len;
+        ev->kind = CLIP_COPY;
+    }
+    clear_mark_if_set(input);
+}
+
+/* The Windows/macOS editing chords, resolved in one place BEFORE the
+ * readline switch. Returns 1 when the key was fully handled; 0 lets the
+ * switch (emacs bindings, plain motion, plain editing) have it.
+ *
+ * One case per key, and the conditions are modifier tests rather than a
+ * key table: the same physical chord arrives as a bare rune from a
+ * legacy terminal and as a key event with real modifiers under the kitty
+ * protocol, and both land here. */
+static int edit_shortcut(TuiTextInput *input, const TuiKeyMsg *key,
+                         int was_kill, ClipEvent *ev)
+{
+    int shift = (key->mods & TUI_MOD_SHIFT) != 0;
+    int word = (key->mods & (TUI_MOD_CTRL | TUI_MOD_ALT)) != 0;
+    int cmd = (key->mods & TUI_MOD_META) != 0;
+
+    switch (key->key) {
+    case TUI_KEY_LEFT:
+        if (!word && !cmd)
+            return 0; /* plain / shift only: the generic motion path */
+        begin_motion(input, shift);
+        if (cmd)
+            cursor_home(input);
+        else
+            cursor_word_left(input);
+        return 1;
+
+    case TUI_KEY_RIGHT:
+        if (!word && !cmd)
+            return 0;
+        begin_motion(input, shift);
+        if (cmd)
+            cursor_end(input);
+        else
+            cursor_word_right(input);
+        return 1;
+
+    case TUI_KEY_UP:
+        if (cmd) {
+            begin_motion(input, shift);
+            buffer_home(input);
+            return 1;
+        }
+        if (shift && !word) {
+            /* Shift+Up selects by line, and CLAMPS at the first one
+             * instead of walking into the history. */
+            begin_motion(input, shift);
+            if (input->cursor_row > 0)
+                cursor_up(input);
+            else
+                buffer_home(input);
+            return 1;
+        }
+        return 0;
+
+    case TUI_KEY_DOWN:
+        if (cmd) {
+            begin_motion(input, shift);
+            buffer_end(input);
+            return 1;
+        }
+        if (shift && !word) {
+            begin_motion(input, shift);
+            if (has_next_line(input))
+                cursor_down(input);
+            else
+                buffer_end(input);
+            return 1;
+        }
+        return 0;
+
+    case TUI_KEY_HOME:
+        begin_motion(input, shift);
+        if (word)
+            buffer_home(input);
+        else
+            cursor_home(input);
+        return 1;
+
+    case TUI_KEY_END:
+        begin_motion(input, shift);
+        if (word)
+            buffer_end(input);
+        else
+            cursor_end(input);
+        return 1;
+
+    case TUI_KEY_BACKSPACE:
+        if (cmd) {
+            kill_to_line_start(input, was_kill, ev); /* Cmd+Backspace */
+            return 1;
+        }
+        if (word) {
+            kill_word_backward(input, was_kill, ev); /* Ctrl/Alt/ESC-DEL */
+            return 1;
+        }
+        return 0;
+
+    case TUI_KEY_DELETE:
+        if (shift && !word) {
+            cut_selection(input, ev); /* Shift+Delete cuts, if there is a selection */
+            return 1;
+        }
+        if (word) {
+            kill_word_forward(input, was_kill, ev); /* Ctrl+Delete */
+            return 1;
+        }
+        return 0;
+
+    case TUI_KEY_INSERT:
+        if (key->mods & TUI_MOD_CTRL) {
+            copy_selection(input, ev); /* Ctrl+Insert copies, if selected */
+            return 1;
+        }
+        if (shift) {
+            ev->kind = CLIP_PASTE_REQUEST; /* Shift+Insert asks for a paste */
+            return 1;
+        }
+        return 0;
+
+    default:
+        break;
+    }
+
+    if (key->key != TUI_KEY_NONE)
+        return 0;
+
+    /* Rune chords: the modifiers are all that tell them apart. */
+    uint32_t r = key->rune;
+    char lower = (r >= 'A' && r <= 'Z') ? (char)(r - 'A' + 'a') : (char)r;
+
+    if (cmd) {
+        switch (lower) {
+        case 'a':
+            select_all(input); /* Cmd+A */
+            return 1;
+        case 'c':
+            copy_selection(input, ev); /* Cmd+C */
+            return 1;
+        case 'x':
+            cut_selection(input, ev); /* Cmd+X */
+            return 1;
+        case 'v':
+            ev->kind = CLIP_PASTE_REQUEST; /* Cmd+V */
+            return 1;
+        case 'z':
+            if (!shift) { /* Cmd+Z; Cmd+Shift+Z (redo) is unbound */
+                undo_pop(input);
+                input->snap_valid = 0;
+            }
+            return 1;
+        default:
+            /* SWALLOW every other Cmd+rune. Without this arm the rune
+             * falls through to insert_codepoint() and Cmd+Q types "q". */
+            return 1;
+        }
+    }
+
+    if ((key->mods & TUI_MOD_CTRL) && shift) {
+        if (lower == 'c') {
+            copy_selection(input, ev); /* Ctrl+Shift+C */
+            return 1;
+        }
+        if (lower == 'v') {
+            ev->kind = CLIP_PASTE_REQUEST; /* Ctrl+Shift+V */
+            return 1;
+        }
+        return 0; /* other Ctrl+Shift chords keep their current reading */
+    }
+
+    if ((key->mods & TUI_MOD_CTRL) && lower == 'z' &&
+        !(key->mods & TUI_MOD_ALT)) {
+        undo_pop(input);
+        /* undo_pop() edited the text: drop the snapshot this key took, or
+         * undo_commit() would push the pre-undo state as a NEW undo entry
+         * and the stack would never shrink. */
+        input->snap_valid = 0;
+        return 1;
+    }
+
+    if ((key->mods & TUI_MOD_ALT) && !(key->mods & TUI_MOD_CTRL)) {
+        switch (lower) {
+        case 'b':
+            begin_motion(input, shift);
+            cursor_word_left(input);
+            return 1;
+        case 'f':
+            begin_motion(input, shift);
+            cursor_word_right(input);
+            return 1;
+        case 'd':
+            kill_word_forward(input, was_kill, ev);
+            return 1;
+        case 'w':
+            copy_region_or_all(input, ev);
+            return 1;
+        default:
+            return 0; /* Alt+other keeps today's swallow in the switch */
+        }
+    }
+
+    return 0;
+}
+
 /* Update text input with message */
 TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
 {
@@ -1179,6 +1492,12 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     /* What this key press wants done with the clipboard. The edit paths
      * fill it in; it is delivered once, at the tail. */
     ClipEvent ev = { CLIP_NONE, 0, 0 };
+
+    /* Windows/macOS editing chords first: the switch below has no entry
+     * for most of them, and every entry it DOES have keeps precedence
+     * (readline wins, and Ctrl+C / Ctrl+D never reach here as keys). */
+    if (edit_shortcut(input, &key, was_kill, &ev))
+        goto done;
 
     /* Handle special keys */
     switch (key.key) {
@@ -1281,8 +1600,14 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                         input->has_mark = 1;
                     }
                 } else if (key.rune == 'a' || key.rune == 'A') {
-                    /* Ctrl+A: Move to start of line */
-                    cursor_home(input);
+                    /* Ctrl+A: select-all when the app asked for Windows
+                     * semantics, otherwise move to the start of the line
+                     * (readline). Never platform-derived — see
+                     * tui_textinput_set_ctrl_a_select_all(). */
+                    if (input->ctrl_a_select_all)
+                        select_all(input);
+                    else
+                        cursor_home(input);
                 } else if (key.rune == 'b' || key.rune == 'B') {
                     /* Ctrl+B: Move back one character */
                     cursor_left(input);
@@ -1366,27 +1691,9 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     return tui_update_result_none();
                 }
             } else if ((key.mods & TUI_MOD_ALT) && !(key.mods & TUI_MOD_CTRL)) {
-                /* Alt-modified emacs keys. Currently only M-w (copy
-                 * region or whole input). Other Alt+key combinations are
-                 * intentionally swallowed rather than inserted as text. */
-                if (key.rune == 'w' || key.rune == 'W') {
-                    size_t sel_start, sel_end;
-                    if (selection_range(input, &sel_start, &sel_end) &&
-                        sel_end > sel_start) {
-                        ev.start = sel_start;
-                        ev.end = sel_end;
-                        ev.kind = CLIP_COPY;
-                    } else if (input->text_len > 0) {
-                        /* No mark: copy the whole current input, matching
-                         * the viewport's "no-mark = current line" rule.
-                         * The fallback stays on M-w only: every other copy
-                         * binding copies nothing without a selection. */
-                        ev.start = 0;
-                        ev.end = input->text_len;
-                        ev.kind = CLIP_COPY;
-                    }
-                    clear_mark_if_set(input);
-                }
+                /* An Alt chord the resolver did not claim. Swallowed
+                 * rather than inserted as text: M-b/M-f/M-d/M-w and the
+                 * Alt+motion keys are handled by edit_shortcut(). */
             } else if (key.text_len > 0) {
                 /* The terminal reported what the key produced (the kitty
                  * protocol's associated text): insert THAT, not the key
@@ -1414,8 +1721,9 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         break;
     }
 
-    /* Everything the switch above did compiles a ClipEvent; delivery happens
-     * here, once, after undo_commit(), so the hook sees the final text. */
+/* Everything above compiles a ClipEvent; delivery happens here, once,
+ * after undo_commit(), so the hook sees the final text. */
+done:
     undo_commit(input);
 
     TuiCmd *cmd = NULL;
@@ -2458,6 +2766,12 @@ const char *tui_textinput_kill_buffer(const TuiTextInput *input, size_t *len)
     if (!input)
         return NULL;
     return input->kill_buf;
+}
+
+void tui_textinput_set_ctrl_a_select_all(TuiTextInput *input, int enable)
+{
+    if (input)
+        input->ctrl_a_select_all = enable ? 1 : 0;
 }
 
 void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color)
