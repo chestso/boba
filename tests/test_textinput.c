@@ -2232,6 +2232,62 @@ static void test_ctrl_d_empty_multiline_is_noop(void)
     tui_textinput_free(input);
 }
 
+/* The parser sends Ctrl+D as TUI_MSG_EOF, not as a key press: the component
+ * has to act on the message itself, or Ctrl+D does nothing in every app that
+ * forwards what it is given. */
+static void test_eof_message_deletes_char_under_cursor(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+    tui_textinput_set_cursor(input, 3);
+    run_update(input, tui_msg_eof());
+    assert(strcmp(tui_textinput_text(input), "helo") == 0);
+    assert(tui_textinput_cursor(input) == 3);
+    tui_textinput_free(input);
+}
+
+/* At end of line there is nothing under the cursor: the message is a no-op. */
+static void test_eof_message_at_end_of_line_is_noop(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+    run_update(input, tui_msg_eof());
+    assert(strcmp(tui_textinput_text(input), "hello") == 0);
+    assert(tui_textinput_cursor(input) == 5);
+    tui_textinput_free(input);
+}
+
+/* Empty input: an end-of-input the textinput does not act on. Quitting is
+ * the app's decision (see tui_msg_eof), and this component never makes it. */
+static void test_eof_message_on_empty_input_is_noop(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_eof());
+    assert(tui_textinput_len(input) == 0);
+    tui_textinput_free(input);
+}
+
+/* The EOF edit is an edit: one undo entry, and Ctrl+Z puts the character
+ * back. */
+static void test_eof_message_is_undoable(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "hello");
+    tui_textinput_set_cursor(input, 0);
+    run_update(input, tui_msg_eof());
+    assert(strcmp(tui_textinput_text(input), "ello") == 0);
+
+    send_ctrl(input, 'z');
+    assert(strcmp(tui_textinput_text(input), "hello") == 0);
+    /* Undo did not grow the stack. */
+    assert(input->undo_count == 5);
+    tui_textinput_free(input);
+}
+
 /* tui_msg_char('\n') sends a char message with rune 0x0A which is < 0x20,
  * so the textinput should NOT insert it — control characters are ignored
  * except Tab. Use TUI_KEY_ENTER + TUI_MOD_SHIFT for newline insertion. */
@@ -3265,6 +3321,10 @@ int main(void)
     RUN_TEST(test_ctrl_d_empty_is_noop);
     RUN_TEST(test_ctrl_d_nonempty_deletes_char);
     RUN_TEST(test_ctrl_d_empty_multiline_is_noop);
+    RUN_TEST(test_eof_message_deletes_char_under_cursor);
+    RUN_TEST(test_eof_message_at_end_of_line_is_noop);
+    RUN_TEST(test_eof_message_on_empty_input_is_noop);
+    RUN_TEST(test_eof_message_is_undoable);
     RUN_TEST(test_soft_wrap_height);
     RUN_TEST(test_soft_wrap_height_short);
     RUN_TEST(test_soft_wrap_height_exact);

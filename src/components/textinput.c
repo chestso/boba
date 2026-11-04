@@ -1461,6 +1461,19 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         return tui_update_result_none();
     }
 
+    /* Ctrl+D arrives as TUI_MSG_EOF, a semantic verdict from the input
+     * parser — the control byte and the kitty protocol's `CSI 100;5u`
+     * alike — never as a ctrl+d key press. readline's meaning for it is
+     * delete-char, so that is what the component does; it never decides to
+     * quit, because "end of input" is the app's call to make (a shell
+     * exits, an editor waits, a MUD client never leaves a session). */
+    if (msg.type == TUI_MSG_EOF) {
+        undo_snapshot(input);
+        delete_at(input);
+        undo_commit(input);
+        return tui_update_result_none();
+    }
+
     if (msg.type != TUI_MSG_KEY_PRESS)
         return tui_update_result_none();
 
@@ -1612,9 +1625,11 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     /* Ctrl+B: Move back one character */
                     cursor_left(input);
                 } else if (key.rune == 'd' || key.rune == 'D') {
-                    /* Ctrl+D: delete character under cursor.
-                     * EOF-on-empty is handled by the component via
-                     * TUI_MSG_EOF, not here. The textinput never
+                    /* Ctrl+D: delete character under cursor. The parser
+                     * never emits this as a key press — it sends
+                     * TUI_MSG_EOF, handled above — but a host that
+                     * re-issues the verdict as a key (or a test that
+                     * injects one) gets the same edit. The textinput never
                      * decides to quit. */
                     delete_at(input);
                 } else if (key.rune == 'e' || key.rune == 'E') {

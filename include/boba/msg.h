@@ -19,7 +19,8 @@ typedef enum
     TUI_MSG_FOCUS,              /* Component gained focus */
     TUI_MSG_BLUR,               /* Component lost focus */
     TUI_MSG_LINE_SUBMIT,        /* Line submitted (Enter pressed in single-line mode) */
-    TUI_MSG_EOF,                /* End of input (Ctrl+D with empty input) */
+    TUI_MSG_EOF,                /* End of input (Ctrl+D) — a textinput deletes the
+                                 * character under the cursor; quitting is the app's call */
     TUI_MSG_INTERRUPT,          /* Ctrl+C — interrupt current operation */
     TUI_MSG_PASTE_START,        /* Bracketed paste begins (no payload) */
     TUI_MSG_PASTE,              /* Bracketed paste payload */
@@ -232,7 +233,10 @@ TuiMsg tui_msg_blur(void);
 /* Create an interrupt message (Ctrl+C) */
 TuiMsg tui_msg_interrupt(void);
 
-/* Create an EOF message (Ctrl+D) */
+/* Create an EOF message (Ctrl+D, EOT). The textinput's reading of it is
+ * readline's delete-char: the character under the cursor goes, and the
+ * component never decides to quit — what an end of input MEANS (a shell
+ * exits, a MUD client never leaves a session) is the app's call. */
 TuiMsg tui_msg_eof(void);
 
 /* Create a custom message */
