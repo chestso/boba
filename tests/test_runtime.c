@@ -1060,6 +1060,8 @@ static size_t fill_three(TuiIoSource *out, size_t cap, void *data)
 {
     (void)data;
     assert(cap >= 3);
+    /* Like every fill here: handle + flags only, `kind` stays as the
+     * runtime zeroed it (TUI_SRC_FD). */
     out[0].handle = 60;
     out[0].flags = TUI_IO_READ;
     out[1].handle = 61;
@@ -1351,6 +1353,13 @@ static size_t two_sock_fill(TuiIoSource *out, size_t cap, void *data)
     (void)data;
     s_two_fill_calls++;
     size_t n = 0;
+    /* Only handle + flags are set: `kind` is left alone on purpose.
+     * The runtime hands this array over zeroed, so an unset kind means
+     * TUI_SRC_FD — a fill that had to initialize every field would drag
+     * the whole struct into every consumer for no reason. (This is also
+     * the canary for that guarantee: if the runtime ever stops zeroing,
+     * `kind` comes back as stack garbage, the source is skipped, and
+     * nothing is ever dispatched.) */
     /* A: WRITE until connect completes AND payload sent; then READ
      * (awaiting the echo). B: READ the whole time. */
     if (!s_two.a_sent) {
@@ -1413,13 +1422,16 @@ static void two_sock_ready(intptr_t handle, unsigned ready, void *data)
 }
 
 /* Watchdog tick: quit only if the two-socket pattern failed to
- * complete in ~100 ticks (10s) — a deadlock guard, not the exit path
- * (the exit path is two_sock_ready posting the done message). */
+ * complete in ~30 ticks (3s) — a deadlock guard, not the exit path
+ * (the exit path is two_sock_ready posting the done message). Kept well
+ * under the 10s external test watchdog (`scripts/test-watchdog.sh`) so a
+ * regression fails here, as a readable assertion, instead of being
+ * killed from outside mid-run. */
 static int s_two_tick_count = 0;
 static void two_sock_tick(void *data)
 {
     (void)data;
-    if (++s_two_tick_count > 100) {
+    if (++s_two_tick_count > 30) {
         TuiMsg msg = tui_msg_custom(WAKEUP_MSG_TYPE, NULL);
         tui_runtime_post(s_tick_runtime, msg);
     }

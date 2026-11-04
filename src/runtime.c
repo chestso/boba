@@ -1846,10 +1846,14 @@ int tui_runtime_run(TuiRuntime *runtime)
         /* Fill the external-fd subscriptions for this wait (Elm
          * subscriptions in C idiom: re-declared every cycle, the
          * runtime waits on whatever the app currently wants — no
-         * register/unregister lifecycle). */
+         * register/unregister lifecycle). Zeroed first: a fill that sets
+         * only handle + flags must not inherit this frame's garbage in
+         * `kind`, where any value but TUI_SRC_FD silently drops the
+         * source from the wait set (see TuiFillIoSources). */
         TuiIoSource ext[TUI_IO_SOURCE_MAX];
         size_t ext_n = 0;
         nfds_t ext_idx[TUI_IO_SOURCE_MAX]; /* poll index per filled entry */
+        memset(ext, 0, sizeof(ext));
         if (runtime->config.fill_io_sources) {
             ext_n = runtime->config.fill_io_sources(
                 ext, TUI_IO_SOURCE_MAX, runtime->config.event_data);
@@ -2073,9 +2077,11 @@ int tui_runtime_run(TuiRuntime *runtime)
          * since last cycle is rebound via WSAEventSelect. A
          * TUI_SRC_HANDLE source is waited on directly — no binding,
          * no slot event. App-array reordering just triggers extra
-         * rebinds — correct, negligible. */
+         * rebinds — correct, negligible. Zeroed first, same contract as
+         * the POSIX loop: unset fields mean TUI_SRC_FD / no handle. */
         TuiIoSource ext[TUI_IO_SOURCE_MAX];
         size_t ext_n = 0;
+        memset(ext, 0, sizeof(ext));
         if (runtime->config.fill_io_sources) {
             ext_n = runtime->config.fill_io_sources(
                 ext, TUI_IO_SOURCE_MAX, runtime->config.event_data);

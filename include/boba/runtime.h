@@ -88,6 +88,10 @@ typedef struct TuiIoSource
  * that went away simply stop being returned; new ones appear. This is
  * the subscriptions function (see above). Zero = nothing to wait on.
  *
+ * The array the runtime hands you is ZEROED before each call, so a fill
+ * may set only the fields it means (handle + flags) and leave `kind` at
+ * TUI_SRC_FD. Set `kind` explicitly only for a Windows SOCKET or HANDLE.
+ *
  * Consumer obligations:
  * - Spurious wakeups are allowed; re-check state (getsockopt(SO_ERROR)
  *   after connect completes, EAGAIN-safe reads/writes).
