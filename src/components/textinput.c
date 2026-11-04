@@ -242,6 +242,7 @@ static int insert_text(TuiTextInput *input, const char *text, size_t len)
     /* Insert new text */
     memcpy(input->text + input->cursor_byte, text, len);
     input->text_len += len;
+    input->revision++;
     input->cursor_byte += len;
     input->text[input->text_len] = '\0';
 
@@ -324,6 +325,7 @@ static void delete_before(TuiTextInput *input)
     memmove(input->text + prev, input->text + input->cursor_byte,
             input->text_len - input->cursor_byte);
     input->text_len -= del_len;
+    input->revision++;
     input->cursor_byte = prev;
     input->text[input->text_len] = '\0';
 
@@ -349,6 +351,7 @@ static void delete_at(TuiTextInput *input)
     memmove(input->text + input->cursor_byte, input->text + del_end,
             input->text_len - del_end);
     input->text_len -= (del_end - input->cursor_byte);
+    input->revision++;
     input->text[input->text_len] = '\0';
 
     clear_mark_if_set(input);
@@ -629,6 +632,7 @@ static void transpose_chars(TuiTextInput *input)
     memcpy(tmp, input->text + c2_start, c2_len);
     memcpy(tmp + c2_len, input->text + c1_start, c1_len);
     memcpy(input->text + c1_start, tmp, c1_len + c2_len);
+    input->revision++;
     if (tmp != stack_tmp)
         free(tmp);
 
@@ -716,6 +720,7 @@ static void undo_pop(TuiTextInput *input)
     memcpy(input->text, input->undo_stack[idx].text,
            input->undo_stack[idx].text_len + 1);
     input->text_len = input->undo_stack[idx].text_len;
+    input->revision++;
     input->cursor_byte = input->undo_stack[idx].cursor_byte;
     if (input->cursor_byte > input->text_len)
         input->cursor_byte = input->text_len;
@@ -839,6 +844,7 @@ static void replace_word(TuiTextInput *input, int start, int old_len,
     memcpy(input->text + start, new_word, (size_t)new_len);
 
     input->text_len = new_text_len;
+    input->revision++;
     input->text[input->text_len] = '\0';
     input->cursor_byte = (size_t)(start + new_len);
     clear_mark_if_set(input);
@@ -908,6 +914,7 @@ void tui_textinput_free(TuiTextInput *input)
     free(input->kill_buf);
     free(input->word_chars);
     free(input->snap_buf);
+    free(input->spans);
     undo_free(input);
     free(input);
 }
@@ -1111,6 +1118,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                         memmove(input->text + input->cursor_byte, input->text + end,
                                 input->text_len - end);
                         input->text_len -= (end - input->cursor_byte);
+                        input->revision++;
                         input->text[input->text_len] = '\0';
                         clear_mark_if_set(input);
                     }
@@ -1150,6 +1158,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                         memmove(input->text + start, input->text + input->cursor_byte,
                                 input->text_len - input->cursor_byte);
                         input->text_len -= del_len;
+                        input->revision++;
                         input->cursor_byte = start;
                         input->text[input->text_len] = '\0';
                         clear_mark_if_set(input);
@@ -1170,6 +1179,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                                 input->text + sel_end,
                                 input->text_len - sel_end);
                         input->text_len -= del_len;
+                        input->revision++;
                         if (input->cursor_byte > sel_end)
                             input->cursor_byte -= del_len;
                         else if (input->cursor_byte > sel_start)
@@ -1193,6 +1203,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                             memmove(input->text + pos, input->text + input->cursor_byte,
                                     input->text_len - input->cursor_byte);
                             input->text_len -= del_len;
+                            input->revision++;
                             input->cursor_byte = pos;
                             input->text[input->text_len] = '\0';
                             clear_mark_if_set(input);
@@ -1319,6 +1330,116 @@ static void render_continuation_prompt(const TuiTextInput *input,
     }
 }
 
+/* The span covering byte `pos`, or NULL. Spans are sorted and disjoint
+ * (set_spans enforces it), so the scan stops at the first span past pos;
+ * an input carries a handful, so a linear walk beats anything cleverer. */
+static const TuiTextSpan *span_covering(const TuiTextInput *input, size_t pos)
+{
+    for (size_t k = 0; k < input->n_spans; k++) {
+        if (pos < input->spans[k].start)
+            return NULL;
+        if (pos < input->spans[k].end)
+            return &input->spans[k];
+    }
+    return NULL;
+}
+
+/* Are the app's spans describing the text as it is NOW? A span set is
+ * stamped with the revision it was computed for; an edit moves the
+ * revision, and spans for text that no longer exists are never painted
+ * (a stale underline on the wrong bytes is worse than none for the one
+ * frame before the app re-declares). */
+static int spans_current(const TuiTextInput *input)
+{
+    return input->n_spans > 0 && input->spans_revision == input->revision;
+}
+
+/* Paint one run: the bytes [run, run+len) share one span and one
+ * selection state. A run in a span goes through the span's style (with
+ * reverse added inside a selection, so the span's own reset cannot end
+ * the highlight early); a plain run keeps the selection's SGR toggles. */
+static void emit_span_run(DynamicBuffer *out, const char *run, size_t len,
+                          const TuiTextSpan *span, int in_sel)
+{
+    if (len == 0)
+        return;
+    if (!span) {
+        if (in_sel)
+            dynamic_buffer_append_str(out, SGR_REVERSE);
+        dynamic_buffer_append(out, run, len);
+        if (in_sel)
+            dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
+        return;
+    }
+    TuiStyle st = span->style;
+    st.inline_ = 1;
+    if (in_sel)
+        st.reverse = 1;
+    char *z = (char *)malloc(len + 1);
+    char *styled = NULL;
+    if (z) {
+        memcpy(z, run, len);
+        z[len] = '\0';
+        styled = tui_style_render(&st, z);
+        free(z);
+    }
+    if (styled) {
+        dynamic_buffer_append_str(out, styled);
+        free(styled);
+    } else {
+        dynamic_buffer_append(out, run, len); /* OOM: unstyled beats absent */
+    }
+}
+
+/* render_text_range when spans are live: walk cluster by cluster
+ * (offsets are absolute, so a token wrapped across rows or scrolled
+ * half out of the window is styled exactly where its bytes are), cut a
+ * run whenever the span or the selection state changes, and compose the
+ * two. Echo mode still masks, one '*' per cluster. */
+static void render_text_range_spans(const TuiTextInput *input,
+                                    DynamicBuffer *out, size_t byte_start,
+                                    size_t byte_end)
+{
+    size_t sel_start = 0, sel_end = 0;
+    int has_sel = selection_range(input, &sel_start, &sel_end);
+
+    char *run = (char *)malloc(byte_end - byte_start + 1);
+    if (!run)
+        return;
+    size_t run_len = 0;
+    const TuiTextSpan *run_span = NULL;
+    int run_sel = 0;
+
+    size_t i = byte_start;
+    while (i < byte_end) {
+        size_t clen = 0;
+        (void)tui_next_cluster(input->text + i, input->text_len - i, &clen);
+        if (clen == 0)
+            clen = 1;
+        if (i + clen > byte_end)
+            clen = byte_end - i;
+
+        const TuiTextSpan *sp = span_covering(input, i);
+        int in_sel = has_sel && i >= sel_start && i < sel_end;
+        if (run_len > 0 && (sp != run_span || in_sel != run_sel)) {
+            emit_span_run(out, run, run_len, run_span, run_sel);
+            run_len = 0;
+        }
+        run_span = sp;
+        run_sel = in_sel;
+
+        if (input->echo_mode == 1)
+            run[run_len++] = '*';
+        else {
+            memcpy(run + run_len, input->text + i, clen);
+            run_len += clen;
+        }
+        i += clen;
+    }
+    emit_span_run(out, run, run_len, run_span, run_sel);
+    free(run);
+}
+
 /* Render input->text[byte_start..byte_end) to `out`, applying SGR_REVERSE
  * over any portion that falls inside the active selection (when has_mark
  * is set). Honors echo_mode by emitting one '*' per grapheme cluster —
@@ -1340,6 +1461,11 @@ static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
             dynamic_buffer_append_str(out, styled);
             free(styled);
         }
+        return;
+    }
+
+    if (spans_current(input) && byte_end > byte_start) {
+        render_text_range_spans(input, out, byte_start, byte_end);
         return;
     }
 
@@ -1792,6 +1918,7 @@ void tui_textinput_set_text(TuiTextInput *input, const char *text)
     memcpy(input->text, text, len);
     input->text[len] = '\0';
     input->text_len = len;
+    input->revision++;
     input->cursor_byte = len;
     clear_mark_if_set(input);
     recalculate_cursor_position(input);
@@ -1803,6 +1930,7 @@ void tui_textinput_clear(TuiTextInput *input)
     if (!input)
         return;
     input->text_len = 0;
+    input->revision++;
     input->cursor_byte = 0;
     input->cursor_row = 0;
     input->cursor_col = 0;
@@ -1984,10 +2112,10 @@ void tui_textinput_insert_completion(TuiTextInput *input, int word_start,
 {
     if (!input || !word)
         return;
-    int old_len = (int)input->cursor_byte - word_start;
-    if (old_len < 0)
-        old_len = 0;
-    replace_word(input, word_start, old_len, word);
+    if (word_start < 0)
+        word_start = 0;
+    tui_textinput_replace_range(input, (size_t)word_start, input->cursor_byte,
+                                word);
 }
 
 char *tui_textinput_word_at_cursor(const TuiTextInput *input, int *word_start)
@@ -2076,6 +2204,53 @@ int tui_textinput_get_echo_mode(const TuiTextInput *input)
 }
 
 /* Set styled-text highlight callback */
+uint64_t tui_textinput_revision(const TuiTextInput *input)
+{
+    return input ? input->revision : 0;
+}
+
+void tui_textinput_replace_range(TuiTextInput *input, size_t start, size_t end,
+                                 const char *text)
+{
+    if (!input || !text)
+        return;
+    if (end > input->text_len)
+        end = input->text_len;
+    if (start > end)
+        start = end;
+    undo_snapshot(input);
+    replace_word(input, (int)start, (int)(end - start), text);
+    undo_commit(input);
+}
+
+int tui_textinput_set_spans(TuiTextInput *input, const TuiTextSpan *spans,
+                            size_t n)
+{
+    if (!input)
+        return -1;
+    /* Validate before touching anything: sorted, disjoint, non-empty,
+     * inside the text. A bad set is refused whole and the old one stays. */
+    size_t prev_end = 0;
+    for (size_t k = 0; k < n; k++) {
+        if (!spans || spans[k].start >= spans[k].end ||
+            spans[k].end > input->text_len || spans[k].start < prev_end)
+            return -1;
+        prev_end = spans[k].end;
+    }
+    TuiTextSpan *copy = NULL;
+    if (n > 0) {
+        copy = (TuiTextSpan *)malloc(n * sizeof(*copy));
+        if (!copy)
+            return -1;
+        memcpy(copy, spans, n * sizeof(*copy));
+    }
+    free(input->spans);
+    input->spans = copy;
+    input->n_spans = n;
+    input->spans_revision = input->revision;
+    return 0;
+}
+
 void tui_textinput_set_text_renderer(TuiTextInput *input,
                                      char *(*fn)(const char *text,
                                                  size_t len,

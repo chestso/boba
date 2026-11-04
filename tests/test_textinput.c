@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <boba/ansi_sequences.h>
 #include <boba/cmd.h>
 #include <boba/components/textinput.h>
 #include <boba/dynamic_buffer.h>
@@ -2101,10 +2102,227 @@ static void test_grapheme_echo_masks_cluster_once(void)
     tui_textinput_free(input);
 }
 
+/* ---------- revision, replace_range, spans ---------- */
+
+/* The contract an app leans on: if the bytes changed, the revision
+ * changed; movement alone never moves it. Run through every kind of edit
+ * the component has, including the ones that bypass insert_text. */
+static void test_revision_tracks_text_changes(void)
+{
+    TuiTextInputConfig cfg = { .multiline = 1 };
+    TuiTextInput *in = tui_textinput_create(&cfg);
+    tui_textinput_set_history_size(in, 10);
+    tui_textinput_history_add(in, "from history");
+
+    struct
+    {
+        const char *what;
+        TuiMsg msg;
+    } steps[] = {
+        { "char", tui_msg_char('a', 0) },
+        { "char", tui_msg_char('b', 0) },
+        { "char", tui_msg_char('c', 0) },
+        { "left", tui_msg_key(TUI_KEY_LEFT, 0, 0) },
+        { "home", tui_msg_key(TUI_KEY_HOME, 0, 0) },
+        { "end", tui_msg_key(TUI_KEY_END, 0, 0) },
+        { "backspace", tui_msg_key(TUI_KEY_BACKSPACE, 0, 0) },
+        { "ctrl-t", tui_msg_key(TUI_KEY_NONE, 't', TUI_MOD_CTRL) },
+        { "ctrl-a", tui_msg_key(TUI_KEY_NONE, 'a', TUI_MOD_CTRL) },
+        { "delete", tui_msg_key(TUI_KEY_DELETE, 0, 0) },
+        { "ctrl-e", tui_msg_key(TUI_KEY_NONE, 'e', TUI_MOD_CTRL) },
+        { "ctrl-w", tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_CTRL) },
+        { "ctrl-y", tui_msg_key(TUI_KEY_NONE, 'y', TUI_MOD_CTRL) },
+        { "ctrl-k", tui_msg_key(TUI_KEY_NONE, 'k', TUI_MOD_CTRL) },
+        { "ctrl-_", tui_msg_key(TUI_KEY_NONE, '_', TUI_MOD_CTRL) },
+        { "up", tui_msg_key(TUI_KEY_UP, 0, 0) },
+        { "down", tui_msg_key(TUI_KEY_DOWN, 0, 0) },
+        { "up", tui_msg_key(TUI_KEY_UP, 0, 0) },
+        { "char", tui_msg_char('x', 0) },
+        { "ctrl-u", tui_msg_key(TUI_KEY_NONE, 'u', TUI_MOD_CTRL) },
+    };
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        char *before = strdup(tui_textinput_text(in));
+        uint64_t rev = tui_textinput_revision(in);
+        TuiUpdateResult r = tui_textinput_update(in, steps[i].msg);
+        if (r.cmd)
+            tui_cmd_free(r.cmd);
+        int changed = strcmp(before, tui_textinput_text(in)) != 0;
+        if (changed)
+            assert(tui_textinput_revision(in) != rev);
+        else if (strcmp(steps[i].what, "left") == 0 ||
+                 strcmp(steps[i].what, "home") == 0 ||
+                 strcmp(steps[i].what, "end") == 0)
+            assert(tui_textinput_revision(in) == rev); /* movement is free */
+        free(before);
+    }
+
+    /* The API edits, and paste. */
+    uint64_t rev = tui_textinput_revision(in);
+    tui_textinput_set_text(in, "one two");
+    assert(tui_textinput_revision(in) != rev);
+    rev = tui_textinput_revision(in);
+    tui_textinput_replace_range(in, 0, 3, "1");
+    assert(tui_textinput_revision(in) != rev);
+    rev = tui_textinput_revision(in);
+    send_paste(in, "!!");
+    assert(tui_textinput_revision(in) != rev);
+    rev = tui_textinput_revision(in);
+    tui_textinput_clear(in);
+    assert(tui_textinput_revision(in) != rev);
+    rev = tui_textinput_revision(in);
+    tui_textinput_set_cursor(in, 0);
+    assert(tui_textinput_revision(in) == rev);
+    tui_textinput_free(in);
+}
+
+static void test_replace_range_replaces_whole_range_and_undoes(void)
+{
+    TuiTextInput *in = tui_textinput_create(NULL);
+    tui_textinput_set_text(in, "see @src/a.c now");
+    /* Cursor mid-token: insert_completion would keep the tail of the
+     * token; replace_range takes the whole [4, 12). */
+    tui_textinput_set_cursor(in, 8);
+    tui_textinput_replace_range(in, 4, 12, "@lib/b.h");
+    assert(strcmp(tui_textinput_text(in), "see @lib/b.h now") == 0);
+    assert(tui_textinput_cursor(in) == 12); /* just after the new text */
+
+    /* One edit, one undo (C-x C-u). */
+    tui_textinput_update(in, tui_msg_key(TUI_KEY_NONE, 'x', TUI_MOD_CTRL));
+    tui_textinput_update(in, tui_msg_key(TUI_KEY_NONE, 'u', TUI_MOD_CTRL));
+    assert(strcmp(tui_textinput_text(in), "see @src/a.c now") == 0);
+
+    /* Out-of-range offsets clamp instead of corrupting. */
+    tui_textinput_replace_range(in, 14, 999, "!");
+    assert(strcmp(tui_textinput_text(in), "see @src/a.c n!") == 0);
+    tui_textinput_replace_range(in, 999, 999, "?");
+    assert(strcmp(tui_textinput_text(in), "see @src/a.c n!?") == 0);
+    tui_textinput_free(in);
+}
+
+static void test_insert_completion_is_one_undoable_edit(void)
+{
+    TuiTextInput *in = tui_textinput_create(NULL);
+    send_string(in, "/he");
+    tui_textinput_insert_completion(in, 0, "/help");
+    assert(strcmp(tui_textinput_text(in), "/help") == 0);
+    tui_textinput_update(in, tui_msg_key(TUI_KEY_NONE, 'x', TUI_MOD_CTRL));
+    tui_textinput_update(in, tui_msg_key(TUI_KEY_NONE, 'u', TUI_MOD_CTRL));
+    assert(strcmp(tui_textinput_text(in), "/he") == 0);
+    tui_textinput_free(in);
+}
+
+static TuiTextSpan underline_span(size_t a, size_t b)
+{
+    TuiTextSpan sp = { a, b, tui_style_underline(tui_style_new(), 1) };
+    return sp;
+}
+
+static int count_substr(const char *hay, const char *needle)
+{
+    int n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)); p += strlen(needle))
+        n++;
+    return n;
+}
+
+static void test_spans_style_exactly_their_bytes(void)
+{
+    TuiTextInput *in = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(in, 40);
+    tui_textinput_set_terminal_row(in, 1);
+    tui_textinput_set_text(in, "see @a.c now");
+    TuiTextSpan sp = underline_span(4, 8);
+    assert(tui_textinput_set_spans(in, &sp, 1) == 0);
+    char *out = render_view(in);
+    assert(strstr(out, "see ") != NULL);
+    assert(strstr(out, "\033[4m@a.c") != NULL); /* underline opens on '@' */
+    assert(strstr(out, " now") != NULL);
+    free(out);
+
+    /* An edit stales the span: nothing is painted until re-declared. */
+    send_char(in, '!');
+    out = render_view(in);
+    assert(strstr(out, "\033[4m") == NULL);
+    free(out);
+
+    /* Bad sets are refused whole and leave the state alone. */
+    TuiTextSpan bad[2] = { underline_span(4, 8), underline_span(6, 9) };
+    assert(tui_textinput_set_spans(in, bad, 2) == -1); /* overlap */
+    TuiTextSpan oob = underline_span(0, 999);
+    assert(tui_textinput_set_spans(in, &oob, 1) == -1);
+    TuiTextSpan empty = underline_span(3, 3);
+    assert(tui_textinput_set_spans(in, &empty, 1) == -1);
+    assert(tui_textinput_set_spans(in, NULL, 0) == 0); /* clear */
+    tui_textinput_free(in);
+}
+
+static void test_spans_survive_soft_wrap_split(void)
+{
+    /* The reason spans exist: the text renderer sees one chunk at a time,
+     * so a token wrapped over two rows could not be recognised. Offsets
+     * are absolute, so both halves are underlined. */
+    TuiTextInput *in = tui_textinput_create(&(TuiTextInputConfig){ .multiline = 1 });
+    tui_textinput_set_soft_wrap(in, 1);
+    tui_textinput_set_terminal_width(in, 12);
+    tui_textinput_set_terminal_row(in, 1);
+    tui_textinput_set_text(in, "ab @src/very/long/path.c");
+    TuiTextSpan sp = underline_span(3, 24);
+    assert(tui_textinput_set_spans(in, &sp, 1) == 0);
+    char *out = render_view(in);
+    assert(count_substr(out, "\033[4m") >= 2);
+    free(out);
+    tui_textinput_free(in);
+}
+
+static void test_spans_compose_with_selection(void)
+{
+    TuiTextInput *in = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(in, 40);
+    tui_textinput_set_terminal_row(in, 1);
+    tui_textinput_set_text(in, "xx @a.c yy");
+    tui_textinput_set_cursor(in, 0);
+    send_ctrl(in, ' '); /* mark at 0 */
+    tui_textinput_set_cursor(in, 6);
+    TuiTextSpan sp = underline_span(3, 7);
+    assert(tui_textinput_set_spans(in, &sp, 1) == 0);
+    char *out = render_view(in);
+    /* The selected part of the span is underlined AND reversed (one SGR
+     * run each, the style's own reset cannot end the highlight early),
+     * and the plain selected prefix is reversed. */
+    assert(strstr(out, SGR_REVERSE "xx ") != NULL);
+    assert(strstr(out, "\033[4;7m@a.") != NULL); /* span + selection */
+    assert(strstr(out, "\033[4mc") != NULL);     /* span, past the selection */
+    free(out);
+    tui_textinput_free(in);
+}
+
+static void test_spans_respect_echo_mode(void)
+{
+    TuiTextInput *in = tui_textinput_create(NULL);
+    tui_textinput_set_terminal_width(in, 40);
+    tui_textinput_set_terminal_row(in, 1);
+    tui_textinput_set_echo_mode(in, 1);
+    tui_textinput_set_text(in, "secret");
+    TuiTextSpan sp = underline_span(0, 6);
+    assert(tui_textinput_set_spans(in, &sp, 1) == 0);
+    char *out = render_view(in);
+    assert(strstr(out, "secret") == NULL);
+    assert(strstr(out, "******") != NULL);
+    free(out);
+    tui_textinput_free(in);
+}
+
 int main(void)
 {
     printf("textinput tests:\n");
 
+    RUN_TEST(test_revision_tracks_text_changes);
+    RUN_TEST(test_replace_range_replaces_whole_range_and_undoes);
+    RUN_TEST(test_insert_completion_is_one_undoable_edit);
+    RUN_TEST(test_spans_style_exactly_their_bytes);
+    RUN_TEST(test_spans_survive_soft_wrap_split);
+    RUN_TEST(test_spans_compose_with_selection);
+    RUN_TEST(test_spans_respect_echo_mode);
     RUN_TEST(test_create_and_free);
     RUN_TEST(test_create_with_config);
     RUN_TEST(test_char_insertion);

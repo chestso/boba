@@ -12,10 +12,21 @@
 #ifndef BOBA_TEXTINPUT_H
 #define BOBA_TEXTINPUT_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "../component.h"
 #include "../dynamic_buffer.h"
 #include "../msg.h"
 #include "../style.h"
+
+/* A styled byte range of the text: [start, end), absolute offsets into
+ * tui_textinput_text(). See tui_textinput_set_spans. */
+typedef struct TuiTextSpan
+{
+    size_t start, end;
+    TuiStyle style; /* colors and attributes; box-model fields are ignored */
+} TuiTextSpan;
 
 /* Text input model */
 typedef struct TuiTextInput
@@ -102,6 +113,14 @@ typedef struct TuiTextInput
      * a wrap boundary) — the runtime does not clear stale alt-screen rows,
      * so the component owns cleanup of its own area. */
     int last_render_rows;
+
+    /* Bumped by every change to the text's bytes (typing, deletes, kills,
+     * undo, paste, set_text, clear, replace_range), never by movement.
+     * Spans carry the revision they were computed for. */
+    uint64_t revision;
+    TuiTextSpan *spans; /* owned copy, sorted, disjoint */
+    size_t n_spans;
+    uint64_t spans_revision;
 
     /* Styled-text highlight hook. If set, render_text_range calls this
      * instead of emitting raw text bytes. The callback returns a malloc'd
@@ -193,6 +212,35 @@ void tui_textinput_history_add(TuiTextInput *input, const char *line);
 void tui_textinput_insert_completion(TuiTextInput *input, int word_start,
                                      const char *word);
 
+/* Replace the bytes [start, end) with `text` and leave the cursor after
+ * it, as ONE undoable edit. Offsets are clamped to the text. Unlike
+ * insert_completion it does not assume the range ends at the cursor, so
+ * a token the cursor sits in the middle of can be replaced whole. */
+void tui_textinput_replace_range(TuiTextInput *input, size_t start, size_t end,
+                                 const char *text);
+
+/* The text's revision: a counter that changes whenever the bytes do,
+ * and not for cursor movement, selection or focus. It is how an app
+ * tells "this key edited the text" from "this key moved around in it"
+ * without keeping a copy to compare. The value itself means nothing —
+ * only equal/unequal between two reads. */
+uint64_t tui_textinput_revision(const TuiTextInput *input);
+
+/* Style byte ranges of the text (e.g. a file mention, a slash command).
+ * The input copies the array. Ranges are absolute offsets, must be
+ * sorted, disjoint, non-empty and inside the text; a bad set is refused
+ * whole (-1) and the previous set stays.
+ *
+ * Spans describe the text AS OF the current revision: after any edit
+ * they stop being painted until the app declares them again, so a stale
+ * range can never style the wrong bytes. They compose with the
+ * selection (reverse video) and echo mode, and are clipped to whatever
+ * the row shows, so a span split by soft-wrap or scrolled partly out of
+ * the window is styled exactly where its bytes are. Pass n == 0 to
+ * clear. Ignored while a text renderer (below) is set. */
+int tui_textinput_set_spans(TuiTextInput *input, const TuiTextSpan *spans,
+                            size_t n);
+
 /* Extract the word at the cursor position. Returns a malloc'd string
  * (the text from word_start to cursor) and sets *word_start to the
  * byte offset where the word begins. Returns NULL (and sets
@@ -250,7 +298,12 @@ void tui_textinput_set_echo_mode(TuiTextInput *input, int mode);
  * long lines to the next visual row instead of clipping. */
 void tui_textinput_set_soft_wrap(TuiTextInput *input, int enable);
 
-/* Set a styled-text highlight callback. When set, the callback is invoked
+/* Set a styled-text highlight callback. Prefer tui_textinput_set_spans:
+ * this callback receives only the text of one rendered chunk (a wrapped
+ * row or the scrolled window) with no offset or context, so it cannot
+ * style anything that spans chunks, and it bypasses the selection and
+ * echo mode.
+ * When set, the callback is invoked
  * during view() for each text segment, returning a malloc'd styled string
  * (ANSI escapes + text) that replaces the raw text in the rendered output.
  * textinput frees the returned string after appending it.
