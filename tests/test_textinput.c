@@ -1428,6 +1428,24 @@ static void test_meta_backspace_kills_to_line_start(void)
     tui_textinput_free(input);
 }
 
+static void test_alt_backspace_kills_word_backward(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "foo bar");
+
+    /* ESC DEL in iTerm2 / Terminal.app, CSI 127;3u under kitty: the same
+     * message either way, and the same kill. */
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_ALT));
+    assert(r.cmd == NULL);
+    assert(strcmp(tui_textinput_text(input), "foo ") == 0);
+    assert(input->kill_buf_len == 3);
+    assert(memcmp(input->kill_buf, "bar", 3) == 0);
+
+    tui_textinput_free(input);
+}
+
 static void test_alt_b_f_d_word_motion_and_kill(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -3134,6 +3152,7 @@ int main(void)
     RUN_TEST(test_meta_left_right_is_line_start_end);
     RUN_TEST(test_meta_up_down_is_buffer_start_end);
     RUN_TEST(test_meta_backspace_kills_to_line_start);
+    RUN_TEST(test_alt_backspace_kills_word_backward);
     RUN_TEST(test_alt_b_f_d_word_motion_and_kill);
     RUN_TEST(test_meta_a_selects_all_then_typing_replaces);
     RUN_TEST(test_meta_c_copies_selection_only);

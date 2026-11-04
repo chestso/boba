@@ -509,6 +509,51 @@ static void test_csi_ctrl_up_still_works(void)
     assert(m.data.key.action == TUI_KEY_ACTION_PRESS);
 }
 
+/* ----- Option+Backspace (ESC DEL) --------------------------------------- */
+
+/* iTerm2's "Natural Text Editing" and Terminal.app (Option as Meta) send
+ * Option+Backspace as ESC followed by DEL. Without a branch for it the
+ * pair reads as a bare ESC (clearing the mark) plus a plain DEL (one
+ * character deleted) — two events where the user made one. */
+static void test_esc_del_is_alt_backspace(void)
+{
+    TuiMsg m = parse_one("\033\177");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.key == TUI_KEY_BACKSPACE);
+    assert(m.data.key.mods == TUI_MOD_ALT);
+}
+
+static void test_esc_bs_is_alt_backspace(void)
+{
+    TuiMsg m = parse_one("\033\010");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.key == TUI_KEY_BACKSPACE);
+    assert(m.data.key.mods == TUI_MOD_ALT);
+}
+
+/* The same chord under the kitty protocol must produce the same message:
+ * the component keys off the message, never the bytes. */
+static void test_kitty_alt_backspace_matches_escape_del(void)
+{
+    TuiMsg legacy = parse_one("\033\177");
+    TuiMsg kitty = parse_one("\033[127;3u");
+    assert(kitty.type == legacy.type);
+    assert(kitty.data.key.key == legacy.data.key.key);
+    assert(kitty.data.key.mods == legacy.data.key.mods);
+}
+
+/* The documented legacy limitation: a terminal that sends ^H for
+ * Backspace (and for Ctrl+Backspace) is indistinguishable from a plain
+ * Backspace, so Ctrl+Backspace deletes one cluster. Pinned as a decision,
+ * not left as an accident. C-w covers it. */
+static void test_ctrl_backspace_stays_plain_backspace(void)
+{
+    TuiMsg m = parse_one("\010");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.key == TUI_KEY_BACKSPACE);
+    assert(m.data.key.mods == TUI_MOD_NONE);
+}
+
 /* ----- bracketed paste ------------------------------------------------- */
 
 /* Feed the whole input in one shot and assert exactly `expected` messages
@@ -861,6 +906,10 @@ int main(void)
     RUN_TEST(test_kitty_other_ctrl_keys_are_keys);
     RUN_TEST(test_kitty_flags_reply_is_claimed_not_typed);
     RUN_TEST(test_csi_ctrl_up_still_works);
+    RUN_TEST(test_esc_del_is_alt_backspace);
+    RUN_TEST(test_esc_bs_is_alt_backspace);
+    RUN_TEST(test_kitty_alt_backspace_matches_escape_del);
+    RUN_TEST(test_ctrl_backspace_stays_plain_backspace);
 
     RUN_TEST(test_paste_simple);
     RUN_TEST(test_paste_empty);

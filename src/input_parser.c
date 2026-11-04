@@ -767,6 +767,16 @@ int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
             reply_capture_begin(parser);
             parser->state = PARSER_STATE_STRING;
             return 0;
+        } else if (byte == 0x7F || byte == 0x08) {
+            /* ESC DEL — Option+Backspace in iTerm2 ("Natural Text
+             * Editing") and Terminal.app with Option-as-Meta. Without this
+             * it reads as a bare ESC (clearing the mark) followed by a
+             * plain DEL (one char deleted). Under the kitty protocol the
+             * same chord arrives as `CSI 127;3u`, which already yields
+             * BACKSPACE+ALT. */
+            parser->state = PARSER_STATE_GROUND;
+            *msg = tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_ALT);
+            return 1;
         } else {
             /* Alt+key or unknown sequence */
             parser->state = PARSER_STATE_GROUND;
