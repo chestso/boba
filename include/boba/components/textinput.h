@@ -45,6 +45,25 @@ struct TuiTextInput; /* forward: the callback below takes the model */
  * the undo commit, so it sees the final text, and it must not call
  * textinput mutators (it would re-enter the edit it is reporting).
  *
+ * Which key reports what:
+ *   KILL   C-k, C-u, C-w, Cmd+Backspace, Ctrl/Alt+Backspace, Ctrl+Delete,
+ *          Alt+d          — the ring, after any append/prepend
+ *   COPY   M-w (selection, else the whole input), Cmd+C, Ctrl+Insert,
+ *          Ctrl+Shift+C   — the selection only; nothing when there is none
+ *   CUT    Cmd+X, Shift+Delete — the cut bytes, which also enter the ring
+ *   PASTE_REQUEST  Cmd+V, Shift+Insert, Ctrl+Shift+V — the app owns the
+ *          clipboard read and posts a TUI_MSG_PASTE
+ *
+ * Three deliberate asymmetries, not oversights:
+ *   - COPY never becomes a TUI_CMD_CLIPBOARD_COPY, whatever the app's
+ *     opt-in says: a copy is the app's to route, never silently hijacked
+ *     onto OSC 52.
+ *   - Cmd+C with no selection copies nothing; the "no mark => whole
+ *     input" fallback belongs to M-w alone.
+ *   - Ctrl+A is line start unless the app asks for select-all (see
+ *     tui_textinput_set_ctrl_a_select_all) — boba never inspects the
+ *     platform to pick a binding.
+ *
  * See tui_textinput_set_clipboard_hook(). */
 typedef void (*TuiTextInputClipboardFn)(struct TuiTextInput *input,
                                         TuiTextInputClipKind kind,

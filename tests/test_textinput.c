@@ -1405,6 +1405,27 @@ static void test_meta_up_down_is_buffer_start_end(void)
     tui_textinput_free(input);
 }
 
+static void test_ctrl_home_end_is_buffer_start_end(void)
+{
+    TuiTextInput *input = multiline_input("aaa\nbbb\nccc");
+    tui_textinput_set_cursor(input, 5);
+
+    run_update(input, tui_msg_key(TUI_KEY_HOME, 0, TUI_MOD_CTRL));
+    assert(input->cursor_byte == 0);
+
+    tui_textinput_set_cursor(input, 5);
+    run_update(input, tui_msg_key(TUI_KEY_END, 0, TUI_MOD_CTRL));
+    assert(input->cursor_byte == 11);
+
+    /* Plain Home/End still mean the LINE, as they always did. */
+    run_update(input, tui_msg_key(TUI_KEY_HOME, 0, TUI_MOD_NONE));
+    assert(input->cursor_byte == 8);
+    run_update(input, tui_msg_key(TUI_KEY_END, 0, TUI_MOD_NONE));
+    assert(input->cursor_byte == 11);
+
+    tui_textinput_free(input);
+}
+
 static void test_meta_backspace_kills_to_line_start(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -1563,6 +1584,47 @@ static void test_meta_x_without_selection_is_noop(void)
     assert(strcmp(tui_textinput_text(input), "abc") == 0);
     assert(sink.calls == 0);
     assert(input->kill_buf == NULL);
+
+    tui_textinput_free(input);
+}
+
+static void test_ctrl_delete_kills_word_forward(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "foo bar");
+    tui_textinput_set_cursor(input, 0);
+
+    run_update(input, tui_msg_key(TUI_KEY_DELETE, 0, TUI_MOD_CTRL));
+    assert(strcmp(tui_textinput_text(input), "bar") == 0);
+    assert(input->kill_buf_len == 4);
+    assert(memcmp(input->kill_buf, "foo ", 4) == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_shift_delete_cuts_the_selection(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    ClipSink sink = { 0 };
+    tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
+    send_string(input, "abcdef");
+    tui_textinput_set_cursor(input, 3);
+    for (int i = 0; i < 2; i++)
+        run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
+
+    run_update(input, tui_msg_key(TUI_KEY_DELETE, 0, TUI_MOD_SHIFT));
+    assert(strcmp(tui_textinput_text(input), "abcf") == 0);
+    assert(input->cursor_byte == 3);
+    assert(sink.calls == 1);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_CUT);
+    assert(strcmp(sink.text, "de") == 0);
+
+    /* Without a selection Shift+Delete is a no-op, not a forward delete. */
+    run_update(input, tui_msg_key(TUI_KEY_DELETE, 0, TUI_MOD_SHIFT));
+    assert(strcmp(tui_textinput_text(input), "abcf") == 0);
+    assert(sink.calls == 1);
 
     tui_textinput_free(input);
 }
@@ -3151,6 +3213,7 @@ int main(void)
     RUN_TEST(test_consecutive_backward_kills_prepend);
     RUN_TEST(test_meta_left_right_is_line_start_end);
     RUN_TEST(test_meta_up_down_is_buffer_start_end);
+    RUN_TEST(test_ctrl_home_end_is_buffer_start_end);
     RUN_TEST(test_meta_backspace_kills_to_line_start);
     RUN_TEST(test_alt_backspace_kills_word_backward);
     RUN_TEST(test_alt_b_f_d_word_motion_and_kill);
@@ -3158,6 +3221,8 @@ int main(void)
     RUN_TEST(test_meta_c_copies_selection_only);
     RUN_TEST(test_meta_x_cuts_selection);
     RUN_TEST(test_meta_x_without_selection_is_noop);
+    RUN_TEST(test_ctrl_delete_kills_word_forward);
+    RUN_TEST(test_shift_delete_cuts_the_selection);
     RUN_TEST(test_meta_v_and_shift_insert_request_paste);
     RUN_TEST(test_meta_q_inserts_nothing);
     RUN_TEST(test_ctrl_z_undo_leaves_stack_shallow);

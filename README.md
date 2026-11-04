@@ -341,12 +341,13 @@ Features:
 - **Multi-line support** - Toggle between single-line and multi-line text areas
 - **Unicode/UTF-8 support** - Full international character handling with proper cursor positioning
 - **Emacs keybindings** - Ctrl+A/E (line start/end), Ctrl+B/F (char movement), Ctrl+P/N (history/line navigation), Ctrl+K/U/W (kill), Ctrl+Y (yank), Ctrl+T (transpose), **Ctrl+Space** (set/toggle mark), **Alt+w** (copy region or whole input), **Ctrl+G / Esc** (clear mark)
-- **Selection** - `C-SPC` sets a mark; the active region (between mark and cursor) is rendered with `SGR_REVERSE`. Motion extends the selection; any edit clears it.
-- **System clipboard** - Both `Alt+w` and every kill (`Ctrl+K/U/W`) emit `TUI_CMD_CLIPBOARD_COPY`, going through the runtime's OSC 52 default or `clipboard_handler` override (see the [Clipboard](#clipboard) section). Matches graphical emacs's `interprogram-cut-function = gui-select-text` default — every cut is also a copy.
+- **Selection** - `C-SPC` sets a mark; the active region (between mark and cursor) is rendered with `SGR_REVERSE`. Motion extends the selection; any edit clears it. A **Shift**-made selection follows emacs' `shift-select-mode`: typing, pasting, Backspace and Delete replace it, and an unshifted motion collapses it.
+- **Windows / macOS editing keys** - Both families are accepted at once, decided by modifiers and never by the platform: Cmd+Left/Right (line start/end), Cmd+Up/Down (buffer start/end), Ctrl/Alt+Left/Right and Alt+b/f (word motion), Cmd+Backspace (kill to line start), Ctrl/Alt+Backspace (kill word backward), Ctrl+Delete and Alt+d (kill word forward), Cmd+A (select all), Cmd+C / Ctrl+Insert / Ctrl+Shift+C (copy), Cmd+X / Shift+Delete (cut), Cmd+V / Shift+Insert / Ctrl+Shift+V (paste request), Cmd+Z / Ctrl+Z (undo). Ctrl+A is the one exception the app declares: line start (readline) by default, select-all with `tui_textinput_set_ctrl_a_select_all(input, 1)`.
+- **System clipboard** - The component **reports**, it does not emit: every kill, cut, copy and paste request is handed to `tui_textinput_set_clipboard_hook`, and `update()` returns no `TUI_CMD_CLIPBOARD_COPY` by default. An app that wants the runtime's OSC 52 clipboard opts in with `tui_textinput_set_clipboard_cmd(input, 1)` (kills and cuts only — never a copy) or schedules its own command from the hook (see the [Clipboard](#clipboard) section).
 - **Command history** - Up/down navigation with saved current input
 - **Tab completion** - Emits `TUI_CMD_TAB_COMPLETE` with prefix and word position
-- **Kill ring** - Consecutive kills append to the same buffer (also reflected in the clipboard cmd as the kill ring grows)
-- **Undo** - Multiple undo levels with Ctrl+\_ or Ctrl+X Ctrl+U
+- **Kill ring** - Consecutive kills join the same buffer in document order (backward kills prepend), readable through `tui_textinput_kill_buffer`
+- **Undo** - Multiple undo levels with Ctrl+\_, Ctrl+X Ctrl+U, Ctrl+Z or Cmd+Z
 - **Absolute cursor positioning** - Flicker-free rendering at a parent-supplied row
 - **Prompt support** - Custom prompt strings with proper UTF-8 width calculation
 - **Configurable word characters** - Whitelist-based word boundaries for completion and movement

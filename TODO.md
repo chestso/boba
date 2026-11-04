@@ -85,20 +85,19 @@ state) that tests can call on its own.
 
 ## Streaming transcript (step 3+)
 
-The transcript component landed in `include/boba/stream.h` (see
-AGENTS.md, "Streaming transcript"); the terminal capability probe and
-the IMAGE commit gate landed with it in `terminal_profile.h`. The
-probe's completion signal is the deadline, never a single reply (FIFO
-answers arrive in one burst; resolving on DA1 would discard the cell
-size / XTVERSION that follow). Deferred to the next steps:
+The transcript component landed in `include/boba/stream.h`; the terminal
+capability probe and the IMAGE commit gate landed with it in
+`terminal_profile.h`. The probe's completion signal is the deadline,
+never a single reply (FIFO answers arrive in one burst; resolving on DA1
+would discard the cell size / XTVERSION that follow). Deferred to the
+next steps:
 
-- **Image transport — DONE (2026-09-29, with nevermore's IR step 5,
-  see nevermore's `docs/TRANSCRIPT-IMAGE-PLAN.md`)**: `TuiImageSpec`
-  frozen (transport/format enums, borrowed payload, display size in
-  CELLS as the row reservation), kitty APC (`f=100` PNG, `q=2`,
-  `C=1` — the terminal must not move the cursor, our row terminators
-  own the geometry) with 4096-byte `m=1/m=0` chunking, iTerm2
-  `OSC 1337 File=inline=1` (PNG/JPEG/GIF), `tui_row_image`'s row
+- **Image transport — DONE (2026-09-29, with nevermore's IR step 5)**:
+  `TuiImageSpec` frozen (transport/format enums, borrowed payload,
+  display size in CELLS as the row reservation), kitty APC (`f=100` PNG,
+  `q=2`, `C=1` — the terminal must not move the cursor, our row
+  terminators own the geometry) with 4096-byte `m=1/m=0` chunking,
+  iTerm2 `OSC 1337 File=inline=1` (PNG/JPEG/GIF), `tui_row_image`'s row
   accounting, `blk.image_id` boba-assigned (monotonic across clear),
   the profile copied into the transcript per commit pass, and
   `emit_unit`'s measure/render_image branch with a DEFER queue: an
