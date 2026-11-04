@@ -28,6 +28,29 @@ typedef struct TuiTextSpan
     TuiStyle style; /* colors and attributes; box-model fields are ignored */
 } TuiTextSpan;
 
+/* Why textinput is handing the app clipboard text. */
+typedef enum
+{
+    TUI_TEXTINPUT_CLIP_KILL,          /* ring contents after append/prepend */
+    TUI_TEXTINPUT_CLIP_COPY,          /* the selection, or (M-w) the input   */
+    TUI_TEXTINPUT_CLIP_CUT,           /* the cut text only                   */
+    TUI_TEXTINPUT_CLIP_PASTE_REQUEST, /* text == NULL: ask the app to paste  */
+} TuiTextInputClipKind;
+
+struct TuiTextInput; /* forward: the callback below takes the model */
+
+/* Fired from update() when a key press wants the clipboard touched. `text`
+ * is borrowed, valid only for the duration of the call; for
+ * PASTE_REQUEST it is NULL with len 0. It fires after the edit and after
+ * the undo commit, so it sees the final text, and it must not call
+ * textinput mutators (it would re-enter the edit it is reporting).
+ *
+ * See tui_textinput_set_clipboard_hook(). */
+typedef void (*TuiTextInputClipboardFn)(struct TuiTextInput *input,
+                                        TuiTextInputClipKind kind,
+                                        const char *text, size_t len,
+                                        void *userdata);
+
 /* Text input model */
 typedef struct TuiTextInput
 {
@@ -43,8 +66,8 @@ typedef struct TuiTextInput
 
     /* Selection mark. When has_mark is set, the active region is
      * [min(mark_byte, cursor_byte), max(mark_byte, cursor_byte)). Motion
-     * extends the region; edits clear it; Esc / C-g clear it; M-w copies
-     * it; C-w kills it. */
+     * extends the region; edits clear it; Esc / C-g clear it; M-w reports
+     * it to the clipboard hook; C-w kills it. */
     size_t mark_byte;
     int has_mark;
 
@@ -130,6 +153,12 @@ typedef struct TuiTextInput
      * highlight callback is set — the callback owns all styling. */
     char *(*highlight_fn)(const char *text, size_t len, void *userdata);
     void *highlight_userdata;
+
+    /* Clipboard reporting (see TuiTextInputClipboardFn). Appended here so
+     * the public struct keeps its field order. */
+    TuiTextInputClipboardFn clipboard_fn; /* NULL = report nothing */
+    void *clipboard_ud;
+    int clipboard_cmd; /* 0 = emit no TuiCmd at all (default) */
 } TuiTextInput;
 
 /* Configuration for creating text input */
@@ -313,6 +342,29 @@ void tui_textinput_set_text_renderer(TuiTextInput *input,
                                                  size_t len,
                                                  void *userdata),
                                      void *userdata);
+
+/* Report clipboard events to `fn` instead of (or as well as) emitting a
+ * command. Pass NULL to stop reporting. The hook is the ONLY delivery path
+ * by default: textinput never emits TUI_CMD_CLIPBOARD_COPY on its own, so
+ * a kill or a copy can never be silently hijacked onto OSC 52. An app that
+ * wants the runtime's clipboard (OSC 52) can schedule its own command from
+ * the hook (tui_runtime_schedule(rt, tui_cmd_clipboard_copy(...))) or shell
+ * out to pbcopy / wl-copy / xclip. */
+void tui_textinput_set_clipboard_hook(TuiTextInput *input,
+                                      TuiTextInputClipboardFn fn,
+                                      void *userdata);
+
+/* Opt back in to the pre-0.7 behaviour: update() also RETURNS
+ * tui_cmd_clipboard_copy() for KILL and CUT. COPY and PASTE_REQUEST never
+ * return a command, whatever this says — a copy is the app's to route, and
+ * a paste request has no text to copy. Default 0. */
+void tui_textinput_set_clipboard_cmd(TuiTextInput *input, int enable);
+
+/* Pull-style access to the kill ring, for embedders that poll instead of
+ * taking the hook. The pointer is borrowed and valid until the next kill;
+ * NULL / 0 before the first one. Kills and cuts fill it; an explicit copy
+ * does not. */
+const char *tui_textinput_kill_buffer(const TuiTextInput *input, size_t *len);
 
 /* Get echo mode */
 int tui_textinput_get_echo_mode(const TuiTextInput *input);

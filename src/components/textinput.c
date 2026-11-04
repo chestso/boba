@@ -572,6 +572,34 @@ typedef struct
     size_t start, end;
 } ClipEvent;
 
+/* CLIP_NONE never reaches delivery; every other kind has a public mirror.
+ * Mapped explicitly rather than cast, so growing either enum is a
+ * compiler warning here instead of a silent shift. */
+static TuiTextInputClipKind public_clip_kind(ClipKind kind)
+{
+    switch (kind) {
+    case CLIP_KILL:
+        return TUI_TEXTINPUT_CLIP_KILL;
+    case CLIP_COPY:
+        return TUI_TEXTINPUT_CLIP_COPY;
+    case CLIP_CUT:
+        return TUI_TEXTINPUT_CLIP_CUT;
+    case CLIP_PASTE_REQUEST:
+        return TUI_TEXTINPUT_CLIP_PASTE_REQUEST;
+    case CLIP_NONE:
+        break;
+    }
+    return TUI_TEXTINPUT_CLIP_KILL; /* unreachable: CLIP_NONE is not delivered */
+}
+
+/* KILL and CUT are the only kinds that may become a TuiCmd (the opt-in
+ * path); COPY and PASTE_REQUEST are hook-only, whatever the app asked
+ * for. */
+static int clip_emits_cmd(ClipKind kind)
+{
+    return kind == CLIP_KILL || kind == CLIP_CUT;
+}
+
 /* Ring bookkeeping: join `text` to the kill ring under `mode`. The new
  * contents are built in a fresh buffer first, so on OOM the ring stays
  * exactly as it was — the delete still happens (undo holds the text, and
@@ -1096,10 +1124,6 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     int was_kill = input->last_was_kill;
     input->last_was_kill = 0;
 
-    /* Pending clipboard command — set by kill operations and M-w, returned
-     * via tui_update_result at the function tail. */
-    TuiCmd *pending_cmd = NULL;
-
     /* What this key press wants done with the clipboard. The edit paths
      * fill it in; it is delivered once, at the tail. */
     ClipEvent ev = { CLIP_NONE, 0, 0 };
@@ -1233,9 +1257,6 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     /* Ctrl+K: kill to end of line; at EOL take the newline
                      * (joining the next line); at end of buffer, nothing. */
                     kill_line(input, was_kill, &ev);
-                    if (ev.kind != CLIP_NONE)
-                        pending_cmd = tui_cmd_clipboard_copy(
-                            input->kill_buf, input->kill_buf_len);
                 } else if (key.rune == 'n' || key.rune == 'N') {
                     /* Ctrl+N: Next history entry (or cursor down if mid-text) */
                     if (input->multiline) {
@@ -1261,9 +1282,6 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                 } else if (key.rune == 'u' || key.rune == 'U') {
                     /* Ctrl+U: Kill to start of line */
                     kill_to_line_start(input, was_kill, &ev);
-                    if (ev.kind != CLIP_NONE)
-                        pending_cmd = tui_cmd_clipboard_copy(
-                            input->kill_buf, input->kill_buf_len);
                 } else if (key.rune == 'w' || key.rune == 'W') {
                     /* Ctrl+W: kill region (when mark is set) or kill word
                      * backward (default). Matches emacs's overload of
@@ -1276,9 +1294,6 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     } else {
                         kill_word_backward(input, was_kill, &ev);
                     }
-                    if (ev.kind != CLIP_NONE)
-                        pending_cmd = tui_cmd_clipboard_copy(
-                            input->kill_buf, input->kill_buf_len);
                 } else if (key.rune == 'x' || key.rune == 'X') {
                     /* Ctrl+X: prefix for C-x C-u (undo) */
                     input->ctrl_x_prefix = 1;
@@ -1298,20 +1313,20 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                  * intentionally swallowed rather than inserted as text. */
                 if (key.rune == 'w' || key.rune == 'W') {
                     size_t sel_start, sel_end;
-                    const char *src = NULL;
-                    size_t src_len = 0;
                     if (selection_range(input, &sel_start, &sel_end) &&
                         sel_end > sel_start) {
-                        src = input->text + sel_start;
-                        src_len = sel_end - sel_start;
+                        ev.start = sel_start;
+                        ev.end = sel_end;
+                        ev.kind = CLIP_COPY;
                     } else if (input->text_len > 0) {
                         /* No mark: copy the whole current input, matching
-                         * the viewport's "no-mark = current line" rule. */
-                        src = input->text;
-                        src_len = input->text_len;
+                         * the viewport's "no-mark = current line" rule.
+                         * The fallback stays on M-w only: every other copy
+                         * binding copies nothing without a selection. */
+                        ev.start = 0;
+                        ev.end = input->text_len;
+                        ev.kind = CLIP_COPY;
                     }
-                    if (src && src_len > 0)
-                        pending_cmd = tui_cmd_clipboard_copy(src, src_len);
                     clear_mark_if_set(input);
                 }
             } else if (key.text_len > 0) {
@@ -1341,8 +1356,39 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         break;
     }
 
+    /* Everything the switch above did compiles a ClipEvent; delivery happens
+     * here, once, after undo_commit(), so the hook sees the final text. */
     undo_commit(input);
-    return tui_update_result(pending_cmd);
+
+    TuiCmd *cmd = NULL;
+    if (ev.kind != CLIP_NONE) {
+        const char *ptr = NULL;
+        size_t len = 0;
+        switch (ev.kind) {
+        case CLIP_KILL:
+        case CLIP_CUT:
+            ptr = input->kill_buf;
+            len = input->kill_buf_len;
+            break;
+        case CLIP_COPY:
+            ptr = input->text + ev.start;
+            len = ev.end - ev.start;
+            break;
+        case CLIP_PASTE_REQUEST:
+        case CLIP_NONE:
+            break; /* ptr stays NULL: there is nothing to hand over */
+        }
+
+        if (input->clipboard_fn)
+            input->clipboard_fn(input, public_clip_kind(ev.kind), ptr, len,
+                                input->clipboard_ud);
+
+        /* Off by default: an app opts back in to the old behaviour, and
+         * even then only a KILL or a CUT can become a command. */
+        if (input->clipboard_cmd && clip_emits_cmd(ev.kind) && ptr && len > 0)
+            cmd = tui_cmd_clipboard_copy(ptr, len);
+    }
+    return tui_update_result(cmd);
 }
 
 /* True if a TuiStyle carries any user-visible styling (color or attribute). */
@@ -2329,6 +2375,31 @@ void tui_textinput_set_text_renderer(TuiTextInput *input,
         input->highlight_fn = fn;
         input->highlight_userdata = userdata;
     }
+}
+
+void tui_textinput_set_clipboard_hook(TuiTextInput *input,
+                                      TuiTextInputClipboardFn fn,
+                                      void *userdata)
+{
+    if (input) {
+        input->clipboard_fn = fn;
+        input->clipboard_ud = userdata;
+    }
+}
+
+void tui_textinput_set_clipboard_cmd(TuiTextInput *input, int enable)
+{
+    if (input)
+        input->clipboard_cmd = enable ? 1 : 0;
+}
+
+const char *tui_textinput_kill_buffer(const TuiTextInput *input, size_t *len)
+{
+    if (len)
+        *len = input ? input->kill_buf_len : 0;
+    if (!input)
+        return NULL;
+    return input->kill_buf;
 }
 
 void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color)

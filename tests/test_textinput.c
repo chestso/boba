@@ -60,6 +60,31 @@ static void send_ctrl(TuiTextInput *input, char c)
         tui_cmd_free(r.cmd);
 }
 
+/* Clipboard hook sink: records the last event the component reported. */
+typedef struct
+{
+    int calls;
+    TuiTextInputClipKind kind;
+    char text[64];
+    size_t len;
+    int null_text;
+} ClipSink;
+
+static void clip_sink(TuiTextInput *input, TuiTextInputClipKind kind,
+                      const char *text, size_t len, void *ud)
+{
+    (void)input;
+    ClipSink *sink = (ClipSink *)ud;
+    sink->calls++;
+    sink->kind = kind;
+    sink->len = len;
+    sink->null_text = (text == NULL);
+    size_t n = len < sizeof(sink->text) - 1 ? len : sizeof(sink->text) - 1;
+    if (text)
+        memcpy(sink->text, text, n);
+    sink->text[n] = '\0';
+}
+
 /* Send a bracketed-paste payload of explicit length. The message owns
  * its text, so it is freed here (the component copies what it inserts). */
 static void send_paste_len(TuiTextInput *input, const char *text, size_t len)
@@ -938,15 +963,21 @@ static void test_m_w_no_mark_copies_whole_input(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
+    ClipSink sink = { 0 };
+    tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello");
 
     TuiUpdateResult r = run_update(
         input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_ALT));
-    assert(r.cmd != NULL);
-    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
-    assert(r.cmd->payload.clipboard.len == 5);
-    assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
-    tui_cmd_free(r.cmd);
+    /* Reported, never emitted: a copy is the app's to route. */
+    assert(r.cmd == NULL);
+    assert(sink.calls == 1);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_COPY);
+    assert(sink.len == 5);
+    assert(strcmp(sink.text, "hello") == 0);
+    /* A copy does not enter the ring. */
+    assert(input->kill_buf == NULL);
+    assert(input->kill_buf_len == 0);
 
     tui_textinput_free(input);
 }
@@ -955,6 +986,8 @@ static void test_m_w_with_mark_copies_region(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
+    ClipSink sink = { 0 };
+    tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello world");
 
     /* Place cursor at byte 5, set mark at 0, then move cursor back to 5
@@ -971,15 +1004,16 @@ static void test_m_w_with_mark_copies_region(void)
     assert(input->cursor_byte == 5);
     assert(input->has_mark == 1); /* motion preserves mark */
 
-    /* M-w copies "hello" and clears mark */
+    /* M-w reports "hello" and clears mark */
     TuiUpdateResult r = run_update(
         input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_ALT));
-    assert(r.cmd != NULL);
-    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
-    assert(r.cmd->payload.clipboard.len == 5);
-    assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
+    assert(r.cmd == NULL);
+    assert(sink.calls == 1);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_COPY);
+    assert(sink.len == 5);
+    assert(strcmp(sink.text, "hello") == 0);
     assert(input->has_mark == 0);
-    tui_cmd_free(r.cmd);
+    assert(input->kill_buf_len == 0);
 
     tui_textinput_free(input);
 }
@@ -988,6 +1022,8 @@ static void test_ctrl_w_kills_region_when_mark_set(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
+    ClipSink sink = { 0 };
+    tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abcdef");
 
     tui_textinput_set_cursor(input, 1);
@@ -1005,20 +1041,67 @@ static void test_ctrl_w_kills_region_when_mark_set(void)
     /* kill-ring filled */
     assert(input->kill_buf_len == 3);
     assert(memcmp(input->kill_buf, "bcd", 3) == 0);
-    /* clipboard cmd emitted */
-    assert(r.cmd != NULL);
-    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
-    assert(r.cmd->payload.clipboard.len == 3);
-    assert(memcmp(r.cmd->payload.clipboard.text, "bcd", 3) == 0);
-    tui_cmd_free(r.cmd);
+    /* reported through the hook, not emitted */
+    assert(r.cmd == NULL);
+    assert(sink.calls == 1);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_KILL);
+    assert(sink.len == 3);
+    assert(strcmp(sink.text, "bcd") == 0);
 
     tui_textinput_free(input);
 }
 
-static void test_ctrl_k_emits_clipboard_cmd(void)
+static void test_ctrl_k_reports_kill(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
+    ClipSink sink = { 0 };
+    tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
+    send_string(input, "hello");
+    tui_textinput_set_cursor(input, 0);
+
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'k', TUI_MOD_CTRL));
+    assert(r.cmd == NULL);
+    assert(sink.calls == 1);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_KILL);
+    assert(sink.len == 5);
+    assert(strcmp(sink.text, "hello") == 0);
+
+    /* Buffer is now empty */
+    assert(tui_textinput_len(input) == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_ctrl_u_reports_kill(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    ClipSink sink = { 0 };
+    tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
+    send_string(input, "hello");
+    /* Cursor at end. C-U kills back to start of line. */
+
+    TuiUpdateResult r = run_update(
+        input, tui_msg_key(TUI_KEY_NONE, 'u', TUI_MOD_CTRL));
+    assert(r.cmd == NULL);
+    assert(sink.calls == 1);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_KILL);
+    assert(sink.len == 5);
+    assert(strcmp(sink.text, "hello") == 0);
+
+    assert(tui_textinput_len(input) == 0);
+
+    tui_textinput_free(input);
+}
+
+/* The pre-0.7 behaviour, opt-in: KILL and CUT also RETURN the command. */
+static void test_clipboard_cmd_opt_in_restores_kill(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    tui_textinput_set_clipboard_cmd(input, 1);
     send_string(input, "hello");
     tui_textinput_set_cursor(input, 0);
 
@@ -1030,28 +1113,55 @@ static void test_ctrl_k_emits_clipboard_cmd(void)
     assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
     tui_cmd_free(r.cmd);
 
-    /* Buffer is now empty */
-    assert(tui_textinput_len(input) == 0);
+    /* ...but a COPY still emits nothing, however the flag is set: a copy
+     * can never be silently hijacked onto the terminal clipboard. */
+    tui_textinput_set_cursor(input, 0);
+    send_string(input, "hello");
+    r = run_update(input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_ALT));
+    assert(r.cmd == NULL);
 
     tui_textinput_free(input);
 }
 
-static void test_ctrl_u_emits_clipboard_cmd(void)
+/* The hook sees the kind, the bytes and the length; the pull-style ring
+ * accessor agrees with what the hook was handed. */
+static void test_clipboard_hook_kind_and_text(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_focus(input, 1);
-    send_string(input, "hello");
-    /* Cursor at end. C-U kills back to start of line. */
+    ClipSink sink = { 0 };
+    tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
 
-    TuiUpdateResult r = run_update(
-        input, tui_msg_key(TUI_KEY_NONE, 'u', TUI_MOD_CTRL));
-    assert(r.cmd != NULL);
-    assert(r.cmd->type == TUI_CMD_CLIPBOARD_COPY);
-    assert(r.cmd->payload.clipboard.len == 5);
-    assert(memcmp(r.cmd->payload.clipboard.text, "hello", 5) == 0);
-    tui_cmd_free(r.cmd);
+    size_t n = 123;
+    assert(tui_textinput_kill_buffer(input, &n) == NULL);
+    assert(n == 0);
 
-    assert(tui_textinput_len(input) == 0);
+    send_string(input, "abc");
+    tui_textinput_set_cursor(input, 0);
+    run_update(input, tui_msg_key(TUI_KEY_NONE, 'k', TUI_MOD_CTRL));
+    assert(sink.calls == 1);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_KILL);
+    assert(sink.len == 3);
+    assert(!sink.null_text);
+    assert(strcmp(sink.text, "abc") == 0);
+
+    const char *ring = tui_textinput_kill_buffer(input, &n);
+    assert(ring != NULL);
+    assert(n == 3);
+    assert(memcmp(ring, "abc", 3) == 0);
+
+    /* Kill again with another key: the ring accumulates (REPLACE, since
+     * the chain was broken by typing) and the hook reports the ring. */
+    send_string(input, "xy");
+    tui_textinput_set_cursor(input, 0);
+    run_update(input, tui_msg_key(TUI_KEY_NONE, 'k', TUI_MOD_CTRL));
+    assert(sink.calls == 2);
+    assert(sink.kind == TUI_TEXTINPUT_CLIP_KILL);
+    assert(sink.len == 2);
+    assert(strcmp(sink.text, "xy") == 0);
+    ring = tui_textinput_kill_buffer(input, &n);
+    assert(n == 2);
+    assert(memcmp(ring, "xy", 2) == 0);
 
     tui_textinput_free(input);
 }
@@ -2382,8 +2492,10 @@ int main(void)
     RUN_TEST(test_m_w_no_mark_copies_whole_input);
     RUN_TEST(test_m_w_with_mark_copies_region);
     RUN_TEST(test_ctrl_w_kills_region_when_mark_set);
-    RUN_TEST(test_ctrl_k_emits_clipboard_cmd);
-    RUN_TEST(test_ctrl_u_emits_clipboard_cmd);
+    RUN_TEST(test_ctrl_k_reports_kill);
+    RUN_TEST(test_ctrl_u_reports_kill);
+    RUN_TEST(test_clipboard_cmd_opt_in_restores_kill);
+    RUN_TEST(test_clipboard_hook_kind_and_text);
     RUN_TEST(test_edit_clears_mark);
     RUN_TEST(test_escape_clears_mark);
     RUN_TEST(test_view_renders_selection_with_reverse);
