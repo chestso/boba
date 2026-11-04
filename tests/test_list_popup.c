@@ -701,6 +701,119 @@ static void test_meta_filter_still_matches_items(void)
 
 /* ======================================================================== */
 
+/* ---------- empty state, footer, set_selected ---------- */
+
+static char *render_popup(TuiListPopup *p)
+{
+    DynamicBuffer *buf = dynamic_buffer_create(256);
+    tui_list_popup_view(p, buf);
+    char *out = strdup(buf_data(buf));
+    dynamic_buffer_destroy(buf);
+    return out;
+}
+
+static void test_empty_popup_renders_nothing_by_default(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    tui_list_popup_set_title(p, "files");
+    tui_list_popup_show(p, 0);
+    char *out = render_popup(p);
+    assert(out[0] == '\0'); /* the historical contract */
+    free(out);
+    tui_list_popup_free(p);
+}
+
+static void test_empty_text_draws_title_and_one_inert_row(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    tui_list_popup_set_title(p, "@ src/");
+    tui_list_popup_set_empty_text(p, "no matches");
+    tui_list_popup_show(p, 0);
+    char *out = render_popup(p);
+    assert(strstr(out, "@ src/ (0)") != NULL);
+    assert(strstr(out, "no matches") != NULL);
+    /* Not selectable: nothing selected, moves are no-ops. */
+    assert(tui_list_popup_selected_index(p) == -1);
+    assert(tui_list_popup_selected_text(p) == NULL);
+    assert(!tui_list_popup_move_down(p));
+    assert(!tui_list_popup_move_up(p));
+    free(out);
+
+    /* Items arriving replaces the empty row with the list. */
+    const char *items[] = { "a.c", "b.c" };
+    tui_list_popup_set_items(p, items, 2);
+    tui_list_popup_show(p, 0);
+    out = render_popup(p);
+    assert(strstr(out, "no matches") == NULL);
+    assert(strstr(out, "a.c") != NULL);
+    free(out);
+
+    /* A filter that hides everything is the same empty state. */
+    tui_list_popup_set_filter(p, "zzz");
+    out = render_popup(p);
+    assert(strstr(out, "no matches") != NULL);
+    free(out);
+    tui_list_popup_free(p);
+}
+
+static void test_footer_is_a_last_inert_row(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "a.c", "b.c" };
+    tui_list_popup_set_items(p, items, 2);
+    tui_list_popup_set_footer(p, "enter pick  esc close");
+    tui_list_popup_show(p, 0);
+    char *out = render_popup(p);
+    const char *b = strstr(out, "b.c");
+    const char *f = strstr(out, "enter pick");
+    assert(b && f && f > b);
+    /* Rows are CRLF-separated and the footer is the final row. */
+    int crlf = 0;
+    for (const char *q = out; (q = strstr(q, "\r\n")); q += 2)
+        crlf++;
+    assert(crlf == 2); /* a.c / b.c / footer */
+    assert(strstr(f, "\r\n") == NULL);
+    /* Selection never lands on it. */
+    for (int i = 0; i < 6; i++)
+        tui_list_popup_move_down(p);
+    assert(strcmp(tui_list_popup_selected_text(p), "a.c") == 0 ||
+           strcmp(tui_list_popup_selected_text(p), "b.c") == 0);
+    free(out);
+
+    tui_list_popup_set_footer(p, NULL);
+    out = render_popup(p);
+    assert(strstr(out, "enter pick") == NULL);
+    crlf = 0;
+    for (const char *q = out; (q = strstr(q, "\r\n")); q += 2)
+        crlf++;
+    assert(crlf == 1); /* no trailing break without a footer */
+    free(out);
+    tui_list_popup_free(p);
+}
+
+static void test_set_selected_preselects_and_scrolls(void)
+{
+    TuiListPopup *p = tui_list_popup_create();
+    const char *items[] = { "a", "b", "c", "d", "e", "f", "g", "h", "i", "j" };
+    tui_list_popup_set_items(p, items, 10);
+    tui_list_popup_set_size(p, 0, 3);
+    tui_list_popup_show(p, 0);
+    assert(tui_list_popup_set_selected(p, 7));
+    assert(strcmp(tui_list_popup_selected_text(p), "h") == 0);
+    char *out = render_popup(p);
+    assert(strstr(out, "h") != NULL); /* scrolled into the 3-row window */
+    free(out);
+    assert(!tui_list_popup_set_selected(p, 10)); /* out of range */
+    assert(!tui_list_popup_set_selected(p, -1));
+    assert(strcmp(tui_list_popup_selected_text(p), "h") == 0);
+
+    /* Indexes are into the FILTERED view. */
+    tui_list_popup_set_filter(p, "e");
+    assert(tui_list_popup_set_selected(p, 0));
+    assert(strcmp(tui_list_popup_selected_text(p), "e") == 0);
+    tui_list_popup_free(p);
+}
+
 int main(void)
 {
     printf("list_popup tests:\n");
@@ -762,6 +875,10 @@ int main(void)
     RUN_TEST(test_meta_cleared_by_plain_set_items);
     RUN_TEST(test_meta_survives_item_truncation);
     RUN_TEST(test_meta_filter_still_matches_items);
+    RUN_TEST(test_empty_popup_renders_nothing_by_default);
+    RUN_TEST(test_empty_text_draws_title_and_one_inert_row);
+    RUN_TEST(test_footer_is_a_last_inert_row);
+    RUN_TEST(test_set_selected_preselects_and_scrolls);
 
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

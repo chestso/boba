@@ -355,6 +355,8 @@ Features:
 - **Continuation prompt** - Custom prompt for lines after the first in multi-line mode
 - **Soft-wrap mode** - Long lines wrap to the next visual row instead of horizontal scrolling (`tui_textinput_set_soft_wrap`)
 - **Syntax-highlighting callback** - Host applications can inject per-token styling via `tui_textinput_set_text_renderer`; the callback returns a malloc'd ANSI-escaped string that replaces raw text in the rendered output
+- **Style spans, revision and range replace** - `tui_textinput_set_spans` styles absolute byte ranges (a file mention, a command word); spans compose with selection and echo mode, survive soft-wrap splits, and stop painting after an edit until re-declared. `tui_textinput_revision` changes whenever the text's bytes do (not on movement), and `tui_textinput_replace_range` replaces `[start, end)` as one undoable edit
+- **List popup note rows** - `tui_list_popup_set_empty_text` draws a muted "no matches" row instead of nothing, `tui_list_popup_set_footer` adds a one-line key hint, and `tui_list_popup_set_selected` opens on a chosen item
 - **Ctrl+D deletes char** - The textinput handles Ctrl+D as `delete-char` (never decides to quit; the component receives `TUI_MSG_EOF` and decides)
 - **Bracketed paste** - A `TUI_MSG_PASTE` payload is inserted as TEXT, as one edit (one undo entry), never as synthesized keystrokes: line endings (CRLF / CR / LF) become `\n` in multi-line mode and a single space in single-line mode, so a pasted line break is a line break and never an Enter that submits
 

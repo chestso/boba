@@ -66,6 +66,12 @@ typedef struct TuiListPopup
      * (zero allocations per keystroke). */
     char *filter;
 
+    /* Optional note rows (owned, may be NULL): the line shown INSTEAD of
+     * the list when nothing is to be listed, and a one-line hint shown
+     * under the last row. Neither is selectable. */
+    char *empty_text;
+    char *footer;
+
     /* Colors (all default to NONE = inherit terminal defaults).
      * Set via tui_list_popup_set_colors(). */
     TuiColor border_color;
@@ -144,6 +150,25 @@ void tui_list_popup_set_size(TuiListPopup *popup, int width, int max_visible);
 void tui_list_popup_set_terminal_size(TuiListPopup *popup, int w, int h);
 void tui_list_popup_set_title(TuiListPopup *popup, const char *title);
 void tui_list_popup_set_filter(TuiListPopup *popup, const char *query);
+
+/* The empty state. With text set, a visible popup that has nothing to
+ * list (no items, or none passing the filter) draws its title and this
+ * one muted row instead of drawing nothing, so a completion that found
+ * no match can say so. The row is not selectable: selected_index() stays
+ * -1 and the move_* calls do nothing. NULL (the default) keeps the old
+ * behaviour: an empty popup renders no bytes. */
+void tui_list_popup_set_empty_text(TuiListPopup *popup, const char *text);
+
+/* A one-line hint under the list ("enter pick  esc close"), drawn in
+ * the same muted role, clipped to the popup width, never selectable. It
+ * is shown whenever the popup draws rows. NULL clears it. */
+void tui_list_popup_set_footer(TuiListPopup *popup, const char *text);
+
+/* Select the item at `index` of the FILTERED view and scroll it into
+ * view. show() and set_filter() snap the selection to the top; this is
+ * how a caller opens a popup on the current value instead. Returns 1 on
+ * success, 0 (selection unchanged) when index is out of range. */
+int tui_list_popup_set_selected(TuiListPopup *popup, int index);
 
 /* Filtered-view queries. With no filter set (or an empty one) the
  * filtered view IS the full list, so these are always safe to call.

@@ -243,6 +243,17 @@ static int compute_popup_width(const TuiListPopup *p)
             w = title_w;
     }
 
+    /* The note rows (empty state, footer hint) must fit whole too. */
+    const char *note[2] = { p->footer, filtered_count(p) == 0 ? p->empty_text
+                                                              : NULL };
+    for (int k = 0; k < 2; k++) {
+        if (note[k] && *note[k]) {
+            int nw = str_display_width(note[k]) + BAR_WIDTH + 1;
+            if (nw > w)
+                w = nw;
+        }
+    }
+
     int term_w = p->terminal_width > 0 ? p->terminal_width : 80;
     if (w > term_w)
         w = term_w;
@@ -301,6 +312,8 @@ void tui_list_popup_free(TuiListPopup *p)
     free_items(p);
     free(p->title);
     free(p->filter);
+    free(p->empty_text);
+    free(p->footer);
     free(p);
 }
 
@@ -530,6 +543,34 @@ void tui_list_popup_set_title(TuiListPopup *p, const char *title)
     p->title = title ? strdup(title) : NULL;
 }
 
+void tui_list_popup_set_empty_text(TuiListPopup *p, const char *text)
+{
+    if (!p)
+        return;
+    free(p->empty_text);
+    p->empty_text = text ? strdup(text) : NULL;
+}
+
+void tui_list_popup_set_footer(TuiListPopup *p, const char *text)
+{
+    if (!p)
+        return;
+    free(p->footer);
+    p->footer = text ? strdup(text) : NULL;
+}
+
+int tui_list_popup_set_selected(TuiListPopup *p, int index)
+{
+    if (!p)
+        return 0;
+    int n = filtered_count(p);
+    if (index < 0 || index >= n)
+        return 0;
+    p->selected = index;
+    ensure_selection_visible(p);
+    return 1;
+}
+
 void tui_list_popup_set_filter(TuiListPopup *p, const char *query)
 {
     if (!p)
@@ -625,35 +666,74 @@ static void emit_pad(DynamicBuffer *out, int cols)
         dynamic_buffer_append_str(out, " ");
 }
 
+/* One non-selectable row (the empty-state line, the footer hint): the
+ * unselected row's bar and background, the text in the meta color (the
+ * popup's muted role; the border color when no meta color is set),
+ * clipped and padded to the row width. */
+static void emit_note_row(const TuiListPopup *p, DynamicBuffer *out,
+                          const char *text, int content_width)
+{
+    emit_fg(out, p->border_color);
+    emit_bg(out, p->selected_bg);
+    dynamic_buffer_append_str(out, "\xe2\x96\x8c"); /* ▌ */
+    emit_bg(out, p->selected_bg);
+    emit_fg(out, p->meta_color.type != TUI_COLOR_NONE ? p->meta_color
+                                                      : p->border_color);
+    dynamic_buffer_append_str(out, " ");
+    int text_max = content_width - 1;
+    if (text_max < 1)
+        text_max = 1;
+    int cols = emit_clipped(out, text, text_max);
+    emit_pad(out, text_max - cols);
+    dynamic_buffer_append_str(out, SGR_RESET);
+    dynamic_buffer_append_str(out, EL_TO_END);
+}
+
+static void emit_title_line(const TuiListPopup *p, DynamicBuffer *out,
+                            int width)
+{
+    char title_buf[256];
+    build_title(p, title_buf, sizeof(title_buf));
+    if (!title_buf[0])
+        return;
+    /* Title bg spans full width */
+    emit_bg(out, p->selected_bg);
+    emit_fg(out, p->title_color);
+    dynamic_buffer_append_str(out, title_buf);
+
+    /* Pad to full width */
+    int title_w = (int)str_display_width(title_buf);
+    for (int i = title_w; i < width; i++)
+        dynamic_buffer_append_str(out, " ");
+
+    dynamic_buffer_append_str(out, SGR_RESET);
+    dynamic_buffer_append_str(out, EL_TO_END);
+    dynamic_buffer_append_str(out, "\r\n");
+}
+
 void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
 {
     if (!p || !out || !p->visible)
         return;
     int vis_rows = compute_visible_rows(p);
-    if (vis_rows <= 0)
-        return; /* no items, or nothing passes the filter */
+    int has_footer = p->footer && *p->footer;
+    if (vis_rows <= 0) {
+        /* No items, or nothing passes the filter. A caller that declared
+         * an empty-state line wants the popup to SAY so (a vanished popup
+         * reads as a bug); everyone else keeps the historical nothing. */
+        if (p->empty_text && *p->empty_text) {
+            int w = compute_popup_width(p);
+            emit_title_line(p, out, w);
+            emit_note_row(p, out, p->empty_text, w - BAR_WIDTH);
+        }
+        return;
+    }
 
     int width = compute_popup_width(p);
     int content_width = width - BAR_WIDTH; /* space for text after bar */
 
     /* Title line (or, when filtering without a title, the query line) */
-    char title_buf[256];
-    build_title(p, title_buf, sizeof(title_buf));
-    if (title_buf[0]) {
-        /* Title bg spans full width */
-        emit_bg(out, p->selected_bg);
-        emit_fg(out, p->title_color);
-        dynamic_buffer_append_str(out, title_buf);
-
-        /* Pad to full width */
-        int title_w = (int)str_display_width(title_buf);
-        for (int i = title_w; i < width; i++)
-            dynamic_buffer_append_str(out, " ");
-
-        dynamic_buffer_append_str(out, SGR_RESET);
-        dynamic_buffer_append_str(out, EL_TO_END);
-        dynamic_buffer_append_str(out, "\r\n");
-    }
+    emit_title_line(p, out, width);
 
     /* Item rows — scroll_offset/selected are filtered-view indexes;
      * map each row through the filter to the true item. */
@@ -729,9 +809,12 @@ void tui_list_popup_view(const TuiListPopup *p, DynamicBuffer *out)
         /* No \r\n after the last visible item row — the cursor stays on
          * the final content line so the runtime's stale-line erasure
          * correctly clears lines below when the list shrinks. */
-        if (row < vis_rows - 1 && fidx + 1 < filtered_count(p))
+        if (row < vis_rows - 1 || has_footer)
             dynamic_buffer_append_str(out, "\r\n");
     }
+
+    if (has_footer)
+        emit_note_row(p, out, p->footer, content_width);
 }
 
 /* ===== component vtable ===== */
