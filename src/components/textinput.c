@@ -537,42 +537,162 @@ static void cursor_down(TuiTextInput *input)
     recalculate_cursor_position(input);
 }
 
-/* Save text to kill buffer (append=1 appends to existing buffer) and also
- * push the resulting kill-ring contents to the system clipboard via a
- * TUI_CMD_CLIPBOARD_COPY command. Returns the command (caller threads it
- * back through tui_update_result), or NULL on empty input / OOM.
- *
- * Matches graphical emacs's `interprogram-cut-function = gui-select-text`
- * default — every kill broadcasts to the system clipboard. */
-static TuiCmd *kill_save(TuiTextInput *input, const char *text, size_t len,
-                         int append)
+/* Which way a kill runs, i.e. how a repeat joins the ring. */
+typedef enum
+{
+    KILL_FORWARD,
+    KILL_BACKWARD,
+} KillDir;
+
+/* How a kill joins the ring. REPLACE starts a new chain; APPEND and
+ * PREPEND extend an existing one, so `C-w C-w` reads in document order. */
+typedef enum
+{
+    KILL_SAVE_REPLACE,
+    KILL_SAVE_APPEND,
+    KILL_SAVE_PREPEND,
+} KillSaveMode;
+
+/* What one key press wants the caller to do with the clipboard. Filled in
+ * by the edit paths, consumed once at the tail of update(). */
+typedef enum
+{
+    CLIP_NONE,
+    CLIP_KILL,
+    CLIP_COPY,
+    CLIP_CUT,
+    CLIP_PASTE_REQUEST,
+} ClipKind;
+
+/* One key press's clipboard outcome. CLIP_COPY names the byte range (it
+ * does not enter the ring); every other kind delivers the ring. */
+typedef struct
+{
+    ClipKind kind;
+    size_t start, end;
+} ClipEvent;
+
+/* Ring bookkeeping: join `text` to the kill ring under `mode`. The new
+ * contents are built in a fresh buffer first, so on OOM the ring stays
+ * exactly as it was — the delete still happens (undo holds the text, and
+ * a half-rewritten ring is worse than a stale one). Returns 0 / -1; the
+ * caller kills regardless. */
+static int kill_save(TuiTextInput *input, const char *text, size_t len,
+                     KillSaveMode mode)
 {
     if (len == 0)
-        return NULL;
+        return -1;
 
-    if (append && input->kill_buf && input->kill_buf_len > 0) {
-        char *new_buf =
-            (char *)realloc(input->kill_buf, input->kill_buf_len + len);
-        if (!new_buf)
-            return NULL;
-        memcpy(new_buf + input->kill_buf_len, text, len);
-        input->kill_buf = new_buf;
-        input->kill_buf_len += len;
+    int has_old = mode != KILL_SAVE_REPLACE && input->kill_buf &&
+                  input->kill_buf_len > 0;
+    size_t old_len = has_old ? input->kill_buf_len : 0;
+    size_t new_len = old_len + len;
+
+    char *buf = (char *)malloc(new_len);
+    if (!buf)
+        return -1;
+
+    if (has_old && mode == KILL_SAVE_PREPEND) {
+        memcpy(buf, text, len);
+        memcpy(buf + len, input->kill_buf, old_len);
     } else {
-        free(input->kill_buf);
-        input->kill_buf = (char *)malloc(len);
-        if (!input->kill_buf) {
-            input->kill_buf_len = 0;
-            return NULL;
-        }
-        memcpy(input->kill_buf, text, len);
-        input->kill_buf_len = len;
+        if (old_len > 0)
+            memcpy(buf, input->kill_buf, old_len);
+        memcpy(buf + old_len, text, len);
     }
 
-    /* Push the current kill-ring contents (after append) to the system
-     * clipboard. Consecutive kills produce a clipboard cmd carrying the
-     * accumulated text — same as emacs. */
-    return tui_cmd_clipboard_copy(input->kill_buf, input->kill_buf_len);
+    free(input->kill_buf);
+    input->kill_buf = buf;
+    input->kill_buf_len = new_len;
+    return 0;
+}
+
+/* The one kill primitive: remove [start, end), join it to the ring (as a
+ * REPLACE, or as an APPEND/PREPEND when it continues a kill chain), fix
+ * the cursor, and record the clipboard outcome in `ev`. Every deletion
+ * that fills the ring goes through here — a second memmove-and-kill_save
+ * pair is the bug this exists to prevent.
+ *
+ * `last_was_kill` is set HERE, so a no-op (an empty range) never extends
+ * the chain. */
+static void kill_range(TuiTextInput *input, size_t start, size_t end,
+                       KillDir dir, int was_kill, ClipKind kind,
+                       ClipEvent *ev)
+{
+    if (end > input->text_len)
+        end = input->text_len;
+    if (start >= end)
+        return; /* nothing to kill, no chain */
+
+    size_t n = end - start;
+    KillSaveMode mode = !was_kill ? KILL_SAVE_REPLACE
+                                  : (dir == KILL_FORWARD ? KILL_SAVE_APPEND
+                                                         : KILL_SAVE_PREPEND);
+    (void)kill_save(input, input->text + start, n, mode);
+
+    memmove(input->text + start, input->text + end, input->text_len - end);
+    input->text_len -= n;
+    input->text[input->text_len] = '\0';
+    input->revision++;
+
+    if (input->cursor_byte >= end)
+        input->cursor_byte -= n;
+    else if (input->cursor_byte > start)
+        input->cursor_byte = start;
+
+    clear_mark_if_set(input);
+    recalculate_cursor_position(input);
+    input->last_was_kill = 1;
+    ev->kind = kind;
+}
+
+/* C-k: kill to the end of the line; at EOL take the newline too (joining
+ * the next line in); at the end of the buffer do nothing at all. "Two
+ * presses remove the line" falls out of this — it does not depend on
+ * was_kill. */
+static void kill_line(TuiTextInput *input, int was_kill, ClipEvent *ev)
+{
+    size_t start = input->cursor_byte, end = start;
+    while (end < input->text_len && input->text[end] != '\n')
+        end++;
+    if (end == start) {
+        if (end < input->text_len)
+            end++; /* the '\n' */
+        else
+            return; /* end of buffer: no-op, no chain */
+    }
+    kill_range(input, start, end, KILL_FORWARD, was_kill, CLIP_KILL, ev);
+}
+
+/* C-w (no mark) / Alt+Backspace / Ctrl+Backspace: kill the previous word. */
+static void kill_word_backward(TuiTextInput *input, int was_kill, ClipEvent *ev)
+{
+    if (input->cursor_byte == 0)
+        return;
+
+    size_t pos = input->cursor_byte;
+
+    /* Skip non-word characters before the word */
+    while (pos > 0 && !is_word_char(input, input->text[pos - 1]))
+        pos--;
+
+    /* Skip the word itself */
+    while (pos > 0 && is_word_char(input, input->text[pos - 1]))
+        pos--;
+
+    kill_range(input, pos, input->cursor_byte, KILL_BACKWARD, was_kill,
+               CLIP_KILL, ev);
+}
+
+/* C-u / Cmd+Backspace: kill back to the start of the line. */
+static void kill_to_line_start(TuiTextInput *input, int was_kill,
+                               ClipEvent *ev)
+{
+    size_t start = input->cursor_byte;
+    while (start > 0 && input->text[start - 1] != '\n')
+        start--;
+    kill_range(input, start, input->cursor_byte, KILL_BACKWARD, was_kill,
+               CLIP_KILL, ev);
 }
 
 /* Transpose the two clusters before the cursor (Ctrl+T) */
@@ -980,6 +1100,10 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
      * via tui_update_result at the function tail. */
     TuiCmd *pending_cmd = NULL;
 
+    /* What this key press wants done with the clipboard. The edit paths
+     * fill it in; it is delivered once, at the tail. */
+    ClipEvent ev = { CLIP_NONE, 0, 0 };
+
     /* Handle special keys */
     switch (key.key) {
     case TUI_KEY_LEFT:
@@ -1106,23 +1230,12 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                         return line_submit(input);
                     }
                 } else if (key.rune == 'k' || key.rune == 'K') {
-                    /* Ctrl+K: Kill to end of line */
-                    size_t end = input->cursor_byte;
-                    while (end < input->text_len && input->text[end] != '\n') {
-                        end++;
-                    }
-                    if (end > input->cursor_byte) {
-                        pending_cmd =
-                            kill_save(input, input->text + input->cursor_byte,
-                                      end - input->cursor_byte, was_kill);
-                        memmove(input->text + input->cursor_byte, input->text + end,
-                                input->text_len - end);
-                        input->text_len -= (end - input->cursor_byte);
-                        input->revision++;
-                        input->text[input->text_len] = '\0';
-                        clear_mark_if_set(input);
-                    }
-                    input->last_was_kill = 1;
+                    /* Ctrl+K: kill to end of line; at EOL take the newline
+                     * (joining the next line); at end of buffer, nothing. */
+                    kill_line(input, was_kill, &ev);
+                    if (ev.kind != CLIP_NONE)
+                        pending_cmd = tui_cmd_clipboard_copy(
+                            input->kill_buf, input->kill_buf_len);
                 } else if (key.rune == 'n' || key.rune == 'N') {
                     /* Ctrl+N: Next history entry (or cursor down if mid-text) */
                     if (input->multiline) {
@@ -1147,24 +1260,10 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     transpose_chars(input);
                 } else if (key.rune == 'u' || key.rune == 'U') {
                     /* Ctrl+U: Kill to start of line */
-                    size_t start = input->cursor_byte;
-                    while (start > 0 && input->text[start - 1] != '\n') {
-                        start--;
-                    }
-                    if (start < input->cursor_byte) {
-                        size_t del_len = input->cursor_byte - start;
-                        pending_cmd =
-                            kill_save(input, input->text + start, del_len, 0);
-                        memmove(input->text + start, input->text + input->cursor_byte,
-                                input->text_len - input->cursor_byte);
-                        input->text_len -= del_len;
-                        input->revision++;
-                        input->cursor_byte = start;
-                        input->text[input->text_len] = '\0';
-                        clear_mark_if_set(input);
-                        recalculate_cursor_position(input);
-                    }
-                    input->last_was_kill = 1;
+                    kill_to_line_start(input, was_kill, &ev);
+                    if (ev.kind != CLIP_NONE)
+                        pending_cmd = tui_cmd_clipboard_copy(
+                            input->kill_buf, input->kill_buf_len);
                 } else if (key.rune == 'w' || key.rune == 'W') {
                     /* Ctrl+W: kill region (when mark is set) or kill word
                      * backward (default). Matches emacs's overload of
@@ -1172,45 +1271,14 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
                     size_t sel_start, sel_end;
                     if (selection_range(input, &sel_start, &sel_end) &&
                         sel_end > sel_start) {
-                        size_t del_len = sel_end - sel_start;
-                        pending_cmd = kill_save(input, input->text + sel_start,
-                                                del_len, 0);
-                        memmove(input->text + sel_start,
-                                input->text + sel_end,
-                                input->text_len - sel_end);
-                        input->text_len -= del_len;
-                        input->revision++;
-                        if (input->cursor_byte > sel_end)
-                            input->cursor_byte -= del_len;
-                        else if (input->cursor_byte > sel_start)
-                            input->cursor_byte = sel_start;
-                        input->text[input->text_len] = '\0';
-                        clear_mark_if_set(input);
-                        recalculate_cursor_position(input);
-                        input->last_was_kill = 1;
-                    } else if (input->cursor_byte > 0) {
-                        size_t pos = input->cursor_byte;
-                        /* Skip non-word characters backward */
-                        while (pos > 0 && !is_word_char(input, input->text[pos - 1]))
-                            pos--;
-                        /* Skip word backward */
-                        while (pos > 0 && is_word_char(input, input->text[pos - 1]))
-                            pos--;
-                        if (pos < input->cursor_byte) {
-                            size_t del_len = input->cursor_byte - pos;
-                            pending_cmd = kill_save(input, input->text + pos,
-                                                    del_len, was_kill);
-                            memmove(input->text + pos, input->text + input->cursor_byte,
-                                    input->text_len - input->cursor_byte);
-                            input->text_len -= del_len;
-                            input->revision++;
-                            input->cursor_byte = pos;
-                            input->text[input->text_len] = '\0';
-                            clear_mark_if_set(input);
-                            recalculate_cursor_position(input);
-                        }
-                        input->last_was_kill = 1;
+                        kill_range(input, sel_start, sel_end, KILL_BACKWARD,
+                                   was_kill, CLIP_KILL, &ev);
+                    } else {
+                        kill_word_backward(input, was_kill, &ev);
                     }
+                    if (ev.kind != CLIP_NONE)
+                        pending_cmd = tui_cmd_clipboard_copy(
+                            input->kill_buf, input->kill_buf_len);
                 } else if (key.rune == 'x' || key.rune == 'X') {
                     /* Ctrl+X: prefix for C-x C-u (undo) */
                     input->ctrl_x_prefix = 1;
