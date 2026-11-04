@@ -201,6 +201,7 @@ static void clear_mark_if_set(TuiTextInput *input)
     if (input->has_mark) {
         input->has_mark = 0;
         input->mark_byte = 0;
+        input->mark_from_shift = 0;
     }
 }
 
@@ -223,11 +224,54 @@ static int selection_range(const TuiTextInput *input, size_t *out_start,
     return 1;
 }
 
+/* emacs' shift-select-mode, in two halves. This is the first: called
+ * BEFORE a motion key moves the cursor. Shift starts a mark (marking it as
+ * shift-made, so an unshifted motion may collapse it); an unshifted motion
+ * collapses a shift-made one. A Ctrl+Space mark (mark_from_shift == 0) is
+ * untouched — motion extends it, as it always did. */
+static void begin_motion(TuiTextInput *input, int shift)
+{
+    if (shift && !input->has_mark) {
+        input->mark_byte = input->cursor_byte;
+        input->has_mark = 1;
+        input->mark_from_shift = 1;
+    } else if (!shift && input->has_mark && input->mark_from_shift) {
+        clear_mark_if_set(input); /* an unshifted motion collapses it */
+    }
+}
+
+/* The second half: typing / paste / backspace / delete over a Shift
+ * selection replaces it. Emacs marks keep their old behaviour (an
+ * insertion clears the mark and inserts). The deleted bytes do NOT enter
+ * the kill ring — a replace is not a kill. Returns 1 if it deleted, so
+ * Backspace / Delete can stop there. */
+static int replace_shift_selection(TuiTextInput *input)
+{
+    size_t start = 0, end = 0;
+    if (!input->mark_from_shift || !selection_range(input, &start, &end) ||
+        end <= start)
+        return 0;
+
+    memmove(input->text + start, input->text + end, input->text_len - end);
+    input->text_len -= (end - start);
+    input->text[input->text_len] = '\0';
+    input->revision++;
+    input->cursor_byte = start;
+    clear_mark_if_set(input);
+    recalculate_cursor_position(input);
+    return 1;
+}
+
 /* Insert text at cursor position */
 static int insert_text(TuiTextInput *input, const char *text, size_t len)
 {
     if (len == 0)
         return 0;
+
+    /* Typing over a shift-made selection replaces it. Idempotent, so a
+     * multi-run paste collapses the selection once — the later runs see
+     * no mark — and the whole paste stays one undo entry. */
+    (void)replace_shift_selection(input);
 
     if (ensure_capacity(input, input->text_len + len + 1) < 0)
         return -1;
@@ -315,6 +359,10 @@ static void insert_paste(TuiTextInput *input, const TuiPasteMsg *paste)
 /* Delete character before cursor (backspace) */
 static void delete_before(TuiTextInput *input)
 {
+    /* A shift-made selection is what Backspace deletes. */
+    if (replace_shift_selection(input))
+        return;
+
     if (input->cursor_byte == 0)
         return;
 
@@ -336,6 +384,10 @@ static void delete_before(TuiTextInput *input)
 /* Delete character at cursor (delete key) */
 static void delete_at(TuiTextInput *input)
 {
+    /* A shift-made selection is what Delete deletes. */
+    if (replace_shift_selection(input))
+        return;
+
     if (input->cursor_byte >= input->text_len)
         return;
 
@@ -1131,6 +1183,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     /* Handle special keys */
     switch (key.key) {
     case TUI_KEY_LEFT:
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
         if (key.mods & TUI_MOD_CTRL)
             cursor_word_left(input);
         else
@@ -1138,6 +1191,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         break;
 
     case TUI_KEY_RIGHT:
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
         if (key.mods & TUI_MOD_CTRL)
             cursor_word_right(input);
         else
@@ -1145,6 +1199,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         break;
 
     case TUI_KEY_UP:
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
         if (input->multiline && input->cursor_row > 0) {
             cursor_up(input);
         } else {
@@ -1153,6 +1208,7 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         break;
 
     case TUI_KEY_DOWN:
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
         if (input->multiline) {
             /* Check if there's a next line */
             size_t pos = input->cursor_byte;
@@ -1179,10 +1235,12 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     }
 
     case TUI_KEY_HOME:
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
         cursor_home(input);
         break;
 
     case TUI_KEY_END:
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
         cursor_end(input);
         break;
 

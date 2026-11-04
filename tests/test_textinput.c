@@ -1166,6 +1166,117 @@ static void test_clipboard_hook_kind_and_text(void)
     tui_textinput_free(input);
 }
 
+/* ---------- shift-selection (emacs shift-select-mode) ---------- */
+
+static void test_shift_motion_selects(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abcdef");
+    tui_textinput_set_cursor(input, 0);
+
+    for (int i = 0; i < 3; i++)
+        run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
+
+    assert(input->has_mark == 1);
+    assert(input->mark_byte == 0);
+    assert(input->cursor_byte == 3);
+    assert(input->mark_from_shift == 1);
+
+    tui_textinput_free(input);
+}
+
+static void test_unshifted_motion_collapses_shift_selection(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abcdef");
+    tui_textinput_set_cursor(input, 0);
+
+    for (int i = 0; i < 3; i++)
+        run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
+    assert(input->has_mark == 1);
+
+    /* Plain motion collapses the shift-made selection and still moves. */
+    run_update(input, tui_msg_key(TUI_KEY_LEFT, 0, TUI_MOD_NONE));
+    assert(input->has_mark == 0);
+    assert(input->mark_from_shift == 0);
+    assert(input->cursor_byte == 2);
+
+    tui_textinput_free(input);
+}
+
+static void test_typing_replaces_shift_selection(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abcdef");
+    tui_textinput_set_cursor(input, 0);
+
+    for (int i = 0; i < 3; i++)
+        run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
+    int undo_before = input->undo_count;
+
+    send_char(input, 'X');
+    assert(strcmp(tui_textinput_text(input), "Xdef") == 0);
+    assert(input->cursor_byte == 1);
+    assert(input->has_mark == 0);
+    /* Replace + insert is ONE undoable edit. */
+    assert(input->undo_count == undo_before + 1);
+
+    run_update(input, tui_msg_key(TUI_KEY_NONE, '_', TUI_MOD_CTRL));
+    assert(strcmp(tui_textinput_text(input), "abcdef") == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_backspace_replaces_shift_selection(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abcdef");
+    tui_textinput_set_cursor(input, 1);
+
+    for (int i = 0; i < 2; i++)
+        run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
+    assert(input->mark_byte == 1);
+    assert(input->cursor_byte == 3);
+
+    run_update(input, tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_NONE));
+    assert(strcmp(tui_textinput_text(input), "adef") == 0);
+    assert(input->cursor_byte == 1);
+    assert(input->has_mark == 0);
+    /* A replace is not a kill: the ring stays empty. */
+    assert(input->kill_buf_len == 0);
+
+    tui_textinput_free(input);
+}
+
+static void test_ctrl_space_mark_is_not_collapsed_by_plain_motion(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+    tui_textinput_set_focus(input, 1);
+    send_string(input, "abcdef");
+    tui_textinput_set_cursor(input, 0);
+
+    run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
+    assert(input->has_mark == 1);
+    assert(input->mark_from_shift == 0);
+
+    for (int i = 0; i < 2; i++)
+        run_update(input, tui_msg_key(TUI_KEY_NONE, 'f', TUI_MOD_CTRL));
+    assert(input->cursor_byte == 2);
+
+    /* An emacs mark survives plain motion: motion EXTENDS it. */
+    run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_NONE));
+    assert(input->has_mark == 1);
+    assert(input->mark_from_shift == 0);
+    assert(input->mark_byte == 0);
+    assert(input->cursor_byte == 3);
+
+    tui_textinput_free(input);
+}
+
 static void test_edit_clears_mark(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -2496,6 +2607,11 @@ int main(void)
     RUN_TEST(test_ctrl_u_reports_kill);
     RUN_TEST(test_clipboard_cmd_opt_in_restores_kill);
     RUN_TEST(test_clipboard_hook_kind_and_text);
+    RUN_TEST(test_shift_motion_selects);
+    RUN_TEST(test_unshifted_motion_collapses_shift_selection);
+    RUN_TEST(test_typing_replaces_shift_selection);
+    RUN_TEST(test_backspace_replaces_shift_selection);
+    RUN_TEST(test_ctrl_space_mark_is_not_collapsed_by_plain_motion);
     RUN_TEST(test_edit_clears_mark);
     RUN_TEST(test_escape_clears_mark);
     RUN_TEST(test_view_renders_selection_with_reverse);

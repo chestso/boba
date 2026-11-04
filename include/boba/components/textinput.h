@@ -70,6 +70,7 @@ typedef struct TuiTextInput
      * it to the clipboard hook; C-w kills it. */
     size_t mark_byte;
     int has_mark;
+    int mark_from_shift; /* 1 when the mark was made by Shift-motion */
 
     int width;         /* Max width (0 = unlimited) */
     int height;        /* Max visible height (0 = grow to fit) */
