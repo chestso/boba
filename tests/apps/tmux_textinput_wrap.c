@@ -2,7 +2,7 @@
  *
  * Mounts a soft-wrapping multiline TuiTextInput at row 1 with a "> " prompt,
  * runs the standard bubbletea-style runtime, and tracks SIGWINCH by updating
- * the textinput's terminal_width on WINDOW_SIZE messages. Soft-wrap is on, so
+ * forwarding WINDOW_SIZE messages to the textinput. Soft-wrap is on, so
  * long logical lines wrap onto continuation rows instead of scrolling
  * horizontally. No quit key — the driving test tears down with
  * `tmux kill-session`.
@@ -13,13 +13,10 @@
 #include <boba/msg.h>
 #include <boba/runtime.h>
 
-/* App uses the legacy convenience setter to focus the textinput at startup. */
-_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
-
 #include <stdio.h>
 #include <stdlib.h>
 
-    typedef struct
+typedef struct
 {
     TuiModel base;
     TuiTextInput *ti;
@@ -37,19 +34,19 @@ static TuiInitResult app_init(void *cfg)
         free(a);
         return tui_init_result_none(NULL);
     }
-    tui_textinput_set_focus(a->ti, 1);
+    tui_textinput_update(a->ti, tui_msg_focus());
     tui_textinput_set_prompt(a->ti, "> ");
-    tui_textinput_set_soft_wrap(a->ti, 1);
+    tui_textinput_set_wrap(a->ti, TUI_TEXTINPUT_WRAP);
+    TuiTextInputGeometry g = { .sizing = TUI_TEXTINPUT_FLOW,
+                               .place = TUI_TEXTINPUT_AT_ROW,
+                               .row = 1 };
+    tui_textinput_set_geometry(a->ti, &g);
     return tui_init_result_none((TuiModel *)a);
 }
 
 static TuiUpdateResult app_update(TuiModel *m, TuiMsg msg)
 {
     App *a = (App *)m;
-    if (msg.type == TUI_MSG_WINDOW_SIZE) {
-        tui_textinput_set_terminal_width(a->ti, msg.data.size.width);
-        tui_textinput_set_terminal_row(a->ti, 1);
-    }
     return tui_textinput_update(a->ti, msg);
 }
 

@@ -3,10 +3,35 @@
  * A text input widget supporting:
  * - Single and multi-line input
  * - Unicode/UTF-8 text
- * - Cursor navigation (arrows, home, end)
+ * - Cursor navigation (arrows, home, end, page up/down)
  * - Basic editing (insert, delete, backspace)
  * - Optional prompt string
- * - Auto-growing height for multi-line content
+ * - Soft-wrapped or horizontally clipped long lines
+ * - A vertical window over content taller than the box it may paint
+ *
+ * ## The model is opaque
+ *
+ * TuiTextInput is created by tui_textinput_create() and read through the
+ * accessors at the bottom of this header. Fields are not part of the API:
+ * derived state (the visual-row layout, the horizontal window, the scroll
+ * anchor) belongs to the component, and an app that cached its own copy
+ * would only be able to disagree with it.
+ *
+ * ## Geometry in one place
+ *
+ * Everything about "how big am I and where do I go" is one struct,
+ * TuiTextInputGeometry, set with one call. Three named modes replace the
+ * old 0-sentinels:
+ *
+ *   NATURAL  paint every row the text needs (the default)
+ *   FIXED    the app owns the box: `width` and `rows` say what it is
+ *   FLOW     follow the terminal window, inside the app's reserves and caps
+ *
+ * and placement is explicit (INLINE or AT_ROW) instead of "terminal_row
+ * happens to be non-zero". The terminal size is consumed from
+ * TUI_MSG_WINDOW_SIZE whenever the app routes it to the input, in every
+ * mode: knowing the screen is what makes the clamps possible, so it is not
+ * an opt-in.
  */
 
 #ifndef BOBA_TEXTINPUT_H
@@ -70,138 +95,136 @@ typedef void (*TuiTextInputClipboardFn)(struct TuiTextInput *input,
                                         const char *text, size_t len,
                                         void *userdata);
 
-/* Text input model */
-typedef struct TuiTextInput
+/* The model. Opaque: use the accessors below. */
+typedef struct TuiTextInput TuiTextInput;
+
+/* ------------------------------------------------------------------ */
+/* Geometry                                                            */
+/* ------------------------------------------------------------------ */
+
+/* How the input decides how many rows to paint.
+ *
+ *   NATURAL  every row the text needs. Nothing is hidden vertically, and
+ *            the app is responsible for the frame fitting (this is the
+ *            behaviour of every version before the window existed).
+ *   FIXED    the app owns the box: `rows` caps the painted rows and the
+ *            input scrolls vertically inside them.
+ *   FLOW     the input follows the terminal window itself: the usable
+ *            height is term_h - reserve_above - reserve_below, further
+ *            capped by `rows` and floored by `min_rows`. Requires the app
+ *            to route TUI_MSG_WINDOW_SIZE to the input.
+ */
+typedef enum
 {
-    TuiModel base; /* Base model for component interface */
+    TUI_TEXTINPUT_NATURAL = 0,
+    TUI_TEXTINPUT_FIXED,
+    TUI_TEXTINPUT_FLOW,
+} TuiTextInputSizing;
 
-    char *text;      /* UTF-8 text content */
-    size_t text_len; /* Current text length in bytes */
-    size_t text_cap; /* Allocated capacity */
+/* Where the first painted row goes. INLINE rows are relative: the runtime
+ * counts the frame's newlines to move the cursor, so the input emits one
+ * row separator per row and nothing else. AT_ROW rows are absolute screen
+ * coordinates starting at `row` (1-based). */
+typedef enum
+{
+    TUI_TEXTINPUT_INLINE = 0,
+    TUI_TEXTINPUT_AT_ROW,
+} TuiTextInputPlacement;
 
-    size_t cursor_byte; /* Cursor position in bytes */
-    size_t cursor_col;  /* Cursor's display column in its logical line */
-    size_t cursor_row;  /* Logical line index (0-indexed) */
+/* What happens to a logical line wider than the content width.
+ *
+ *   CLIP  one horizontal window, shared by every row: the text scrolls
+ *         under a fixed column window centred on the cursor
+ *   WRAP  the line continues on the next visual row, aligned under the
+ *         text column, so nothing is hidden horizontally
+ */
+typedef enum
+{
+    TUI_TEXTINPUT_CLIP = 0,
+    TUI_TEXTINPUT_WRAP,
+} TuiTextInputWrap;
 
-    /* Selection mark. When has_mark is set, the active region is
-     * [min(mark_byte, cursor_byte), max(mark_byte, cursor_byte)). Motion
-     * extends the region; edits clear it; Esc / C-g clear it; M-w reports
-     * it to the clipboard hook; C-w kills it. */
-    size_t mark_byte;
-    int has_mark;
-    int mark_from_shift; /* 1 when the mark was made by Shift-motion */
+/* Everything about size and placement, in one struct.
+ *
+ * Zero-initialise it and set what you need: a zeroed geometry is NATURAL
+ * sizing, INLINE placement, no caps, no reserves — today's defaults.
+ *
+ *   sizing         NATURAL | FIXED | FLOW (above)
+ *   place, row     INLINE, or AT_ROW with `row` = the 1-based screen row
+ *                  of the input's first row
+ *   width          content width in columns. FIXED: the box width. FLOW:
+ *                  0 means derive from the terminal (term_w - side_margin);
+ *                  a non-zero width wins, for apps that box the input in a
+ *                  border. 0 in NATURAL/FIXED means "no constraint": no
+ *                  wrapping and no horizontal clipping.
+ *   rows           maximum rows painted; 0 = no cap
+ *   min_rows       floor for FLOW sizing (>= 1); never lifts the result
+ *                  above the text's own height or above what the screen
+ *                  allows
+ *   reserve_above  FLOW: rows the app paints above the input in the frame
+ *   reserve_below  FLOW: rows the app paints below it
+ *   side_margin    FLOW: columns subtracted from the terminal width
+ *   scrolloff      rows of context kept visible above/below the cursor
+ *                  when the window scrolls, capped at (visible_rows - 1) / 2.
+ *                  0 means none; tui_textinput_create() seeds 1 when the
+ *                  config leaves it 0, so a zeroed geometry has context.
+ */
+typedef struct TuiTextInputGeometry
+{
+    TuiTextInputSizing sizing;
+    TuiTextInputPlacement place;
+    int row;
+    int width;
+    int rows;
+    int min_rows;
+    int reserve_above;
+    int reserve_below;
+    int side_margin;
+    int scrolloff;
+} TuiTextInputGeometry;
 
-    int width;         /* Max width (0 = unlimited) */
-    int height;        /* Max visible height (0 = grow to fit) */
-    int scroll_offset; /* Vertical scroll position (first visible line) */
-    int offset;        /* Horizontal scroll: left edge (display column) */
-    int offset_right;  /* Horizontal scroll: right edge (display column) */
-
-    const char *prompt;              /* Optional prompt string (not owned) */
-    int prompt_len;                  /* Cached prompt display width */
-    const char *continuation_prompt; /* Prompt for continuation lines (not owned) */
-    int continuation_prompt_len;     /* Cached continuation prompt display width */
-
-    int focused;           /* Whether component has focus */
-    int multiline;         /* Allow multiple lines (Enter inserts newline) */
-    int show_prompt;       /* Whether to display the prompt (default: 1) */
-    int terminal_width;    /* Width used for line wrapping / overflow (0 = 80) */
-    int terminal_row;      /* Row for absolute positioning (1-indexed, 0 = not set) */
-    char prompt_color[32]; /* Custom ANSI color for prompt (empty = no color) */
-
-    /* Lipgloss-shaped focused/blurred styles for the prompt. When any of
-     * these has a non-default styling (color or attribute), it overrides
-     * the legacy prompt_color field above for the matching focus state. */
-    TuiStyle focused_prompt_style;
-    TuiStyle blurred_prompt_style;
-
-    /* History management */
-    char **history;    /* Array of past input lines */
-    int history_size;  /* Max history entries */
-    int history_count; /* Current number of history entries */
-    int history_pos;   /* Navigation position (-1 = current input) */
-    char *saved_input; /* Saved current input when navigating history */
-
-    /* Tab completion */
-    char *word_chars; /* Characters that form words for completion and word movement */
-
-    /* Kill/yank buffer */
-    char *kill_buf;      /* Killed text (malloc'd, NULL initially) */
-    size_t kill_buf_len; /* Length of killed text in bytes */
-    int last_was_kill;   /* Whether previous key was a kill command */
-
-    /* Undo stack */
-    struct
-    {
-        char *text;
-        size_t text_len;
-        size_t cursor_byte;
-    } *undo_stack;
-    int undo_count;
-    int undo_cap;
-    int ctrl_x_prefix; /* Waiting for second key after C-x */
-
-    /* Pre-edit snapshot buffer (reused across keystrokes) */
-    char *snap_buf;
-    size_t snap_buf_cap;
-    size_t snap_len;
-    size_t snap_cursor;
-    int snap_valid; /* Whether snapshot should be committed */
-
-    int echo_mode; /* 0 = normal, 1 = masked (one * per grapheme cluster) */
-    int soft_wrap; /* 0 = horizontal scroll (default), 1 = soft-wrap long lines */
-
-    /* Rows drawn by the last absolute-positioning view() pass. Used to erase
-     * surplus rows when a soft-wrapped line shrinks (e.g. backspacing across
-     * a wrap boundary) — the runtime does not clear stale alt-screen rows,
-     * so the component owns cleanup of its own area. */
-    int last_render_rows;
-
-    /* Bumped by every change to the text's bytes (typing, deletes, kills,
-     * undo, paste, set_text, clear, replace_range), never by movement.
-     * Spans carry the revision they were computed for. */
-    uint64_t revision;
-    TuiTextSpan *spans; /* owned copy, sorted, disjoint */
-    size_t n_spans;
-    uint64_t spans_revision;
-
-    /* Styled-text highlight hook. If set, render_text_range calls this
-     * instead of emitting raw text bytes. The callback returns a malloc'd
-     * styled string (ANSI escape sequences + text); textinput appends it
-     * to the output buffer and frees it. Pass NULL to restore plain text.
-     * Note: selection reverse-video and echo mask are skipped when a
-     * highlight callback is set — the callback owns all styling. */
-    char *(*highlight_fn)(const char *text, size_t len, void *userdata);
-    void *highlight_userdata;
-
-    /* Clipboard reporting (see TuiTextInputClipboardFn). Appended here so
-     * the public struct keeps its field order. */
-    TuiTextInputClipboardFn clipboard_fn; /* NULL = report nothing */
-    void *clipboard_ud;
-    int clipboard_cmd; /* 0 = emit no TuiCmd at all (default) */
-
-    /* Ctrl+A: 0 = move to line start (readline, the default), 1 = select
-     * all. Declared by the app; never derived from the platform. */
-    int ctrl_a_select_all;
-} TuiTextInput;
-
-/* Configuration for creating text input */
+/* Configuration for creating a text input. Zero-initialise it: every field
+ * is optional.
+ *
+ *   placeholder  shown when the text is empty (not owned, must outlive)
+ *   prompt       the prompt string (not owned, must outlive)
+ *   multiline    1 = Enter inserts a newline, 0 = Enter submits
+ *   wrap         CLIP (default) or WRAP
+ *   rows         seeds geometry.rows when geometry.rows is 0
+ *   geometry     initial geometry; a zeroed struct means the defaults
+ */
 typedef struct TuiTextInputConfig
 {
-    const char *placeholder; /* Placeholder text (shown when empty) */
-    const char *prompt;      /* Prompt string (e.g., "> ") */
-    int width;               /* Max width (0 = unlimited) */
-    int height;              /* Max height (0 = grow to fit) */
-    int multiline;           /* Allow multiple lines */
+    const char *placeholder;
+    const char *prompt;
+    int multiline;
+    TuiTextInputWrap wrap;
+    int rows;
+    TuiTextInputGeometry geometry;
 } TuiTextInputConfig;
 
-/* Create a new text input component
- *
- * Parameters:
- *   config: Optional configuration (NULL for defaults)
- *
- * Returns: New text input model, or NULL on failure
- */
+/* Where the text currently sits in the window. Both axes, one call: an app
+ * drawing "↑ 12 more" chrome, a scrollbar, or a horizontal position
+ * indicator needs all of it, and asking twice could answer from two
+ * different frames. */
+typedef struct TuiTextInputScroll
+{
+    int total_rows;   /* visual rows the text needs (the natural height) */
+    int visible_rows; /* visual rows painted this frame                  */
+    int first_row;    /* index of the first visible visual row           */
+    int hidden_above; /* visual rows scrolled out above                  */
+    int hidden_below; /* visual rows scrolled out below                  */
+    int offset_left;  /* CLIP only: left display column of the window    */
+    int offset_right; /* CLIP only: right display column of the window   */
+} TuiTextInputScroll;
+
+/* ------------------------------------------------------------------ */
+/* Lifecycle                                                           */
+/* ------------------------------------------------------------------ */
+
+/* Create a new text input component.
+ * Parameters: config — optional (NULL for defaults)
+ * Returns: new text input model, or NULL on failure */
 TuiTextInput *tui_textinput_create(const TuiTextInputConfig *config);
 
 /* Free text input component */
@@ -225,10 +248,65 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg);
  */
 void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out);
 
-/* Get current text content */
+/* Get component interface for text input */
+const TuiComponent *tui_textinput_component(void);
+
+/* ------------------------------------------------------------------ */
+/* Geometry and scrolling                                              */
+/* ------------------------------------------------------------------ */
+
+/* Set the whole geometry in one call. `g` is copied; NULL resets to the
+ * defaults. Re-derives the window and keeps the cursor visible. */
+void tui_textinput_set_geometry(TuiTextInput *input,
+                                const TuiTextInputGeometry *g);
+
+/* Read back the geometry in force (the stored struct, not the derived
+ * window; see tui_textinput_scroll_state for the derived numbers). */
+TuiTextInputGeometry tui_textinput_geometry(const TuiTextInput *input);
+
+/* One-liners for the two knobs that change most often. Both write the same
+ * struct as tui_textinput_set_geometry() — there is only one geometry.
+ *
+ * tui_textinput_set_placement(row): row > 0 places the input absolutely at
+ * that 1-based screen row; row == 0 renders inline.
+ * tui_textinput_set_rows(rows): cap the painted rows (0 = no cap) and
+ * scroll vertically inside them; sizing becomes FIXED unless it is FLOW. */
+void tui_textinput_set_placement(TuiTextInput *input, int row);
+void tui_textinput_set_rows(TuiTextInput *input, int rows);
+
+/* The window the text is currently painted through. */
+TuiTextInputScroll tui_textinput_scroll_state(const TuiTextInput *input);
+
+/* Visual rows the whole text needs at the current width (the natural
+ * height), and the rows actually painted (the visible height H). They are
+ * equal whenever nothing caps the input. */
+int tui_textinput_total_rows(const TuiTextInput *input);
+int tui_textinput_visible_rows(const TuiTextInput *input);
+
+/* The cursor's position inside the painted window, 0-based: row 0 is the
+ * input's first painted row in both placement modes. Returns 0 in *row and
+ * *col (and does nothing) for a hidden cursor. Use tui_textinput_cursor_pos
+ * for the runtime's coordinate frame. */
+void tui_textinput_cursor_visual(const TuiTextInput *input, int *row,
+                                 int *col);
+
+/* Report cursor position for the runtime to place the hardware cursor.
+ * Returns tui_cursor_hidden() when the input is unfocused, or when the
+ * cursor is outside the visible window — which update() cannot leave it in
+ * (a focused input's cursor row is always inside [top, top + H) once
+ * ensure_cursor_visible() has run; a hidden cursor is the safe answer if a
+ * future path ever breaks that). The row is absolute in AT_ROW mode and
+ * frame-relative in INLINE mode. */
+TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input);
+
+/* ------------------------------------------------------------------ */
+/* Content                                                             */
+/* ------------------------------------------------------------------ */
+
+/* Get current text content (borrowed; valid until the next edit) */
 const char *tui_textinput_text(const TuiTextInput *input);
 
-/* Get text length */
+/* Get text length in bytes */
 size_t tui_textinput_len(const TuiTextInput *input);
 
 /* Set text content */
@@ -236,11 +314,6 @@ void tui_textinput_set_text(TuiTextInput *input, const char *text);
 
 /* Clear text content */
 void tui_textinput_clear(TuiTextInput *input);
-
-/* Set focus state */
-BOBA_DEPRECATED(
-    "send tui_msg_focus() / tui_msg_blur() through tui_textinput_update()")
-void tui_textinput_set_focus(TuiTextInput *input, int focused);
 
 /* Check if focused */
 int tui_textinput_is_focused(const TuiTextInput *input);
@@ -251,8 +324,40 @@ size_t tui_textinput_cursor(const TuiTextInput *input);
 /* Set cursor position (byte offset) */
 void tui_textinput_set_cursor(TuiTextInput *input, size_t pos);
 
-/* Get number of lines in content */
+/* Get number of logical lines in content */
 int tui_textinput_line_count(const TuiTextInput *input);
+
+/* The text's revision: a counter that changes whenever the bytes do,
+ * and not for cursor movement, selection or focus. It is how an app
+ * tells "this key edited the text" from "this key moved around in it"
+ * without keeping a copy to compare. The value itself means nothing —
+ * only equal/unequal between two reads. */
+uint64_t tui_textinput_revision(const TuiTextInput *input);
+
+/* ------------------------------------------------------------------ */
+/* Selection and editing                                               */
+/* ------------------------------------------------------------------ */
+
+/* 1 when a selection is active (a mark is set at a byte other than the
+ * cursor's). */
+int tui_textinput_has_selection(const TuiTextInput *input);
+
+/* 1 when a mark is set at all — a "mark set" mode line wants this, because
+ * an empty mark (mark == cursor) is still a mark the next motion extends. */
+int tui_textinput_has_mark(const TuiTextInput *input);
+
+/* The mark's byte offset. Only meaningful when tui_textinput_has_mark() is
+ * 1; returns the cursor's offset otherwise. */
+size_t tui_textinput_mark(const TuiTextInput *input);
+
+/* The active selection as [start, end), in bytes. Returns 1 when there is
+ * one, 0 (leaving the outputs untouched) when there is not. */
+int tui_textinput_selection_range(const TuiTextInput *input, size_t *start,
+                                  size_t *end);
+
+/* How many edits can be undone. Read-mostly: for a status line, or a test
+ * asserting that a burst of typing is one undo step. */
+int tui_textinput_undo_depth(const TuiTextInput *input);
 
 /* Set maximum history size */
 void tui_textinput_set_history_size(TuiTextInput *input, int size);
@@ -272,28 +377,6 @@ void tui_textinput_insert_completion(TuiTextInput *input, int word_start,
 void tui_textinput_replace_range(TuiTextInput *input, size_t start, size_t end,
                                  const char *text);
 
-/* The text's revision: a counter that changes whenever the bytes do,
- * and not for cursor movement, selection or focus. It is how an app
- * tells "this key edited the text" from "this key moved around in it"
- * without keeping a copy to compare. The value itself means nothing —
- * only equal/unequal between two reads. */
-uint64_t tui_textinput_revision(const TuiTextInput *input);
-
-/* Style byte ranges of the text (e.g. a file mention, a slash command).
- * The input copies the array. Ranges are absolute offsets, must be
- * sorted, disjoint, non-empty and inside the text; a bad set is refused
- * whole (-1) and the previous set stays.
- *
- * Spans describe the text AS OF the current revision: after any edit
- * they stop being painted until the app declares them again, so a stale
- * range can never style the wrong bytes. They compose with the
- * selection (reverse video) and echo mode, and are clipped to whatever
- * the row shows, so a span split by soft-wrap or scrolled partly out of
- * the window is styled exactly where its bytes are. Pass n == 0 to
- * clear. Ignored while a text renderer (below) is set. */
-int tui_textinput_set_spans(TuiTextInput *input, const TuiTextSpan *spans,
-                            size_t n);
-
 /* Extract the word at the cursor position. Returns a malloc'd string
  * (the text from word_start to cursor) and sets *word_start to the
  * byte offset where the word begins. Returns NULL (and sets
@@ -306,50 +389,46 @@ char *tui_textinput_word_at_cursor(const TuiTextInput *input, int *word_start);
  * Pass NULL to use default behavior (non-whitespace = word). */
 void tui_textinput_set_word_chars(TuiTextInput *input, const char *chars);
 
+/* Pull-style access to the kill ring, for embedders that poll instead of
+ * taking the hook. The pointer is borrowed and valid until the next kill;
+ * NULL / 0 before the first one. Kills and cuts fill it; an explicit copy
+ * does not. */
+const char *tui_textinput_kill_buffer(const TuiTextInput *input, size_t *len);
+
+/* ------------------------------------------------------------------ */
+/* Presentation                                                        */
+/* ------------------------------------------------------------------ */
+
 /* Set whether to show the prompt */
 void tui_textinput_set_show_prompt(TuiTextInput *input, int show);
 
-/* Set the prompt string */
+/* Set the prompt string (not owned; must outlive the input) */
 void tui_textinput_set_prompt(TuiTextInput *input, const char *prompt);
 
-/* Set width used for line wrapping / horizontal overflow */
-void tui_textinput_set_terminal_width(TuiTextInput *input, int width);
-
-/* Set terminal row for absolute positioning (1-indexed).
- * When set, view() uses absolute cursor positioning instead of relative
- * moves. This is the row for the input line.
- */
-void tui_textinput_set_terminal_row(TuiTextInput *input, int row);
-
-/* Set custom ANSI color escape sequence for the prompt.
- * Pass an ANSI SGR sequence (e.g., "\033[38;2;255;6;183m").
- * Pass NULL or "" to reset to default (no color).
- */
-BOBA_DEPRECATED(
-    "use tui_textinput_set_focused_prompt_style / _blurred_prompt_style")
-void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color);
-
-/* Lipgloss-shaped style setters for the prompt. When set (i.e., the
- * style has any color or attribute set), these take precedence over
- * the legacy set_prompt_color above for the matching focus state. The
- * style's box-model (padding/margin/border) is ignored — styling is
- * applied inline. */
-void tui_textinput_set_focused_prompt_style(TuiTextInput *input, TuiStyle s);
-void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s);
-
-/* Set the continuation prompt string (shown on lines after the first).
- * Must have the same display width as the main prompt.
- * Pass NULL to fall back to space-padding (default behavior).
- */
+/* Set the continuation prompt string (shown on lines after the first, and
+ * on wrapped rows). Must have the same display width as the main prompt.
+ * Pass NULL to fall back to space-padding (default behavior). */
 void tui_textinput_set_continuation_prompt(TuiTextInput *input,
                                            const char *prompt);
+
+/* Lipgloss-shaped style setters for the prompt. When set (i.e., the
+ * style has any color or attribute set), these take precedence over the
+ * legacy ANSI-color field for the matching focus state. The style's
+ * box-model (padding/margin/border) is ignored — styling is applied
+ * inline. */
+void tui_textinput_set_focused_prompt_style(TuiTextInput *input, TuiStyle s);
+void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s);
 
 /* Set echo mode: 0 = normal, 1 = masked (one * per grapheme cluster) */
 void tui_textinput_set_echo_mode(TuiTextInput *input, int mode);
 
-/* Set soft wrap mode: 0 = horizontal scroll (default), 1 = soft-wrap
- * long lines to the next visual row instead of clipping. */
-void tui_textinput_set_soft_wrap(TuiTextInput *input, int enable);
+/* Get echo mode */
+int tui_textinput_get_echo_mode(const TuiTextInput *input);
+
+/* Set how a logical line wider than the content width is painted: CLIP
+ * (one horizontal window for every row) or WRAP (continue on the next
+ * visual row). Default CLIP. */
+void tui_textinput_set_wrap(TuiTextInput *input, TuiTextInputWrap mode);
 
 /* Set a styled-text highlight callback. Prefer tui_textinput_set_spans:
  * this callback receives only the text of one rendered chunk (a wrapped
@@ -366,6 +445,25 @@ void tui_textinput_set_text_renderer(TuiTextInput *input,
                                                  size_t len,
                                                  void *userdata),
                                      void *userdata);
+
+/* Style byte ranges of the text (e.g. a file mention, a slash command).
+ * The input copies the array. Ranges are absolute offsets, must be
+ * sorted, disjoint, non-empty and inside the text; a bad set is refused
+ * whole (-1) and the previous set stays.
+ *
+ * Spans describe the text AS OF the current revision: after any edit
+ * they stop being painted until the app declares them again, so a stale
+ * range can never style the wrong bytes. They compose with the
+ * selection (reverse video) and echo mode, and are clipped to whatever
+ * the row shows, so a span split by soft-wrap or scrolled partly out of
+ * the window is styled exactly where its bytes are. Pass n == 0 to
+ * clear. Ignored while a text renderer (above) is set. */
+int tui_textinput_set_spans(TuiTextInput *input, const TuiTextSpan *spans,
+                            size_t n);
+
+/* ------------------------------------------------------------------ */
+/* Clipboard                                                           */
+/* ------------------------------------------------------------------ */
 
 /* Report clipboard events to `fn` instead of (or as well as) emitting a
  * command. Pass NULL to stop reporting. The hook is the ONLY delivery path
@@ -384,12 +482,6 @@ void tui_textinput_set_clipboard_hook(TuiTextInput *input,
  * a paste request has no text to copy. Default 0. */
 void tui_textinput_set_clipboard_cmd(TuiTextInput *input, int enable);
 
-/* Pull-style access to the kill ring, for embedders that poll instead of
- * taking the hook. The pointer is borrowed and valid until the next kill;
- * NULL / 0 before the first one. Kills and cuts fill it; an explicit copy
- * does not. */
-const char *tui_textinput_kill_buffer(const TuiTextInput *input, size_t *len);
-
 /* Ctrl+A: move to the start of the line (the readline/emacs binding, the
  * default) or select the whole input (the Windows editing convention).
  * boba does not infer this from the platform — an app that wants Windows
@@ -397,23 +489,5 @@ const char *tui_textinput_kill_buffer(const TuiTextInput *input, size_t *len);
  * app it is, not like the kernel underneath. Default 0. Cmd+A selects all
  * regardless. */
 void tui_textinput_set_ctrl_a_select_all(TuiTextInput *input, int enable);
-
-/* Get echo mode */
-int tui_textinput_get_echo_mode(const TuiTextInput *input);
-
-/* Get render height in rows.
- * Returns 1 for single-line input, line count for multi-line.
- */
-int tui_textinput_get_height(const TuiTextInput *input);
-
-/* Report cursor position for the runtime to place the hardware cursor.
- * Returns tui_cursor_hidden() when the input is unfocused or when
- * terminal_row is 0 (relative-positioning mode — caller has no absolute
- * coordinate frame). Otherwise returns the absolute (row, col) of the
- * cursor on the input line. */
-TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input);
-
-/* Get component interface for text input */
-const TuiComponent *tui_textinput_component(void);
 
 #endif /* BOBA_TEXTINPUT_H */

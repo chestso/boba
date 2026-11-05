@@ -9,8 +9,180 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fit.h"
+
 #define TEXTINPUT_INITIAL_CAP 256
 #define TEXTINPUT_TYPE_ID     (TUI_COMPONENT_TYPE_BASE + 1)
+
+/* --- One layout, one window -------------------------------------------
+ *
+ * Everything the component paints, reports or measures comes from ONE
+ * table of visual rows built from the text, the content width and the
+ * prompt widths. Before this, five render paths (absolute/relative x
+ * single/multi x wrap/clip) each re-derived the row arithmetic, and
+ * tui_textinput_cursor_pos() and tui_textinput_get_height() derived it a
+ * third and fourth time; they could disagree, and in inline mode that
+ * disagreement walks the prompt up the screen.
+ *
+ * A visual row is a byte range painted on one terminal row. With WRAP a
+ * logical line becomes several rows; with CLIP it is one row, and the
+ * horizontal window is applied at paint time.
+ *
+ * The table is a cache: rebuilt whenever the text, the width, the wrap
+ * mode or the prompt widths change. A cursor move only re-locates the
+ * cursor within it (O(1) instead of O(text)).
+ */
+typedef struct TuiVisualRow
+{
+    size_t byte_start, byte_end; /* text range painted on this row            */
+    int logical_line;            /* index of the logical line it belongs to   */
+    int first_of_line;           /* 1: the line's first row, 0: wrap remainder*/
+    int prompt_w;                /* prefix display width on this row          */
+} TuiVisualRow;
+
+typedef struct TuiLayout
+{
+    /* Cache key: the geometry the table was built for. */
+    uint64_t geometry_revision;
+    uint64_t text_revision;
+    int width; /* resolved content width, 0 = unconstrained */
+    int wrap;  /* TuiTextInputWrap at build                */
+    int show_prompt;
+    int prompt_w, cont_w;
+
+    TuiVisualRow *rows;
+    size_t n_rows, cap;
+
+    /* Where the cursor sits in the table, for the cursor it was located
+     * for. cursor_byte is compared on its own so a pure move is cheap. */
+    size_t cursor_byte;
+    size_t cur_row; /* visual row index            */
+    int cur_col;    /* display column inside it    */
+} TuiLayout;
+
+/* The model. Opaque to callers (see the header); every derived field here
+ * is the component's own business, which is why the struct lives in this
+ * file. */
+struct TuiTextInput
+{
+    TuiModel base; /* Base model for component interface */
+
+    char *text;      /* UTF-8 text content */
+    size_t text_len; /* Current text length in bytes */
+    size_t text_cap; /* Allocated capacity */
+
+    size_t cursor_byte; /* Cursor position in bytes */
+    size_t cursor_col;  /* Cursor's display column in its logical line */
+    size_t cursor_row;  /* Logical line index (0-indexed) */
+
+    /* Selection mark. When has_mark is set, the active region is
+     * [min(mark_byte, cursor_byte), max(mark_byte, cursor_byte)). Motion
+     * extends the region; edits clear it; Esc / C-g clear it; M-w reports
+     * it to the clipboard hook; C-w kills it. */
+    size_t mark_byte;
+    int has_mark;
+    int mark_from_shift; /* 1 when the mark was made by Shift-motion */
+
+    /* Horizontal window for CLIP mode, in display columns. Shared by every
+     * row: the text scrolls under one fixed column window, and the window
+     * follows the cursor. Derived state, kept in step by
+     * recalculate_cursor_position(). */
+    int offset;
+    int offset_right;
+
+    const char *prompt;              /* Optional prompt string (not owned) */
+    int prompt_len;                  /* Cached prompt display width */
+    const char *continuation_prompt; /* Prompt for continuation lines */
+    int continuation_prompt_len;     /* Cached continuation prompt width */
+
+    int focused;     /* Whether component has focus */
+    int multiline;   /* Allow multiple lines (Enter inserts newline) */
+    int show_prompt; /* Whether to display the prompt (default: 1) */
+
+    /* Lipgloss-shaped focused/blurred styles for the prompt. An unstyled
+     * record means "paint it plain": there is no second, raw-ANSI colour
+     * channel (the setter for one is gone). */
+    TuiStyle focused_prompt_style;
+    TuiStyle blurred_prompt_style;
+
+    /* History management */
+    char **history;    /* Array of past input lines */
+    int history_size;  /* Max history entries */
+    int history_count; /* Current number of history entries */
+    int history_pos;   /* Navigation position (-1 = current input) */
+    char *saved_input; /* Saved current input when navigating history */
+
+    /* Tab completion */
+    char *word_chars; /* Characters that form words for completion and word movement */
+
+    /* Kill/yank buffer */
+    char *kill_buf;      /* Killed text (malloc'd, NULL initially) */
+    size_t kill_buf_len; /* Length of killed text in bytes */
+    int last_was_kill;   /* Whether previous key was a kill command */
+
+    /* Undo stack */
+    struct
+    {
+        char *text;
+        size_t text_len;
+        size_t cursor_byte;
+    } *undo_stack;
+    int undo_count;
+    int undo_cap;
+    int ctrl_x_prefix; /* Waiting for second key after C-x */
+
+    /* Pre-edit snapshot buffer (reused across keystrokes) */
+    char *snap_buf;
+    size_t snap_buf_cap;
+    size_t snap_len;
+    size_t snap_cursor;
+    int snap_valid; /* Whether snapshot should be committed */
+
+    int echo_mode;         /* 0 = normal, 1 = masked (one * per cluster) */
+    TuiTextInputWrap wrap; /* CLIP (default) or WRAP                   */
+
+    /* Rows drawn by the last view() pass. Used to erase rows the previous
+     * frame painted and this one no longer does — the runtime does not
+     * clear stale alt-screen rows, so the component owns cleanup of its
+     * own area. It describes what is ON SCREEN, so it survives a geometry
+     * change: the erase needs the old extent, not the new one. */
+    int last_render_rows;
+
+    /* Bumped by every change to the text's bytes (typing, deletes, kills,
+     * undo, paste, set_text, clear, replace_range), never by movement.
+     * Spans carry the revision they were computed for. */
+    uint64_t revision;
+    TuiTextSpan *spans; /* owned copy, sorted, disjoint */
+    size_t n_spans;
+    uint64_t spans_revision;
+
+    /* Styled-text highlight hook. If set, render_text_range calls this
+     * instead of emitting raw text bytes. */
+    char *(*highlight_fn)(const char *text, size_t len, void *userdata);
+    void *highlight_userdata;
+
+    /* Clipboard reporting (see TuiTextInputClipboardFn). */
+    TuiTextInputClipboardFn clipboard_fn; /* NULL = report nothing */
+    void *clipboard_ud;
+    int clipboard_cmd; /* 0 = emit no TuiCmd at all (default) */
+
+    /* Ctrl+A: 0 = move to line start (readline, the default), 1 = select
+     * all. Declared by the app; never derived from the platform. */
+    int ctrl_a_select_all;
+
+    /* --- geometry (see tui_textinput_set_geometry) -------------------- */
+    TuiTextInputGeometry geom;  /* as the app declared it */
+    int term_w, term_h;         /* last known terminal size, 0 = unknown */
+    int content_width;          /* resolved from geom/term, 0 = free */
+    int first_row;              /* resolved screen row, 0 = inline    */
+    size_t top_byte;            /* scroll anchor: byte_start of the first
+                                 * visible visual row. An offset, not a row
+                                 * index, because row indices stop meaning
+                                 * anything once a resize re-flows the text */
+    uint64_t geometry_revision; /* bumped by every geometry change */
+
+    TuiLayout layout; /* visual-row table (cache) */
+};
 
 /* Check if a character is a word character */
 static int is_word_char(const TuiTextInput *input, char c)
@@ -103,9 +275,300 @@ static void cursor_line_bounds(const TuiTextInput *input, size_t *out_start,
     *out_end = end;
 }
 
+/* --- geometry resolution ---------------------------------------------
+ *
+ * The app declares a TuiTextInputGeometry; the terminal reports a size;
+ * these two produce the numbers the rest of the file uses:
+ *
+ *   content_width  columns of text per row, 0 = unconstrained
+ *   first_row      absolute screen row of the first painted row, 0 = inline
+ *
+ * Nothing else in this file reads in->geom for sizing: if it is not one of
+ * these two values, it is a bug waiting to disagree with the layout. */
+static void resolve_geometry(TuiTextInput *input)
+{
+    if (input->geom.width > 0)
+        input->content_width = input->geom.width;
+    else if (input->geom.sizing == TUI_TEXTINPUT_FLOW) {
+        TuiFitInsets ins = { 0, 0, input->geom.side_margin, 0 };
+        input->content_width = tui_fit_cols(input->term_w, &ins, 0);
+    } else
+        input->content_width = 0;
+
+    if (input->geom.place == TUI_TEXTINPUT_AT_ROW && input->geom.row > 0)
+        input->first_row = input->geom.row;
+    else
+        input->first_row = 0;
+}
+
+/* Mark the layout stale. Every geometry change goes through here, so the
+ * cache key can be a single counter instead of "did I forget a field?". */
+static void invalidate_layout(TuiTextInput *input)
+{
+    input->geometry_revision++;
+    resolve_geometry(input);
+}
+
+/* --- the visual-row layout (see the TuiLayout comment at the top) ----- */
+
+static void layout_free(TuiLayout *L)
+{
+    free(L->rows);
+    L->rows = NULL;
+    L->n_rows = 0;
+    L->cap = 0;
+}
+
+static int layout_push(TuiLayout *L, size_t start, size_t end, int line,
+                       int first_of_line, int prompt_w)
+{
+    if (L->n_rows == L->cap) {
+        size_t cap = L->cap ? L->cap * 2 : 32;
+        TuiVisualRow *grown =
+            (TuiVisualRow *)realloc(L->rows, cap * sizeof(*grown));
+        if (!grown)
+            return 0;
+        L->rows = grown;
+        L->cap = cap;
+    }
+    L->rows[L->n_rows].byte_start = start;
+    L->rows[L->n_rows].byte_end = end;
+    L->rows[L->n_rows].logical_line = line;
+    L->rows[L->n_rows].first_of_line = first_of_line;
+    L->rows[L->n_rows].prompt_w = prompt_w;
+    L->n_rows++;
+    return 1;
+}
+
+/* Where the cursor sits in the table: which visual row, and how many
+ * display columns into it (prompt excluded). This is the arithmetic
+ * tui_textinput_cursor_pos() used to redo, wrap walk included. */
+static void layout_locate_cursor(const TuiTextInput *input, TuiLayout *L)
+{
+    L->cursor_byte = input->cursor_byte;
+    L->cur_row = 0;
+    L->cur_col = 0;
+    if (L->n_rows == 0)
+        return;
+
+    /* The row the cursor's byte falls in: the last one that starts at or
+     * before it. A cursor on a chunk boundary therefore belongs to the row
+     * it opens, not to the one it closes. */
+    size_t idx = 0;
+    for (size_t k = 0; k < L->n_rows; k++) {
+        if (L->rows[k].byte_start <= input->cursor_byte)
+            idx = k;
+        else
+            break;
+    }
+
+    const TuiVisualRow *r = &L->rows[idx];
+    size_t upto = input->cursor_byte > r->byte_start
+                      ? input->cursor_byte - r->byte_start
+                      : 0;
+    if (upto > r->byte_end - r->byte_start)
+        upto = r->byte_end - r->byte_start;
+    int col = (int)tui_utf8_display_width_n(input->text + r->byte_start, upto);
+
+    /* A cursor at the very end of a line whose last visual row is exactly
+     * full sits at that row's end — not at the start of a fresh, empty row.
+     * Folding by the raw width would report a phantom extra row, which in
+     * inline mode walks the tracked cursor-up one row too far each frame. */
+    if (input->wrap == TUI_TEXTINPUT_WRAP && input->content_width > 0 &&
+        input->cursor_byte >= r->byte_end && col > 0) {
+        int content_w = input->content_width - r->prompt_w;
+        if (content_w < 1)
+            content_w = 1;
+        if (col == content_w)
+            col -= 1;
+    }
+
+    L->cur_row = idx;
+    L->cur_col = col;
+}
+
+/* Build the table for the current text/width/prompts. Returns 0 on
+ * allocation failure, leaving no rows — the callers treat an empty layout
+ * as "nothing to paint" rather than as a crash. */
+static int layout_build(TuiTextInput *input)
+{
+    TuiLayout *L = &input->layout;
+
+    L->n_rows = 0;
+    int wrap = input->wrap == TUI_TEXTINPUT_WRAP && input->content_width > 0;
+
+    size_t line_start = 0;
+    int line_idx = 0;
+    for (size_t i = 0; i <= input->text_len; i++) {
+        if (i != input->text_len && input->text[i] != '\n')
+            continue;
+
+        int prompt_w = line_prompt_width(input, line_idx);
+        if (wrap) {
+            int content_w = input->content_width - prompt_w;
+            if (content_w < 1) {
+                /* Degenerate: the content width survives, the prompt does
+                 * not. A row always holds at least one cluster, so the walk
+                 * below always advances. */
+                content_w = 1;
+                prompt_w = 0;
+            }
+            size_t pos = line_start;
+            for (;;) {
+                size_t adv = fit_cols(input->text + pos, i - pos, content_w);
+                if (adv == 0)
+                    adv = i - pos; /* empty remainder: take it as one row */
+                if (!layout_push(L, pos, pos + adv, line_idx, pos == line_start,
+                                 prompt_w))
+                    goto nomem;
+                pos += adv;
+                if (pos >= i)
+                    break;
+            }
+        } else {
+            /* CLIP: one row per logical line; the horizontal window is
+             * applied when the row is painted. */
+            if (!layout_push(L, line_start, i, line_idx, 1, prompt_w))
+                goto nomem;
+        }
+
+        line_idx++;
+        line_start = i + 1;
+    }
+
+    L->geometry_revision = input->geometry_revision;
+    L->text_revision = input->revision;
+    L->width = input->content_width;
+    L->wrap = (int)input->wrap;
+    L->show_prompt = input->show_prompt;
+    L->prompt_w = input->prompt_len;
+    L->cont_w = input->continuation_prompt_len;
+
+    layout_locate_cursor(input, L);
+    return 1;
+
+nomem:
+    layout_free(L);
+    return 0;
+}
+
+/* The layout, built or reused. A cache hit with a moved cursor re-locates
+ * the cursor only (O(1) instead of O(text)). */
+static const TuiLayout *layout_get(TuiTextInput *input)
+{
+    TuiLayout *L = &input->layout;
+    int wrap = input->wrap == TUI_TEXTINPUT_WRAP;
+
+    if (L->rows && L->geometry_revision == input->geometry_revision &&
+        L->text_revision == input->revision &&
+        L->width == input->content_width && L->wrap == wrap &&
+        L->show_prompt == input->show_prompt &&
+        L->prompt_w == input->prompt_len &&
+        L->cont_w == input->continuation_prompt_len) {
+        if (L->cursor_byte != input->cursor_byte)
+            layout_locate_cursor(input, L);
+        return L;
+    }
+    (void)layout_build(input);
+    return L;
+}
+
+/* The layout for a const model: the cache is the component's own
+ * bookkeeping, not part of the observable model. */
+static const TuiLayout *layout_get_c(const TuiTextInput *input)
+{
+    return layout_get((TuiTextInput *)input);
+}
+
+/* Rows the input may paint this frame (design: H). The natural height is
+ * capped by the geometry, and by what the screen can give once the app's
+ * reserves — or, for absolute placement, the rows above — are taken out. */
+static int visible_rows(const TuiTextInput *input)
+{
+    const TuiLayout *L = layout_get_c(input);
+    int total = L->n_rows > 0 ? (int)L->n_rows : 1;
+
+    TuiFitInsets ins = { 0, 0, 0, 0 };
+    int term_h = 0;
+
+    /* The screen bounds the box when the input follows the window (FLOW,
+     * which reserves rows for the app's chrome) or when it is placed at an
+     * absolute row (the box is what is left below that row). Both can be
+     * true, and the tighter of the two wins: an avail of term_h - above -
+     * below is minimised by the LARGER `above`, so the two bounds combine
+     * as a max instead of being alternatives. */
+    if (input->term_h > 0 &&
+        (input->geom.sizing == TUI_TEXTINPUT_FLOW || input->first_row > 0)) {
+        term_h = input->term_h;
+        if (input->geom.sizing == TUI_TEXTINPUT_FLOW) {
+            ins.above = input->geom.reserve_above;
+            ins.below = input->geom.reserve_below;
+        }
+        if (input->first_row > 0 && input->first_row - 1 > ins.above)
+            ins.above = input->first_row - 1;
+    }
+
+    return tui_fit_rows(total, term_h, &ins, input->geom.min_rows,
+                        input->geom.rows);
+}
+
+/* Index of the row the window currently starts at. The anchor is top_byte,
+ * not a row index, because a resize re-flows the rows under it. */
+static size_t top_row(const TuiLayout *L, const TuiTextInput *input)
+{
+    if (L->n_rows == 0)
+        return 0;
+    size_t lo = 0, hi = L->n_rows - 1, best = 0;
+    while (lo <= hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (L->rows[mid].byte_start <= input->top_byte) {
+            best = mid;
+            if (mid == hi)
+                break;
+            lo = mid + 1;
+        } else {
+            if (mid == 0)
+                break;
+            hi = mid - 1;
+        }
+    }
+    return best;
+}
+
+/* Move the window so the cursor is inside it, with `scrolloff` rows of
+ * context where the text allows, and never with blank rows at the bottom
+ * (the clamp to n_rows - H is what pulls hidden rows back in when the box
+ * grows). The only persisted scroll state is top_byte. */
+static void ensure_cursor_visible(TuiTextInput *input)
+{
+    const TuiLayout *L = layout_get(input);
+    size_t total = L->n_rows;
+    int H = visible_rows(input);
+    size_t top = top_row(L, input);
+
+    int so = input->geom.scrolloff > 0 ? input->geom.scrolloff : 0;
+    if (so > (H - 1) / 2)
+        so = (H - 1) / 2;
+
+    if (total <= (size_t)H) {
+        top = 0;
+    } else {
+        size_t cur = L->cur_row;
+        if (cur < top + (size_t)so)
+            top = cur > (size_t)so ? cur - (size_t)so : 0;
+        if (cur > top + (size_t)(H - 1 - so))
+            top = cur - (size_t)(H - 1 - so);
+        size_t max_top = total - (size_t)H;
+        if (top > max_top)
+            top = max_top;
+    }
+
+    input->top_byte = total > 0 ? L->rows[top].byte_start : 0;
+}
+
 /* Adjust horizontal scroll offset so cursor stays visible on its line.
- * offset/offset_right are display-column offsets within the cursor's logical
- * line. */
+ * offset/offset_right are display-column offsets within the logical line,
+ * shared by every row in CLIP mode. */
 static void handle_overflow(TuiTextInput *input)
 {
     size_t line_start, line_end;
@@ -113,11 +576,11 @@ static void handle_overflow(TuiTextInput *input)
     size_t line_bytes = line_end - line_start;
 
     int prompt_width = line_prompt_width(input, (int)input->cursor_row);
-    int content_width = input->terminal_width - prompt_width;
+    int content_width = input->content_width - prompt_width;
 
     int total = tui_utf8_display_width_n(input->text + line_start, line_bytes);
 
-    if (content_width <= 0 || input->terminal_width == 0) {
+    if (content_width <= 0) {
         input->offset = 0;
         input->offset_right = total;
         return;
@@ -167,10 +630,14 @@ static void recalculate_cursor_position(TuiTextInput *input)
     input->cursor_col = (size_t)tui_utf8_display_width_n(
         input->text + line_start, input->cursor_byte - line_start);
 
-    /* Adjust horizontal scroll so cursor stays visible (single- and multi-line).
-     * Skip when soft_wrap is on — wrapping replaces scrolling. */
-    if (!input->soft_wrap)
+    /* Adjust horizontal scroll so cursor stays visible. In WRAP mode there
+     * is no horizontal window: the layout re-flows instead. */
+    if (input->wrap != TUI_TEXTINPUT_WRAP)
         handle_overflow(input);
+
+    /* And the vertical window, so the cursor is never scrolled out of the
+     * box after an edit or a move. */
+    ensure_cursor_visible(input);
 }
 
 /* Ensure text buffer has enough capacity */
@@ -586,6 +1053,38 @@ static void cursor_down(TuiTextInput *input)
     input->cursor_byte = next_line_start +
                          line_byte_for_col(input->text + next_line_start,
                                            next_line_len, col);
+    recalculate_cursor_position(input);
+}
+
+/* Move the cursor by `delta` VISUAL rows, keeping its display column where
+ * the target row is long enough. This is what PgUp/PgDn want: cursor
+ * motion, not window motion, so ensure_cursor_visible() (and with it
+ * scrolloff and the "never leave blank rows at the bottom" clamp) stays
+ * the only thing that scrolls. */
+static void cursor_rows(TuiTextInput *input, int delta)
+{
+    if (delta == 0)
+        return;
+
+    const TuiLayout *L = layout_get(input);
+    if (L->n_rows == 0)
+        return;
+
+    long target = (long)L->cur_row + (long)delta;
+    if (target < 0)
+        target = 0;
+    if (target > (long)L->n_rows - 1)
+        target = (long)L->n_rows - 1;
+    if ((size_t)target == L->cur_row) {
+        /* Already at the edge the motion wants to leave from. Not a no-op
+         * though: the cursor may have to move within its own row. */
+        return;
+    }
+
+    const TuiVisualRow *row = &L->rows[(size_t)target];
+    size_t off = line_byte_for_col(input->text + row->byte_start,
+                                   row->byte_end - row->byte_start, L->cur_col);
+    input->cursor_byte = row->byte_start + off;
     recalculate_cursor_position(input);
 }
 
@@ -1074,6 +1573,10 @@ TuiTextInput *tui_textinput_create(const TuiTextInputConfig *config)
     input->multiline = 0;
     input->show_prompt = 1;  /* Show prompt by default */
     input->history_pos = -1; /* -1 means we're at current input */
+    input->wrap = TUI_TEXTINPUT_CLIP;
+    input->geom.sizing = TUI_TEXTINPUT_NATURAL;
+    input->geom.place = TUI_TEXTINPUT_INLINE;
+    input->geom.scrolloff = 1; /* one row of context by default */
 
     /* Lipgloss-shaped focused/blurred prompt styles default to plain (no styling). */
     input->focused_prompt_style = tui_style_new();
@@ -1088,11 +1591,19 @@ TuiTextInput *tui_textinput_create(const TuiTextInputConfig *config)
         if (input->prompt) {
             input->prompt_len = prompt_cols(input->prompt);
         }
-        input->width = config->width;
-        input->height = config->height;
         input->multiline = config->multiline;
+        input->wrap = config->wrap;
+        input->geom = config->geometry;
+        if (input->geom.rows == 0)
+            input->geom.rows = config->rows;
+        /* A zeroed geometry means "the defaults", and the default scrolloff
+         * is one row of context. set_geometry() copies literally, so an app
+         * that really wants none asks for it there. */
+        if (input->geom.scrolloff == 0)
+            input->geom.scrolloff = 1;
     }
 
+    invalidate_layout(input);
     return input;
 }
 
@@ -1115,6 +1626,7 @@ void tui_textinput_free(TuiTextInput *input)
     free(input->word_chars);
     free(input->snap_buf);
     free(input->spans);
+    layout_free(&input->layout);
     undo_free(input);
     free(input);
 }
@@ -1438,6 +1950,19 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
     if (!input)
         return tui_update_result_none();
 
+    /* The terminal size is environment, not focus: a resize while the input
+     * is blurred still moves its window, so the model is correct when focus
+     * comes back. It is handled before the focus gate for that reason. */
+    if (msg.type == TUI_MSG_WINDOW_SIZE) {
+        input->term_w = msg.data.size.width > 0 ? msg.data.size.width : 0;
+        input->term_h = msg.data.size.height > 0 ? msg.data.size.height : 0;
+        invalidate_layout(input);
+        if (input->wrap != TUI_TEXTINPUT_WRAP)
+            handle_overflow(input);
+        ensure_cursor_visible(input);
+        return tui_update_result_none();
+    }
+
     if (msg.type == TUI_MSG_FOCUS) {
         input->focused = 1;
         return tui_update_result_none();
@@ -1570,6 +2095,28 @@ TuiUpdateResult tui_textinput_update(TuiTextInput *input, TuiMsg msg)
         begin_motion(input, key.mods & TUI_MOD_SHIFT);
         cursor_home(input);
         break;
+
+    case TUI_KEY_PAGE_UP:
+    {
+        /* A page is a screenful of motion, not a scroll: the cursor moves
+         * by H - 1 visual rows and the window follows it. */
+        int page = visible_rows(input) - 1;
+        if (page < 1)
+            page = 1;
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
+        cursor_rows(input, -page);
+        break;
+    }
+
+    case TUI_KEY_PAGE_DOWN:
+    {
+        int page = visible_rows(input) - 1;
+        if (page < 1)
+            page = 1;
+        begin_motion(input, key.mods & TUI_MOD_SHIFT);
+        cursor_rows(input, page);
+        break;
+    }
 
     case TUI_KEY_END:
         begin_motion(input, key.mods & TUI_MOD_SHIFT);
@@ -1787,11 +2334,11 @@ static const TuiStyle *prompt_style_for(const TuiTextInput *input)
                           : &input->blurred_prompt_style;
 }
 
-/* Append `content` wrapped in a TuiStyle, or in a legacy raw ANSI prefix,
- * or unstyled. Resolves in that order: TuiStyle > legacy_color > plain. */
-static void emit_styled_or_legacy(DynamicBuffer *out, const TuiStyle *style,
-                                  const char *legacy_color,
-                                  const char *content)
+/* Append `content` wrapped in a TuiStyle, or plain when the style carries
+ * no styling. A styled render that fails to allocate falls back to the raw
+ * text: an unstyled prompt beats a missing one. */
+static void emit_styled(DynamicBuffer *out, const TuiStyle *style,
+                        const char *content)
 {
     if (style_has_styling(style)) {
         TuiStyle inline_style = *style;
@@ -1800,14 +2347,10 @@ static void emit_styled_or_legacy(DynamicBuffer *out, const TuiStyle *style,
         if (rendered) {
             dynamic_buffer_append_str(out, rendered);
             free(rendered);
+            return;
         }
-    } else if (legacy_color && legacy_color[0] != '\0') {
-        dynamic_buffer_append_str(out, legacy_color);
-        dynamic_buffer_append_str(out, content);
-        dynamic_buffer_append_str(out, SGR_RESET);
-    } else {
-        dynamic_buffer_append_str(out, content);
     }
+    dynamic_buffer_append_str(out, content);
 }
 
 /* Render continuation prompt or space-padding for lines after the first:
@@ -1817,8 +2360,7 @@ static void render_continuation_prompt(const TuiTextInput *input,
                                        DynamicBuffer *out)
 {
     if (input->continuation_prompt && input->continuation_prompt_len > 0) {
-        emit_styled_or_legacy(out, prompt_style_for(input),
-                              input->prompt_color, input->continuation_prompt);
+        emit_styled(out, prompt_style_for(input), input->continuation_prompt);
     } else {
         for (int j = 0; j < input->prompt_len; j++)
             dynamic_buffer_append(out, " ", 1);
@@ -2000,208 +2542,86 @@ static void render_text_range(const TuiTextInput *input, DynamicBuffer *out,
         dynamic_buffer_append_str(out, SGR_REVERSE_OFF);
 }
 
-/* Compute byte range to render for a logical line.
- * Cursor's line: applies horizontal scroll window (offset/offset_right, in
- * display columns).
- * Other lines: clipped to fit within terminal_width minus the line's prompt. */
-static void get_line_render_range(const TuiTextInput *input, size_t line_start,
-                                  size_t line_end, int line_index,
-                                  size_t *out_start, size_t *out_end)
+/* Byte range of `row` to paint in CLIP mode: the shared horizontal window
+ * [offset, offset_right), in display columns, intersected with the row.
+ * Every row scrolls under the same window, so a line never jumps sideways
+ * relative to its neighbours just because the cursor is on another line. */
+static void clip_range(const TuiTextInput *input, const TuiVisualRow *row,
+                       size_t *out_start, size_t *out_end)
 {
-    size_t line_bytes = line_end - line_start;
+    *out_start = row->byte_start;
+    *out_end = row->byte_end;
 
-    if (line_index == (int)input->cursor_row && input->terminal_width > 0 &&
-        input->offset_right > input->offset) {
-        size_t s = fit_cols(input->text + line_start, line_bytes, input->offset);
-        size_t e =
-            fit_cols(input->text + line_start, line_bytes, input->offset_right);
-        *out_start = line_start + s;
-        *out_end = line_start + e;
-        return;
-    }
+    if (input->content_width <= 0 || input->offset_right <= input->offset)
+        return; /* unconstrained: the whole line */
 
-    if (input->terminal_width > 0) {
-        int prompt_width = line_prompt_width(input, line_index);
-        int content_width = input->terminal_width - prompt_width;
-        if (content_width <= 0) {
-            *out_start = line_start;
-            *out_end = line_start;
-        } else {
-            size_t e =
-                fit_cols(input->text + line_start, line_bytes, content_width);
-            *out_start = line_start;
-            *out_end = line_start + e;
-        }
-        return;
-    }
+    size_t len = row->byte_end - row->byte_start;
+    size_t s = fit_cols(input->text + row->byte_start, len, input->offset);
+    size_t e = fit_cols(input->text + row->byte_start, len, input->offset_right);
 
-    *out_start = line_start;
-    *out_end = line_end;
+    *out_start = row->byte_start + s;
+    *out_end = row->byte_start + e;
 }
 
-/* Render one logical line across one or more visual rows using absolute
- * cursor positioning, soft-wrapping the content at the line's content width.
- *
- * Each visual row is positioned with CSI <row>;1H, cleared to EOL, and
- * prefixed with prompt indentation so wrapped rows align under the text
- * column — matching the wrap arithmetic in tui_textinput_cursor_pos(). The
- * first visual row of logical line 0 shows the main prompt; every other row
- * (wrapped rows and later logical lines) shows the continuation prompt.
- *
- * *row is advanced past the rows consumed. */
-static void render_wrapped_line_absolute(const TuiTextInput *input,
-                                         DynamicBuffer *out, size_t line_start,
-                                         size_t line_end, int line_index,
-                                         int *row)
+/* The prefix painted on a row: the main prompt on the first row of logical
+ * line 0, the continuation prompt (or blank indent) everywhere else. A row
+ * whose prompt does not fit at all carries prompt_w == 0 and gets none. */
+static void emit_row_prefix(const TuiTextInput *input, DynamicBuffer *out,
+                            const TuiVisualRow *row)
 {
+    if (row->prompt_w <= 0 || !input->show_prompt || !input->prompt ||
+        input->prompt_len <= 0)
+        return;
+
+    if (row->logical_line == 0 && row->first_of_line) {
+        emit_styled(out, prompt_style_for(input), input->prompt);
+    } else {
+        render_continuation_prompt(input, out);
+    }
+}
+
+/* Erase rows the previous frame painted and this one does not.
+ *
+ * After an absolute-mode render has drawn rows [first_row, first_row + H),
+ * any rows within the previous frame's extent but beyond this one are
+ * blanked: the runtime does not clear stale alt-screen rows, so the
+ * component owns cleanup of its own area. The loop is clamped to the
+ * screen, so a frame that shrank because the terminal shrank cannot target
+ * rows that no longer exist. */
+static void erase_surplus(TuiTextInput *input, DynamicBuffer *out, int H,
+                          int prev_rows)
+{
+    if (prev_rows <= H)
+        return;
+
+    int from = input->first_row + H;
+    int to = input->first_row + prev_rows;
+    if (input->term_h > 0 && to > input->term_h + 1)
+        to = input->term_h + 1;
+
     char pos_buf[32];
-
-    int prompt_w = line_prompt_width(input, line_index);
-    int content_w = input->terminal_width - prompt_w;
-    int show_prefix =
-        input->show_prompt && input->prompt && input->prompt_len > 0;
-
-    int first_row = 1;
-    size_t pos = line_start;
-    do {
-        snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", *row);
+    for (int r = from; r < to; r++) {
+        snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", r);
         dynamic_buffer_append_str(out, pos_buf);
         dynamic_buffer_append_str(out, EL_TO_END);
-
-        if (first_row && line_index == 0) {
-            if (show_prefix)
-                emit_styled_or_legacy(out, prompt_style_for(input),
-                                      input->prompt_color, input->prompt);
-        } else if (show_prefix) {
-            render_continuation_prompt(input, out);
-        }
-
-        /* Emit the next chunk of content_width display columns (or the rest
-         * of the line when wrapping is disabled/degenerate). */
-        size_t chunk_end = line_end;
-        if (content_w > 0)
-            chunk_end = pos + fit_cols(input->text + pos, line_end - pos,
-                                       content_w);
-        if (chunk_end > pos)
-            render_text_range(input, out, pos, chunk_end);
-        pos = chunk_end;
-        (*row)++;
-        first_row = 0;
-    } while (pos < line_end && content_w > 0);
-}
-
-/* Render one logical line across one or more visual rows in RELATIVE
- * positioning mode (terminal_row unset — inline rendering). Unlike the
- * absolute variant there is no CSI row placement: rows are separated with
- * "\r\n" + EL so the runtime's newline-based frame accounting matches the
- * number of visual rows drawn, and wrapped rows are indented with the
- * continuation prompt under the text column (matching the wrap arithmetic
- * in tui_textinput_cursor_pos()).
- *
- * Without this, relative mode emitted the whole logical line and let the
- * terminal auto-wrap. The runtime counts frame rows by '\n', so a line that
- * softly wrapped in the terminal but carried no '\n' made the tracked row
- * count disagree with the painted rows; each frame then moved the cursor one
- * row too far up, walking the prompt to the top of the screen.
- *
- * *first_row is 1 for the frame's first visual row; the caller clears it.
- * Every later row is preceded by the row separator. */
-static void render_wrapped_line_relative(const TuiTextInput *input,
-                                         DynamicBuffer *out, size_t line_start,
-                                         size_t line_end, int line_index,
-                                         int *first_row)
-{
-    int prompt_w = line_prompt_width(input, line_index);
-    int content_w = input->terminal_width - prompt_w;
-    int show_prefix =
-        input->show_prompt && input->prompt && input->prompt_len > 0;
-
-    size_t pos = line_start;
-    int first_chunk = 1;
-    do {
-        if (!*first_row) {
-            dynamic_buffer_append_str(out, "\r\n");
-            dynamic_buffer_append_str(out, EL_TO_END);
-        }
-        *first_row = 0;
-
-        if (first_chunk && line_index == 0) {
-            if (show_prefix)
-                emit_styled_or_legacy(out, prompt_style_for(input),
-                                      input->prompt_color, input->prompt);
-        } else if (show_prefix) {
-            render_continuation_prompt(input, out);
-        }
-        first_chunk = 0;
-
-        /* Emit the next chunk of content_width display columns (or the rest
-         * of the line when wrapping is disabled/degenerate). */
-        size_t chunk_end = line_end;
-        if (content_w > 0)
-            chunk_end = pos + fit_cols(input->text + pos, line_end - pos,
-                                       content_w);
-        if (chunk_end > pos)
-            render_text_range(input, out, pos, chunk_end);
-        pos = chunk_end;
-    } while (pos < line_end && content_w > 0);
-}
-
-/* Render prompt and visible text slice to output buffer */
-static void render_prompt_and_text(const TuiTextInput *input, DynamicBuffer *out)
-{
-    if (input->show_prompt && input->prompt && input->prompt_len > 0) {
-        emit_styled_or_legacy(out, prompt_style_for(input),
-                              input->prompt_color, input->prompt);
     }
-    if (input->text_len > 0) {
-        size_t byte_start = 0;
-        size_t byte_end = input->text_len;
-        /* offset/offset_right are DISPLAY COLUMNS. fit_cols is the same
-         * cluster-aware bridge the wrap/scroll path uses; the codepoint
-         * lookup that used to live here landed the window one cell early
-         * whenever a wide cluster sat before the edge. */
-        if (input->terminal_width > 0 && input->offset_right > input->offset) {
-            byte_start = fit_cols(input->text, input->text_len, input->offset);
-            byte_end =
-                fit_cols(input->text, input->text_len, input->offset_right);
-        }
-        render_text_range(input, out, byte_start, byte_end);
-    }
-}
-
-/* Erase rows left over from a previous, taller absolute-positioning frame.
- *
- * After an absolute-mode render has drawn rows [terminal_row, next_row - 1],
- * any rows within the previous frame's extent but beyond the current one are
- * blanked. The runtime does not clear stale alt-screen rows, so the component
- * owns cleanup of its own area — this matters most for soft-wrap, where a
- * single backspace across a wrap boundary removes a whole visual row. */
-static void erase_surplus_rows(TuiTextInput *input, DynamicBuffer *out,
-                               int next_row)
-{
-    int cur = next_row - input->terminal_row;
-    if (cur < 0)
-        cur = 0;
-
-    if (input->last_render_rows > cur) {
-        char pos_buf[32];
-        int end = input->terminal_row + input->last_render_rows;
-        for (int r = next_row; r < end; r++) {
-            snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", r);
-            dynamic_buffer_append_str(out, pos_buf);
-            dynamic_buffer_append_str(out, EL_TO_END);
-        }
-    }
-    input->last_render_rows = cur;
 }
 
 /* Render text input to output buffer.
  *
- * When terminal_row is set (> 0), uses absolute cursor positioning:
- * positions the cursor with CSI row;col H, then emits the input line(s)
- * starting at terminal_row. No relative cursor movements.
+ * ONE path for every mode. The layout decides what the rows are, the window
+ * decides which of them are visible, and the only thing the placement
+ * changes is how each row starts:
  *
- * When terminal_row is 0 (not set), uses legacy relative positioning.
+ *   AT_ROW  an absolute CSI <row>;1H, so the rows always land inside the
+ *           screen no matter what the cursor did last frame
+ *   INLINE  "\r" for the first row and "\r\n" for the rest, which is what
+ *           the runtime counts to place the cursor; H rows must therefore
+ *           always be <= the screen
+ *
+ * A focused input's cursor is kept inside [top, top + H) by
+ * ensure_cursor_visible(), so the rows painted and the cursor reported by
+ * tui_textinput_cursor_pos() describe the same window.
  *
  * Surrounding decoration (border lines, status bars) is the parent's
  * responsibility — see tui_border_render_horizontal() for the lipgloss
@@ -2212,175 +2632,55 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
     if (!input || !out)
         return;
 
-    char pos_buf[32];
-
-    /* view() records the rows it drew so a later, shorter frame can erase
-     * leftover rows. The pointer is const-qualified for callers, but the
-     * component owns this bookkeeping field. */
+    /* view() updates the window bookkeeping (last_render_rows) and may
+     * build the layout cache. The pointer is const-qualified for callers,
+     * but this state is the component's own. */
     TuiTextInput *mutable_input = (TuiTextInput *)input;
 
-    if (input->terminal_row > 0) {
-        /* Absolute-positioning mode: draw rows [terminal_row, next_row - 1],
-         * then blank any surplus rows from a taller previous frame. The
-         * input's rows start AT terminal_row: chrome above it (a status
-         * row) is another component's, and the composing app places it. */
-        int row0 = input->terminal_row;
-        int next_row = input->terminal_row;
+    const TuiLayout *L = layout_get(mutable_input);
+    int H = visible_rows(mutable_input);
+    size_t top = top_row(L, mutable_input);
+    int absolute = mutable_input->first_row > 0;
+    int wrap = input->wrap == TUI_TEXTINPUT_WRAP && input->content_width > 0;
+    int prev_rows = mutable_input->last_render_rows;
 
-        if (!input->multiline) {
-            /* Single-line mode */
-            if (input->soft_wrap && input->terminal_width > 0) {
-                /* Soft-wrap single-line content across visual rows. */
-                render_wrapped_line_absolute(input, out, 0, input->text_len, 0,
-                                             &next_row);
-            } else {
-                /* One row, horizontally scrolled by offset/offset_right. */
-                snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", row0);
-                dynamic_buffer_append_str(out, pos_buf);
-                dynamic_buffer_append_str(out, EL_TO_END);
-                render_prompt_and_text(input, out);
-                next_row = row0 + 1;
-            }
-        } else if (input->soft_wrap && input->terminal_width > 0) {
-            /* Multi-line soft-wrap: each logical line consumes as many visual
-             * rows as it needs; later rows align under the text column. This
-             * matches tui_textinput_cursor_pos() and tui_textinput_get_height(). */
-            int current_line = 0;
-            size_t line_start = 0;
-            for (size_t i = 0; i <= input->text_len; i++) {
-                if (i == input->text_len || input->text[i] == '\n') {
-                    render_wrapped_line_absolute(input, out, line_start, i,
-                                                 current_line, &next_row);
-                    current_line++;
-                    line_start = i + 1;
-                }
-            }
+    char pos_buf[32];
+
+    for (int i = 0; i < H; i++) {
+        if (absolute) {
+            snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H",
+                     mutable_input->first_row + i);
+            dynamic_buffer_append_str(out, pos_buf);
         } else {
-            /* Multi-line: one visual row per logical line (horizontal scroll). */
-            int current_line = 0;
-            size_t line_start = 0;
-            for (size_t i = 0; i <= input->text_len; i++) {
-                if (i == input->text_len || input->text[i] == '\n') {
-                    int row = row0 + current_line;
-                    snprintf(pos_buf, sizeof(pos_buf), CSI "%d;1H", row);
-                    dynamic_buffer_append_str(out, pos_buf);
-                    dynamic_buffer_append_str(out, EL_TO_END);
-
-                    /* Prompt/indentation (TuiStyle > legacy prompt_color):
-                     * the main prompt on line 0, the continuation prompt on
-                     * later lines, so the text column stays aligned. */
-                    if (input->show_prompt && input->prompt &&
-                        input->prompt_len > 0) {
-                        if (current_line == 0) {
-                            emit_styled_or_legacy(out, prompt_style_for(input),
-                                                  input->prompt_color,
-                                                  input->prompt);
-                        } else if (input->continuation_prompt &&
-                                   input->continuation_prompt_len > 0) {
-                            emit_styled_or_legacy(
-                                out, prompt_style_for(input),
-                                input->prompt_color,
-                                input->continuation_prompt);
-                        } else {
-                            for (int j = 0; j < input->prompt_len; j++)
-                                dynamic_buffer_append(out, " ", 1);
-                        }
-                    }
-
-                    /* Line content (selection-aware), with scroll window / clip */
-                    size_t r_start, r_end;
-                    get_line_render_range(input, line_start, i, current_line,
-                                          &r_start, &r_end);
-                    if (r_end > r_start)
-                        render_text_range(input, out, r_start, r_end);
-
-                    current_line++;
-                    line_start = i + 1;
-                }
-            }
-            next_row = row0 + current_line;
+            dynamic_buffer_append_str(out, i == 0 ? "\r" : "\r\n");
         }
+        dynamic_buffer_append_str(out, EL_TO_END);
 
-        erase_surplus_rows(mutable_input, out, next_row);
-        /* Cursor placement is handled by the runtime via cursor(). */
-        return;
+        size_t idx = top + (size_t)i;
+        if (idx >= L->n_rows)
+            continue; /* allocation failure: paint blank rows, not garbage */
+
+        const TuiVisualRow *row = &L->rows[idx];
+        emit_row_prefix(input, out, row);
+
+        size_t range_start, range_end;
+        if (wrap) {
+            range_start = row->byte_start;
+            range_end = row->byte_end;
+        } else {
+            clip_range(input, row, &range_start, &range_end);
+        }
+        if (range_end > range_start)
+            render_text_range(input, out, range_start, range_end);
     }
 
-    /* Legacy relative positioning (terminal_row not set). No absolute frame,
-     * so there is no surplus-row bookkeeping to do. */
-    mutable_input->last_render_rows = 0;
+    if (absolute)
+        erase_surplus(mutable_input, out, H, prev_rows);
 
-    /* The input's first row: cleared, then the prompt/text. Chrome above it
-     * (a status row) is another component's — the composing app paints it
-     * and owns the separator between the two. */
-    dynamic_buffer_append_str(out, "\r");
-    dynamic_buffer_append_str(out, EL_TO_END);
-
-    if (!input->multiline) {
-        /* Single-line mode */
-        if (input->soft_wrap && input->terminal_width > 0) {
-            /* Soft-wrap: emit the line across explicit rows so the runtime's
-             * newline-counted frame height matches the painted rows. */
-            int first_row = 1;
-            render_wrapped_line_relative(input, out, 0, input->text_len, 0,
-                                         &first_row);
-        } else {
-            render_prompt_and_text(input, out);
-        }
-        /* Cursor placement: relative mode has no absolute coordinate frame;
-         * cursor() abstains and the cursor naturally lands at the end of what
-         * we just wrote. */
-    } else {
-        /* Multi-line mode: relative positioning (legacy) */
-        if (input->soft_wrap && input->terminal_width > 0) {
-            /* Soft-wrap each logical line across explicit rows, matching
-             * tui_textinput_cursor_pos() and tui_textinput_get_height(). */
-            int first_row = 1;
-            int current_line = 0;
-            size_t line_start = 0;
-            for (size_t i = 0; i <= input->text_len; i++) {
-                if (i == input->text_len || input->text[i] == '\n') {
-                    render_wrapped_line_relative(input, out, line_start, i,
-                                                 current_line, &first_row);
-                    current_line++;
-                    line_start = i + 1;
-                }
-            }
-            return;
-        }
-
-        /* Prompt if set and shown (TuiStyle > legacy prompt_color).
-         * Continuation rows (below) emit their own continuation prompt. */
-        if (input->show_prompt && input->prompt && input->prompt_len > 0) {
-            emit_styled_or_legacy(out, prompt_style_for(input),
-                                  input->prompt_color, input->prompt);
-        }
-
-        /* Output text content per line (selection-aware), with scroll window / clip */
-        if (input->text_len > 0) {
-            int current_line = 0;
-            size_t line_start = 0;
-            for (size_t i = 0; i <= input->text_len; i++) {
-                if (i == input->text_len || input->text[i] == '\n') {
-                    size_t r_start, r_end;
-                    get_line_render_range(input, line_start, i, current_line,
-                                          &r_start, &r_end);
-                    if (r_end > r_start)
-                        render_text_range(input, out, r_start, r_end);
-                    if (i < input->text_len) {
-                        /* Found a real newline — emit row break + continuation */
-                        dynamic_buffer_append_str(out, "\r\n");
-                        dynamic_buffer_append_str(out, EL_TO_END);
-                        if (input->show_prompt && input->prompt &&
-                            input->prompt_len > 0)
-                            render_continuation_prompt(input, out);
-                    }
-                    current_line++;
-                    line_start = i + 1;
-                }
-            }
-        }
-    }
+    /* Only an absolute frame is erased later: an inline frame's rows are
+     * tracked by the runtime, and a leftover count here would let a later
+     * AT_ROW placement erase rows that are not ours. */
+    mutable_input->last_render_rows = absolute ? H : 0;
 }
 
 /* Get current text content */
@@ -2431,17 +2731,12 @@ void tui_textinput_clear(TuiTextInput *input)
     input->cursor_col = 0;
     input->offset = 0;
     input->offset_right = 0;
+    input->top_byte = 0;
     if (input->text)
         input->text[0] = '\0';
     clear_mark_if_set(input);
     undo_free(input);
-}
-
-/* Set focus state */
-void tui_textinput_set_focus(TuiTextInput *input, int focused)
-{
-    if (input)
-        input->focused = focused;
+    ensure_cursor_visible(input);
 }
 
 /* Check if focused */
@@ -2484,43 +2779,114 @@ int tui_textinput_line_count(const TuiTextInput *input)
 /* Count visual rows for a single logical line (soft-wrap aware).
  * When soft_wrap is off, always 1. When on, the line is walked in
  * content_width display-column chunks, exactly as the renderer paints it. */
-static int line_visual_rows(const TuiTextInput *input, size_t line_start,
-                            size_t line_end, int line_index)
+/* --- window accessors -------------------------------------------------
+ *
+ * What an app can ask about the window, answered from the same layout and
+ * the same top_row() the renderer uses, so the numbers it draws chrome
+ * from can never describe a different frame than the one on screen. */
+
+int tui_textinput_total_rows(const TuiTextInput *input)
 {
-    if (!input || !input->soft_wrap || input->terminal_width <= 0)
+    if (!input)
         return 1;
-
-    int prompt_w = line_prompt_width(input, line_index);
-    int content_w = input->terminal_width - prompt_w;
-    if (content_w <= 0)
-        return 1;
-
-    int rows = 0;
-    size_t pos = line_start;
-    do {
-        pos += fit_cols(input->text + pos, line_end - pos, content_w);
-        rows++;
-    } while (pos < line_end);
-    return rows ? rows : 1;
+    const TuiLayout *L = layout_get_c(input);
+    return L->n_rows > 0 ? (int)L->n_rows : 1;
 }
 
-/* Count total visual rows across all logical lines (soft-wrap aware). */
-static int total_visual_rows(const TuiTextInput *input)
+int tui_textinput_visible_rows(const TuiTextInput *input)
 {
-    if (!input || input->text_len == 0)
+    if (!input)
         return 1;
+    return visible_rows(input);
+}
 
-    int total = 0;
-    size_t line_start = 0;
-    int line_idx = 0;
-    for (size_t i = 0; i <= input->text_len; i++) {
-        if (i == input->text_len || input->text[i] == '\n') {
-            total += line_visual_rows(input, line_start, i, line_idx);
-            line_start = i + 1;
-            line_idx++;
-        }
+TuiTextInputScroll tui_textinput_scroll_state(const TuiTextInput *input)
+{
+    TuiTextInputScroll s = { 1, 1, 0, 0, 0, 0, 0 };
+    if (!input)
+        return s;
+
+    const TuiLayout *L = layout_get_c(input);
+    int total = L->n_rows > 0 ? (int)L->n_rows : 1;
+    int H = visible_rows(input);
+    size_t top = top_row(L, input);
+
+    s.total_rows = total;
+    s.visible_rows = H;
+    s.first_row = (int)top;
+    s.hidden_above = (int)top;
+    s.hidden_below = total - H - (int)top;
+    if (s.hidden_below < 0)
+        s.hidden_below = 0;
+    s.offset_left = input->offset;
+    s.offset_right = input->offset_right;
+    return s;
+}
+
+void tui_textinput_cursor_visual(const TuiTextInput *input, int *row, int *col)
+{
+    if (row)
+        *row = 0;
+    if (col)
+        *col = 0;
+    if (!input || !input->focused)
+        return;
+
+    const TuiLayout *L = layout_get_c(input);
+    int H = visible_rows(input);
+    size_t top = top_row(L, input);
+    if (L->n_rows == 0 || L->cur_row < top ||
+        L->cur_row >= top + (size_t)H)
+        return; /* outside the window: nothing sane to report */
+
+    int wrap = input->wrap == TUI_TEXTINPUT_WRAP && input->content_width > 0;
+    if (row)
+        *row = (int)(L->cur_row - top);
+    if (col) {
+        int c = L->rows[L->cur_row].prompt_w + L->cur_col -
+                (wrap ? 0 : input->offset);
+        *col = c > 0 ? c : 0;
     }
-    return total ? total : 1;
+}
+
+int tui_textinput_has_selection(const TuiTextInput *input)
+{
+    return input && input->has_mark && input->mark_byte != input->cursor_byte;
+}
+
+int tui_textinput_has_mark(const TuiTextInput *input)
+{
+    return input && input->has_mark;
+}
+
+size_t tui_textinput_mark(const TuiTextInput *input)
+{
+    if (!input)
+        return 0;
+    return input->has_mark ? input->mark_byte : input->cursor_byte;
+}
+
+int tui_textinput_selection_range(const TuiTextInput *input, size_t *start,
+                                  size_t *end)
+{
+    if (!tui_textinput_has_selection(input))
+        return 0;
+    size_t a = input->mark_byte, b = input->cursor_byte;
+    if (a > b) {
+        size_t t = a;
+        a = b;
+        b = t;
+    }
+    if (start)
+        *start = a;
+    if (end)
+        *end = b;
+    return 1;
+}
+
+int tui_textinput_undo_depth(const TuiTextInput *input)
+{
+    return input ? input->undo_count : 0;
 }
 
 /* Set maximum history size */
@@ -2655,8 +3021,11 @@ void tui_textinput_set_word_chars(TuiTextInput *input, const char *chars)
 /* Set whether to show the prompt */
 void tui_textinput_set_show_prompt(TuiTextInput *input, int show)
 {
-    if (input)
-        input->show_prompt = show;
+    if (!input)
+        return;
+    input->show_prompt = show;
+    invalidate_layout(input);
+    ensure_cursor_visible(input);
 }
 
 /* Set the prompt string */
@@ -2666,6 +3035,8 @@ void tui_textinput_set_prompt(TuiTextInput *input, const char *prompt)
         return;
     input->prompt = prompt;
     input->prompt_len = prompt_cols(prompt);
+    /* Prompt widths are part of the layout key. */
+    invalidate_layout(input);
 }
 
 /* Set the continuation prompt string */
@@ -2676,6 +3047,7 @@ void tui_textinput_set_continuation_prompt(TuiTextInput *input,
         return;
     input->continuation_prompt = prompt;
     input->continuation_prompt_len = prompt_cols(prompt);
+    invalidate_layout(input);
 }
 
 /* Set echo mode */
@@ -2685,11 +3057,16 @@ void tui_textinput_set_echo_mode(TuiTextInput *input, int mode)
         input->echo_mode = mode;
 }
 
-/* Set soft wrap mode */
-void tui_textinput_set_soft_wrap(TuiTextInput *input, int enable)
+/* Set wrap mode */
+void tui_textinput_set_wrap(TuiTextInput *input, TuiTextInputWrap mode)
 {
-    if (input)
-        input->soft_wrap = enable ? 1 : 0;
+    if (!input || input->wrap == mode)
+        return;
+    input->wrap = mode;
+    invalidate_layout(input);
+    if (mode != TUI_TEXTINPUT_WRAP)
+        handle_overflow(input);
+    ensure_cursor_visible(input);
 }
 
 /* Get echo mode */
@@ -2789,17 +3166,6 @@ void tui_textinput_set_ctrl_a_select_all(TuiTextInput *input, int enable)
         input->ctrl_a_select_all = enable ? 1 : 0;
 }
 
-void tui_textinput_set_prompt_color(TuiTextInput *input, const char *color)
-{
-    if (!input)
-        return;
-    if (color && color[0] != '\0') {
-        snprintf(input->prompt_color, sizeof(input->prompt_color), "%s", color);
-    } else {
-        input->prompt_color[0] = '\0';
-    }
-}
-
 void tui_textinput_set_focused_prompt_style(TuiTextInput *input, TuiStyle s)
 {
     if (input)
@@ -2812,129 +3178,92 @@ void tui_textinput_set_blurred_prompt_style(TuiTextInput *input, TuiStyle s)
         input->blurred_prompt_style = s;
 }
 
-/* Set width used for line wrapping / horizontal overflow */
-void tui_textinput_set_terminal_width(TuiTextInput *input, int width)
-{
-    if (input) {
-        input->terminal_width = width;
-        recalculate_cursor_position(input);
-    }
-}
+/* --- geometry --------------------------------------------------------- */
 
-/* Set terminal row for absolute positioning */
-void tui_textinput_set_terminal_row(TuiTextInput *input, int row)
-{
-    if (input) {
-        input->terminal_row = row;
-        /* The old row frame no longer applies; forget the previous frame's
-         * extent so surplus-row cleanup never targets a stale location. */
-        input->last_render_rows = 0;
-    }
-}
-
-/* Get render height in rows */
-int tui_textinput_get_height(const TuiTextInput *input)
+void tui_textinput_set_geometry(TuiTextInput *input,
+                                const TuiTextInputGeometry *g)
 {
     if (!input)
-        return 1;
-    if (!input->multiline)
-        return input->soft_wrap ? total_visual_rows(input) : 1;
-    return input->soft_wrap ? total_visual_rows(input)
-                            : tui_textinput_line_count(input);
+        return;
+    if (g)
+        input->geom = *g;
+    else
+        memset(&input->geom, 0, sizeof(input->geom));
+
+    invalidate_layout(input);
+
+    /* A new width re-flows the rows under the anchor, and a new box height
+     * changes how many of them are visible; both are answered by the same
+     * pass, in this order (handle_overflow reads cursor_col). */
+    if (input->wrap != TUI_TEXTINPUT_WRAP)
+        handle_overflow(input);
+    ensure_cursor_visible(input);
 }
 
-/* Report cursor position for the runtime. Mirrors the arithmetic the old
- * view() used internally before cursor placement was hoisted out. */
+TuiTextInputGeometry tui_textinput_geometry(const TuiTextInput *input)
+{
+    TuiTextInputGeometry g;
+    memset(&g, 0, sizeof(g));
+    if (input)
+        g = input->geom;
+    return g;
+}
+
+void tui_textinput_set_placement(TuiTextInput *input, int row)
+{
+    if (!input)
+        return;
+    input->geom.place = row > 0 ? TUI_TEXTINPUT_AT_ROW : TUI_TEXTINPUT_INLINE;
+    input->geom.row = row > 0 ? row : 0;
+    invalidate_layout(input);
+    ensure_cursor_visible(input);
+    /* The old screen frame no longer applies, but last_render_rows is
+     * deliberately kept: erase_surplus() needs the OLD extent to clean up
+     * what the previous placement painted. */
+}
+
+void tui_textinput_set_rows(TuiTextInput *input, int rows)
+{
+    if (!input)
+        return;
+    input->geom.rows = rows > 0 ? rows : 0;
+    invalidate_layout(input);
+    ensure_cursor_visible(input);
+}
+
+/* Report cursor position for the runtime. The window decides: the cursor's
+ * visual row relative to `top`, and its column inside that row, minus the
+ * horizontal window in CLIP mode. */
 TuiCursor tui_textinput_cursor_pos(const TuiTextInput *input)
 {
     if (!input || !input->focused)
         return tui_cursor_hidden();
 
+    const TuiLayout *L = layout_get_c(input);
+    int H = visible_rows(input);
+    size_t top = top_row(L, input);
+
+    /* Cannot happen after ensure_cursor_visible(), but a hidden cursor is
+     * the right answer if it ever does: a cursor placed outside the window
+     * would paint a row this frame never wrote. */
+    if (L->n_rows == 0 || L->cur_row < top ||
+        L->cur_row >= top + (size_t)H)
+        return tui_cursor_hidden();
+
     /* base_row is the input's FIRST row — the row the prompt is painted on,
      * in this component's own coordinates. A composing app that paints
-     * chrome above the input (a status row) adds that row to the cursor
-     * row it declares. */
-    int base_row = input->terminal_row > 0 ? input->terminal_row : 1;
+     * chrome above the input adds that row to what it declares. */
+    int base_row = input->first_row > 0 ? input->first_row : 1;
+    int wrap = input->wrap == TUI_TEXTINPUT_WRAP && input->content_width > 0;
 
-    /* Soft-wrap mode: compute visual row/col across wrapped lines */
-    if (input->soft_wrap && input->terminal_width > 0) {
-        /* Line 0 carries the main prompt. */
-        int prompt_w = line_prompt_width(input, 0);
-        int content_w = input->terminal_width - prompt_w;
-        if (content_w <= 0)
-            content_w = 1;
-
-        /* Walk through logical lines, counting visual rows */
-        int visual_row = 0;
-        size_t line_start = 0;
-        int line_idx = 0;
-        for (size_t i = 0; i <= input->text_len; i++) {
-            if (i == input->text_len || input->text[i] == '\n') {
-                int line_prompt_w = line_prompt_width(input, line_idx);
-                int line_content_w = input->terminal_width - line_prompt_w;
-                if (line_content_w <= 0)
-                    line_content_w = 1;
-
-                if (line_idx == (int)input->cursor_row) {
-                    /* Found the cursor's logical line: walk the same chunks
-                     * the renderer paints so the reported row/column lands on
-                     * the glyph the cursor is on. */
-                    size_t pos = line_start;
-                    int wrap_row = 0;
-                    int wrap_col = 0;
-                    for (;;) {
-                        size_t chunk =
-                            fit_cols(input->text + pos, i - pos, line_content_w);
-                        if (input->cursor_byte < pos + chunk ||
-                            pos + chunk >= i) {
-                            size_t upto =
-                                input->cursor_byte > pos
-                                    ? input->cursor_byte - pos
-                                    : 0;
-                            if (upto > chunk)
-                                upto = chunk;
-                            wrap_col =
-                                tui_utf8_display_width_n(input->text + pos, upto);
-                            /* A cursor at the very end of a line whose last
-                             * visual row is exactly full sits at that row's
-                             * end — not at the start of a fresh, empty row.
-                             * Folding by the raw width would report a phantom
-                             * extra row, which in inline mode walks the
-                             * tracked cursor-up one row too far each frame. */
-                            if (input->cursor_byte >= i && wrap_col > 0 &&
-                                wrap_col == line_content_w)
-                                wrap_col -= 1;
-                            break;
-                        }
-                        pos += chunk;
-                        wrap_row++;
-                    }
-                    int row = base_row + visual_row + wrap_row;
-                    int col = line_prompt_w + wrap_col + 1;
-                    return tui_cursor_at(row, col);
-                }
-
-                visual_row += line_visual_rows(input, line_start, i, line_idx);
-                line_start = i + 1;
-                line_idx++;
-            }
-        }
-        return tui_cursor_at(base_row, prompt_w + 1);
-    }
-
-    if (!input->multiline) {
-        int prompt_width = line_prompt_width(input, 0);
-        int col = prompt_width + ((int)input->cursor_col - input->offset) + 1;
-        return tui_cursor_at(base_row, col);
-    }
-
-    int prompt_width = line_prompt_width(input, (int)input->cursor_row);
-    int col = (int)input->cursor_col - input->offset + prompt_width + 1;
-    int row = base_row + (int)input->cursor_row;
+    int row = base_row + (int)(L->cur_row - top);
+    int col = L->rows[L->cur_row].prompt_w + L->cur_col -
+              (wrap ? 0 : input->offset) + 1;
+    if (col < 1)
+        col = 1;
     return tui_cursor_at(row, col);
 }
 
-/* Component interface wrappers */
 static TuiInitResult textinput_init(void *config)
 {
     TuiModel *model =

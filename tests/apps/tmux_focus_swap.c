@@ -22,14 +22,11 @@
 #include <boba/msg.h>
 #include <boba/runtime.h>
 
-/* App uses the legacy convenience setters to focus children at startup. */
-_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-    typedef struct
+typedef struct
 {
     TuiModel base;
     TuiTextInput *ti;
@@ -60,8 +57,11 @@ static TuiInitResult app_init(void *cfg)
         return tui_init_result_none(NULL);
     }
 
-    tui_textinput_set_focus(a->ti, 1);
-    tui_textinput_set_terminal_row(a->ti, 1);
+    tui_textinput_update(a->ti, tui_msg_focus());
+    TuiTextInputGeometry g = { .sizing = TUI_TEXTINPUT_FLOW,
+                               .place = TUI_TEXTINPUT_AT_ROW,
+                               .row = 1 };
+    tui_textinput_set_geometry(a->ti, &g);
 
     tui_viewport_append(a->vp, SAMPLE_LINES, strlen(SAMPLE_LINES));
     tui_viewport_set_render_position(a->vp, 3, 1);
@@ -101,7 +101,7 @@ static TuiUpdateResult app_update(TuiModel *m, TuiMsg msg)
     if (msg.type == TUI_MSG_WINDOW_SIZE) {
         a->term_w = msg.data.size.width;
         a->term_h = msg.data.size.height;
-        tui_textinput_set_terminal_width(a->ti, a->term_w);
+        tui_textinput_update(a->ti, msg);
         /* row 1 input, row 2 blank, rows 3..term_h-1 viewport, row term_h indicator */
         int vp_h = a->term_h - 3;
         if (vp_h < 1)

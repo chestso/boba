@@ -11,11 +11,7 @@
 #include <boba/dynamic_buffer.h>
 #include <boba/msg.h>
 
-/* Tests deliberately exercise the legacy imperative APIs (set_focus,
- * set_prompt_color) to verify backward-compat behavior. */
-_Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
-
-    static int tests_run = 0;
+static int tests_run = 0;
 static int tests_passed = 0;
 
 #define RUN_TEST(fn)                 \
@@ -27,6 +23,48 @@ static int tests_passed = 0;
     } while (0)
 
 /* ---------- helpers ---------- */
+
+/* The model is opaque now, so the few derived values these tests assert on
+ * are read the way an app would read them. */
+
+/* Resize the box without disturbing its placement/caps. */
+static void set_width(TuiTextInput *input, int width)
+{
+    TuiTextInputGeometry g = tui_textinput_geometry(input);
+    g.width = width;
+    tui_textinput_set_geometry(input, &g);
+}
+
+/* The horizontal window (CLIP mode), left and right display columns. */
+static int hoff(TuiTextInput *input)
+{
+    return tui_textinput_scroll_state(input).offset_left;
+}
+
+static int hoff_right(TuiTextInput *input)
+{
+    return tui_textinput_scroll_state(input).offset_right;
+}
+
+static const char *kill_text(TuiTextInput *input)
+{
+    return tui_textinput_kill_buffer(input, NULL);
+}
+
+static size_t kill_len(TuiTextInput *input)
+{
+    size_t n = 0;
+    (void)tui_textinput_kill_buffer(input, &n);
+    return n;
+}
+
+/* Run an update through the component interface and return the result so
+ * the test can inspect (and free) any returned cmd. */
+static TuiUpdateResult run_update(TuiTextInput *input, TuiMsg msg)
+{
+    const TuiComponent *c = tui_textinput_component();
+    return c->update((TuiModel *)input, msg);
+}
 
 /* Send a string of ASCII characters to the input */
 static void send_string(TuiTextInput *input, const char *s)
@@ -119,20 +157,19 @@ static void test_create_with_config(void)
 {
     TuiTextInputConfig cfg = {
         .prompt = "> ",
-        .width = 40,
-        .height = 1,
+        .geometry = { .width = 40, .rows = 1 },
         .multiline = 0,
     };
     TuiTextInput *input = tui_textinput_create(&cfg);
     assert(input != NULL);
-    assert(input->width == 40);
+    assert(tui_textinput_geometry(input).width == 40);
     tui_textinput_free(input);
 }
 
 static void test_char_insertion(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_char(input, 'h');
     send_char(input, 'e');
@@ -149,7 +186,7 @@ static void test_char_insertion(void)
 static void test_backspace(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "hello");
     send_key(input, TUI_KEY_BACKSPACE);
@@ -162,7 +199,7 @@ static void test_backspace(void)
 static void test_backspace_at_start(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     /* Backspace on empty input should do nothing */
     send_key(input, TUI_KEY_BACKSPACE);
@@ -174,7 +211,7 @@ static void test_backspace_at_start(void)
 static void test_delete_key(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "hello");
     /* Move cursor to start */
@@ -190,7 +227,7 @@ static void test_delete_key(void)
 static void test_cursor_left_right(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "abc");
     assert(tui_textinput_cursor(input) == 3);
@@ -210,7 +247,7 @@ static void test_cursor_left_right(void)
 static void test_cursor_left_at_start(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     /* Left on empty input should stay at 0 */
     send_key(input, TUI_KEY_LEFT);
@@ -221,7 +258,7 @@ static void test_cursor_left_at_start(void)
 static void test_cursor_right_at_end(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "ab");
     assert(tui_textinput_cursor(input) == 2);
@@ -235,7 +272,7 @@ static void test_cursor_right_at_end(void)
 static void test_home_end(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "hello");
     assert(tui_textinput_cursor(input) == 5);
@@ -252,7 +289,7 @@ static void test_home_end(void)
 static void test_insert_in_middle(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "hllo");
     /* Move cursor after 'h' */
@@ -269,7 +306,7 @@ static void test_insert_in_middle(void)
 static void test_set_text(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     tui_textinput_set_text(input, "preset");
     assert(strcmp(tui_textinput_text(input), "preset") == 0);
@@ -280,7 +317,7 @@ static void test_set_text(void)
 static void test_clear(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "hello");
     tui_textinput_clear(input);
@@ -295,9 +332,9 @@ static void test_focus(void)
 
     /* Default is focused */
     assert(tui_textinput_is_focused(input) == 1);
-    tui_textinput_set_focus(input, 0);
+    run_update(input, tui_msg_blur());
     assert(tui_textinput_is_focused(input) == 0);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     assert(tui_textinput_is_focused(input) == 1);
     tui_textinput_free(input);
 }
@@ -306,7 +343,7 @@ static void test_unfocused_ignores_input(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     /* Explicitly unfocus (default is focused) */
-    tui_textinput_set_focus(input, 0);
+    run_update(input, tui_msg_blur());
 
     send_char(input, 'a');
     assert(strcmp(tui_textinput_text(input), "") == 0);
@@ -318,7 +355,7 @@ static void test_release_event_ignored(void)
     /* Release events (only emitted under Kitty kbd protocol) must not
      * insert text, even though the message type is TUI_MSG_KEY_PRESS. */
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     tui_textinput_update(input, tui_msg_key_release(TUI_KEY_NONE, 'a', 0));
     assert(strcmp(tui_textinput_text(input), "") == 0);
@@ -362,7 +399,7 @@ static void test_paste_single_line_joins_lines_with_spaces(void)
 
     send_paste(input, "line1\r\nline2\nline3");
     assert(strcmp(tui_textinput_text(input), "line1 line2 line3") == 0);
-    assert(tui_textinput_get_height(input) == 1);
+    assert(tui_textinput_visible_rows(input) == 1);
     tui_textinput_free(input);
 }
 
@@ -424,7 +461,7 @@ static void test_paste_is_one_undo_entry(void)
 static void test_paste_ignored_when_unfocused(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 0);
+    run_update(input, tui_msg_blur());
 
     send_paste(input, "a\nb");
     assert(strcmp(tui_textinput_text(input), "") == 0);
@@ -531,8 +568,8 @@ static void test_focused_blurred_styles_differ(void)
 {
     TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_terminal_width(input, 20);
+    tui_textinput_set_placement(input, 1);
+    set_width(input, 20);
 
     /* Bold focused, faint blurred. */
     tui_textinput_set_focused_prompt_style(
@@ -540,12 +577,12 @@ static void test_focused_blurred_styles_differ(void)
     tui_textinput_set_blurred_prompt_style(
         input, tui_style_faint(tui_style_new(), 1));
 
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     char *focused = render_view(input);
     assert(strstr(focused, "\033[1m") != NULL); /* bold open */
     free(focused);
 
-    tui_textinput_set_focus(input, 0);
+    run_update(input, tui_msg_blur());
     char *blurred = render_view(input);
     assert(strstr(blurred, "\033[2m") != NULL); /* faint open */
     free(blurred);
@@ -555,72 +592,28 @@ static void test_focused_blurred_styles_differ(void)
 
 static void test_prompt_style_applies_in_multiline_mode(void)
 {
-    /* Regression: the multiline render paths read prompt_color directly
-     * and ignored focused/blurred_prompt_style (nevermore's chat is a
-     * multiline input, so its colored prompt had no effect). */
+    /* Regression: the multiline render paths used to read the legacy raw
+     * ANSI color and ignore focused/blurred_prompt_style (nevermore's chat
+     * is a multiline input, so its styled prompt had no effect). */
     TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_terminal_width(input, 20);
+    tui_textinput_set_placement(input, 1);
+    set_width(input, 20);
     tui_textinput_set_focused_prompt_style(
         input, tui_style_bold(tui_style_new(), 1));
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     char *out = render_view(input);
     assert(strstr(out, "\033[1m> ") != NULL); /* bold prompt */
     free(out);
 
-    /* legacy color is honored when no style is set */
-    tui_textinput_set_focused_prompt_style(input, tui_style_new());
-    tui_textinput_set_prompt_color(input, "\033[35m");
-    out = render_view(input);
-    assert(strstr(out, "\033[35m> ") != NULL);
-    free(out);
-    tui_textinput_free(input);
-}
-
-static void test_legacy_color_still_works(void)
-{
-    /* When no TuiStyle is set, the legacy raw-ANSI setter still applies. */
-    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
-    TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_terminal_width(input, 20);
-    tui_textinput_set_focus(input, 1);
-
-    tui_textinput_set_prompt_color(input, "\033[35m");
-    char *out = render_view(input);
-    assert(strstr(out, "\033[35m") != NULL);
-    free(out);
-    tui_textinput_free(input);
-}
-
-static void test_style_overrides_legacy(void)
-{
-    /* Setting both legacy color and TuiStyle: TuiStyle wins. */
-    TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
-    TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_terminal_width(input, 20);
-    tui_textinput_set_focus(input, 1);
-
-    tui_textinput_set_prompt_color(input, "\033[35m"); /* legacy */
-    tui_textinput_set_focused_prompt_style(
-        input, tui_style_bold(tui_style_new(), 1));
-
-    char *out = render_view(input);
-    /* bold from style is present */
-    assert(strstr(out, "\033[1m") != NULL);
-    /* legacy magenta is NOT */
-    assert(strstr(out, "\033[35m") == NULL);
-    free(out);
     tui_textinput_free(input);
 }
 
 static void test_history_navigation(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_history_size(input, 10);
 
     tui_textinput_history_add(input, "first");
@@ -650,7 +643,7 @@ static void test_history_navigation(void)
 static void test_tab_emits_command(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "he");
 
@@ -671,7 +664,7 @@ static void test_tab_emits_command(void)
 static void test_tab_word_start(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "foo he");
 
@@ -689,7 +682,7 @@ static void test_tab_word_start(void)
 static void test_tab_with_shift_is_noop(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "foo");
     size_t cursor_before = tui_textinput_cursor(input);
@@ -710,7 +703,7 @@ static void test_tab_with_shift_is_noop(void)
 static void test_word_at_cursor_simple(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_word_chars(input,
                                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
 
@@ -728,7 +721,7 @@ static void test_word_at_cursor_simple(void)
 static void test_word_at_cursor_mid_word(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_word_chars(input,
                                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
 
@@ -749,7 +742,7 @@ static void test_word_at_cursor_mid_word(void)
 static void test_word_at_cursor_after_space(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_word_chars(input,
                                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
 
@@ -769,7 +762,7 @@ static void test_word_at_cursor_after_space(void)
 static void test_word_at_cursor_empty_input(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_word_chars(input,
                                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
 
@@ -784,7 +777,7 @@ static void test_word_at_cursor_empty_input(void)
 static void test_word_at_cursor_not_in_word(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_word_chars(input,
                                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
 
@@ -809,7 +802,7 @@ static void test_word_at_cursor_null_safe(void)
 static void test_word_at_cursor_after_paren(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_word_chars(input,
                                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-*!?");
 
@@ -827,7 +820,7 @@ static void test_word_at_cursor_after_paren(void)
 static void test_insert_completion(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "he");
 
@@ -842,7 +835,7 @@ static void test_insert_completion(void)
 static void test_view_output(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "hello");
 
@@ -860,7 +853,7 @@ static void test_view_output(void)
 static void test_set_cursor(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "hello");
     tui_textinput_set_cursor(input, 2);
@@ -877,7 +870,7 @@ static void test_line_count(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "line1");
     assert(tui_textinput_line_count(input) == 1);
@@ -893,7 +886,7 @@ static void test_line_count(void)
 static void test_prompt(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_prompt(input, "$ ");
     tui_textinput_set_show_prompt(input, 1);
 
@@ -912,7 +905,7 @@ static void test_prompt(void)
 static void test_get_height_single_line(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    assert(tui_textinput_get_height(input) == 1);
+    assert(tui_textinput_visible_rows(input) == 1);
     tui_textinput_free(input);
 }
 
@@ -920,23 +913,15 @@ static void test_get_height_multiline(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
-    assert(tui_textinput_get_height(input) == 1);
+    run_update(input, tui_msg_focus());
+    assert(tui_textinput_visible_rows(input) == 1);
     /* Insert a newline (Ctrl+J in multiline) — height grows to 2. */
     tui_textinput_update(input, tui_msg_key(TUI_KEY_NONE, 'j', TUI_MOD_CTRL));
-    assert(tui_textinput_get_height(input) == 2);
+    assert(tui_textinput_visible_rows(input) == 2);
     tui_textinput_free(input);
 }
 
 /* ---------- selection / clipboard tests ---------- */
-
-/* Run an update through the component interface and return the result so
- * the test can inspect (and free) any returned cmd. */
-static TuiUpdateResult run_update(TuiTextInput *input, TuiMsg msg)
-{
-    const TuiComponent *c = tui_textinput_component();
-    return c->update((TuiModel *)input, msg);
-}
 
 /* Cmd (META) + rune */
 static void send_meta(TuiTextInput *input, char c)
@@ -962,7 +947,7 @@ static TuiTextInput *multiline_input(const char *text)
     TuiTextInputConfig cfg = { 0 };
     cfg.multiline = 1;
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_text(input, text);
     return input;
 }
@@ -970,19 +955,19 @@ static TuiTextInput *multiline_input(const char *text)
 static void test_ctrl_space_toggles_mark(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "hello");
 
     /* C-SPC sets mark at cursor (cursor is at byte 5 after "hello"). */
     TuiUpdateResult r = run_update(
         input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
-    assert(input->has_mark == 1);
-    assert(input->mark_byte == 5);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(tui_textinput_mark(input) == 5);
     assert(r.cmd == NULL);
 
     /* Second C-SPC clears the mark. */
     r = run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
-    assert(input->has_mark == 0);
+    assert(tui_textinput_has_mark(input) == 0);
     assert(r.cmd == NULL);
 
     tui_textinput_free(input);
@@ -991,7 +976,7 @@ static void test_ctrl_space_toggles_mark(void)
 static void test_m_w_no_mark_copies_whole_input(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello");
@@ -1005,8 +990,8 @@ static void test_m_w_no_mark_copies_whole_input(void)
     assert(sink.len == 5);
     assert(strcmp(sink.text, "hello") == 0);
     /* A copy does not enter the ring. */
-    assert(input->kill_buf == NULL);
-    assert(input->kill_buf_len == 0);
+    assert(kill_text(input) == NULL);
+    assert(kill_len(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -1014,7 +999,7 @@ static void test_m_w_no_mark_copies_whole_input(void)
 static void test_m_w_with_mark_copies_region(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello world");
@@ -1024,14 +1009,14 @@ static void test_m_w_with_mark_copies_region(void)
     tui_textinput_set_cursor(input, 0);
     /* Set mark at byte 0 via C-SPC */
     run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
-    assert(input->has_mark == 1);
-    assert(input->mark_byte == 0);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(tui_textinput_mark(input) == 0);
 
     /* Move cursor right by 5 chars via C-F */
     for (int i = 0; i < 5; i++)
         run_update(input, tui_msg_key(TUI_KEY_NONE, 'f', TUI_MOD_CTRL));
-    assert(input->cursor_byte == 5);
-    assert(input->has_mark == 1); /* motion preserves mark */
+    assert(tui_textinput_cursor(input) == 5);
+    assert(tui_textinput_has_mark(input) == 1); /* motion preserves mark */
 
     /* M-w reports "hello" and clears mark */
     TuiUpdateResult r = run_update(
@@ -1041,8 +1026,8 @@ static void test_m_w_with_mark_copies_region(void)
     assert(sink.kind == TUI_TEXTINPUT_CLIP_COPY);
     assert(sink.len == 5);
     assert(strcmp(sink.text, "hello") == 0);
-    assert(input->has_mark == 0);
-    assert(input->kill_buf_len == 0);
+    assert(tui_textinput_has_mark(input) == 0);
+    assert(kill_len(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -1050,7 +1035,7 @@ static void test_m_w_with_mark_copies_region(void)
 static void test_ctrl_w_kills_region_when_mark_set(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abcdef");
@@ -1060,16 +1045,16 @@ static void test_ctrl_w_kills_region_when_mark_set(void)
     /* Mark at 1; move cursor to 4 */
     for (int i = 0; i < 3; i++)
         run_update(input, tui_msg_key(TUI_KEY_NONE, 'f', TUI_MOD_CTRL));
-    assert(input->cursor_byte == 4);
+    assert(tui_textinput_cursor(input) == 4);
 
     /* C-W with mark: kills region [1,4) = "bcd" */
     TuiUpdateResult r = run_update(
         input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_CTRL));
     assert(strcmp(tui_textinput_text(input), "aef") == 0);
-    assert(input->has_mark == 0);
+    assert(tui_textinput_has_mark(input) == 0);
     /* kill-ring filled */
-    assert(input->kill_buf_len == 3);
-    assert(memcmp(input->kill_buf, "bcd", 3) == 0);
+    assert(kill_len(input) == 3);
+    assert(memcmp(kill_text(input), "bcd", 3) == 0);
     /* reported through the hook, not emitted */
     assert(r.cmd == NULL);
     assert(sink.calls == 1);
@@ -1083,7 +1068,7 @@ static void test_ctrl_w_kills_region_when_mark_set(void)
 static void test_ctrl_k_reports_kill(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello");
@@ -1106,7 +1091,7 @@ static void test_ctrl_k_reports_kill(void)
 static void test_ctrl_u_reports_kill(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello");
@@ -1129,7 +1114,7 @@ static void test_ctrl_u_reports_kill(void)
 static void test_clipboard_cmd_opt_in_restores_kill(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_clipboard_cmd(input, 1);
     send_string(input, "hello");
     tui_textinput_set_cursor(input, 0);
@@ -1157,7 +1142,7 @@ static void test_clipboard_cmd_opt_in_restores_kill(void)
 static void test_clipboard_hook_kind_and_text(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
 
@@ -1200,17 +1185,16 @@ static void test_clipboard_hook_kind_and_text(void)
 static void test_shift_motion_selects(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abcdef");
     tui_textinput_set_cursor(input, 0);
 
     for (int i = 0; i < 3; i++)
         run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
 
-    assert(input->has_mark == 1);
-    assert(input->mark_byte == 0);
-    assert(input->cursor_byte == 3);
-    assert(input->mark_from_shift == 1);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(tui_textinput_mark(input) == 0);
+    assert(tui_textinput_cursor(input) == 3);
 
     tui_textinput_free(input);
 }
@@ -1218,19 +1202,18 @@ static void test_shift_motion_selects(void)
 static void test_unshifted_motion_collapses_shift_selection(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abcdef");
     tui_textinput_set_cursor(input, 0);
 
     for (int i = 0; i < 3; i++)
         run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
-    assert(input->has_mark == 1);
+    assert(tui_textinput_has_mark(input) == 1);
 
     /* Plain motion collapses the shift-made selection and still moves. */
     run_update(input, tui_msg_key(TUI_KEY_LEFT, 0, TUI_MOD_NONE));
-    assert(input->has_mark == 0);
-    assert(input->mark_from_shift == 0);
-    assert(input->cursor_byte == 2);
+    assert(tui_textinput_has_mark(input) == 0);
+    assert(tui_textinput_cursor(input) == 2);
 
     tui_textinput_free(input);
 }
@@ -1238,20 +1221,20 @@ static void test_unshifted_motion_collapses_shift_selection(void)
 static void test_typing_replaces_shift_selection(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abcdef");
     tui_textinput_set_cursor(input, 0);
 
     for (int i = 0; i < 3; i++)
         run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
-    int undo_before = input->undo_count;
+    int undo_before = tui_textinput_undo_depth(input);
 
     send_char(input, 'X');
     assert(strcmp(tui_textinput_text(input), "Xdef") == 0);
-    assert(input->cursor_byte == 1);
-    assert(input->has_mark == 0);
+    assert(tui_textinput_cursor(input) == 1);
+    assert(tui_textinput_has_mark(input) == 0);
     /* Replace + insert is ONE undoable edit. */
-    assert(input->undo_count == undo_before + 1);
+    assert(tui_textinput_undo_depth(input) == undo_before + 1);
 
     run_update(input, tui_msg_key(TUI_KEY_NONE, '_', TUI_MOD_CTRL));
     assert(strcmp(tui_textinput_text(input), "abcdef") == 0);
@@ -1262,21 +1245,21 @@ static void test_typing_replaces_shift_selection(void)
 static void test_backspace_replaces_shift_selection(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abcdef");
     tui_textinput_set_cursor(input, 1);
 
     for (int i = 0; i < 2; i++)
         run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_SHIFT));
-    assert(input->mark_byte == 1);
-    assert(input->cursor_byte == 3);
+    assert(tui_textinput_mark(input) == 1);
+    assert(tui_textinput_cursor(input) == 3);
 
     run_update(input, tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_NONE));
     assert(strcmp(tui_textinput_text(input), "adef") == 0);
-    assert(input->cursor_byte == 1);
-    assert(input->has_mark == 0);
+    assert(tui_textinput_cursor(input) == 1);
+    assert(tui_textinput_has_mark(input) == 0);
     /* A replace is not a kill: the ring stays empty. */
-    assert(input->kill_buf_len == 0);
+    assert(kill_len(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -1284,24 +1267,22 @@ static void test_backspace_replaces_shift_selection(void)
 static void test_ctrl_space_mark_is_not_collapsed_by_plain_motion(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abcdef");
     tui_textinput_set_cursor(input, 0);
 
     run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
-    assert(input->has_mark == 1);
-    assert(input->mark_from_shift == 0);
+    assert(tui_textinput_has_mark(input) == 1);
 
     for (int i = 0; i < 2; i++)
         run_update(input, tui_msg_key(TUI_KEY_NONE, 'f', TUI_MOD_CTRL));
-    assert(input->cursor_byte == 2);
+    assert(tui_textinput_cursor(input) == 2);
 
     /* An emacs mark survives plain motion: motion EXTENDS it. */
     run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_NONE));
-    assert(input->has_mark == 1);
-    assert(input->mark_from_shift == 0);
-    assert(input->mark_byte == 0);
-    assert(input->cursor_byte == 3);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(tui_textinput_mark(input) == 0);
+    assert(tui_textinput_cursor(input) == 3);
 
     tui_textinput_free(input);
 }
@@ -1323,8 +1304,8 @@ static void test_ctrl_k_takes_the_newline_at_eol(void)
      * accumulates so C-y restores both. */
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'k', TUI_MOD_CTRL));
     assert(strcmp(tui_textinput_text(input), "bar") == 0);
-    assert(input->kill_buf_len == 4);
-    assert(memcmp(input->kill_buf, "foo\n", 4) == 0);
+    assert(kill_len(input) == 4);
+    assert(memcmp(kill_text(input), "foo\n", 4) == 0);
     assert(sink.kind == TUI_TEXTINPUT_CLIP_KILL);
     assert(sink.len == 4);
 
@@ -1338,7 +1319,7 @@ static void test_ctrl_k_takes_the_newline_at_eol(void)
 static void test_ctrl_k_at_end_of_buffer_is_noop(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
@@ -1349,9 +1330,8 @@ static void test_ctrl_k_at_end_of_buffer_is_noop(void)
     assert(r.cmd == NULL);
     assert(strcmp(tui_textinput_text(input), "abc") == 0);
     assert(sink.calls == 0);
-    assert(input->kill_buf == NULL);
+    assert(kill_text(input) == NULL);
     /* A no-op kill does not extend the chain. */
-    assert(input->last_was_kill == 0);
 
     tui_textinput_free(input);
 }
@@ -1359,7 +1339,7 @@ static void test_ctrl_k_at_end_of_buffer_is_noop(void)
 static void test_consecutive_backward_kills_prepend(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "aaa bbb ccc");
     /* cursor at end (11) */
 
@@ -1367,8 +1347,8 @@ static void test_consecutive_backward_kills_prepend(void)
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'w', TUI_MOD_CTRL));
 
     /* Kills backward, but the ring reads in document order. */
-    assert(input->kill_buf_len == 7);
-    assert(memcmp(input->kill_buf, "bbb ccc", 7) == 0);
+    assert(kill_len(input) == 7);
+    assert(memcmp(kill_text(input), "bbb ccc", 7) == 0);
     assert(strcmp(tui_textinput_text(input), "aaa ") == 0);
 
     tui_textinput_free(input);
@@ -1379,13 +1359,13 @@ static void test_consecutive_backward_kills_prepend(void)
 static void test_meta_left_right_is_line_start_end(void)
 {
     TuiTextInput *input = multiline_input("foo\nbar baz");
-    assert(input->cursor_byte == 11);
+    assert(tui_textinput_cursor(input) == 11);
 
     run_update(input, tui_msg_key(TUI_KEY_LEFT, 0, TUI_MOD_META));
-    assert(input->cursor_byte == 4); /* start of the second line */
+    assert(tui_textinput_cursor(input) == 4); /* start of the second line */
 
     run_update(input, tui_msg_key(TUI_KEY_RIGHT, 0, TUI_MOD_META));
-    assert(input->cursor_byte == 11); /* end of it */
+    assert(tui_textinput_cursor(input) == 11); /* end of it */
 
     tui_textinput_free(input);
 }
@@ -1396,11 +1376,11 @@ static void test_meta_up_down_is_buffer_start_end(void)
     tui_textinput_set_cursor(input, 5); /* middle of line 2 */
 
     run_update(input, tui_msg_key(TUI_KEY_UP, 0, TUI_MOD_META));
-    assert(input->cursor_byte == 0);
+    assert(tui_textinput_cursor(input) == 0);
 
     tui_textinput_set_cursor(input, 5);
     run_update(input, tui_msg_key(TUI_KEY_DOWN, 0, TUI_MOD_META));
-    assert(input->cursor_byte == 11);
+    assert(tui_textinput_cursor(input) == 11);
 
     tui_textinput_free(input);
 }
@@ -1411,17 +1391,17 @@ static void test_ctrl_home_end_is_buffer_start_end(void)
     tui_textinput_set_cursor(input, 5);
 
     run_update(input, tui_msg_key(TUI_KEY_HOME, 0, TUI_MOD_CTRL));
-    assert(input->cursor_byte == 0);
+    assert(tui_textinput_cursor(input) == 0);
 
     tui_textinput_set_cursor(input, 5);
     run_update(input, tui_msg_key(TUI_KEY_END, 0, TUI_MOD_CTRL));
-    assert(input->cursor_byte == 11);
+    assert(tui_textinput_cursor(input) == 11);
 
     /* Plain Home/End still mean the LINE, as they always did. */
     run_update(input, tui_msg_key(TUI_KEY_HOME, 0, TUI_MOD_NONE));
-    assert(input->cursor_byte == 8);
+    assert(tui_textinput_cursor(input) == 8);
     run_update(input, tui_msg_key(TUI_KEY_END, 0, TUI_MOD_NONE));
-    assert(input->cursor_byte == 11);
+    assert(tui_textinput_cursor(input) == 11);
 
     tui_textinput_free(input);
 }
@@ -1429,30 +1409,30 @@ static void test_ctrl_home_end_is_buffer_start_end(void)
 static void test_meta_backspace_kills_to_line_start(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "foo bar");
 
     TuiUpdateResult r = run_update(
         input, tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_META));
     assert(r.cmd == NULL);
     assert(strcmp(tui_textinput_text(input), "") == 0);
-    assert(input->kill_buf_len == 7);
-    assert(memcmp(input->kill_buf, "foo bar", 7) == 0);
+    assert(kill_len(input) == 7);
+    assert(memcmp(kill_text(input), "foo bar", 7) == 0);
     tui_textinput_free(input);
 
     /* On line 2 only that line's prefix dies; the '\n' before it stays. */
     input = multiline_input("one\ntwo");
     run_update(input, tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_META));
     assert(strcmp(tui_textinput_text(input), "one\n") == 0);
-    assert(input->kill_buf_len == 3);
-    assert(memcmp(input->kill_buf, "two", 3) == 0);
+    assert(kill_len(input) == 3);
+    assert(memcmp(kill_text(input), "two", 3) == 0);
     tui_textinput_free(input);
 }
 
 static void test_alt_backspace_kills_word_backward(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "foo bar");
 
     /* ESC DEL in iTerm2 / Terminal.app, CSI 127;3u under kitty: the same
@@ -1461,8 +1441,8 @@ static void test_alt_backspace_kills_word_backward(void)
         input, tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_ALT));
     assert(r.cmd == NULL);
     assert(strcmp(tui_textinput_text(input), "foo ") == 0);
-    assert(input->kill_buf_len == 3);
-    assert(memcmp(input->kill_buf, "bar", 3) == 0);
+    assert(kill_len(input) == 3);
+    assert(memcmp(kill_text(input), "bar", 3) == 0);
 
     tui_textinput_free(input);
 }
@@ -1470,20 +1450,20 @@ static void test_alt_backspace_kills_word_backward(void)
 static void test_alt_b_f_d_word_motion_and_kill(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "foo bar baz");
 
     send_alt(input, 'b');
-    assert(input->cursor_byte == 8);
+    assert(tui_textinput_cursor(input) == 8);
     send_alt(input, 'b');
-    assert(input->cursor_byte == 4);
+    assert(tui_textinput_cursor(input) == 4);
     send_alt(input, 'f');
-    assert(input->cursor_byte == 8);
+    assert(tui_textinput_cursor(input) == 8);
 
     send_alt(input, 'd');
     assert(strcmp(tui_textinput_text(input), "foo bar ") == 0);
-    assert(input->kill_buf_len == 3);
-    assert(memcmp(input->kill_buf, "baz", 3) == 0);
+    assert(kill_len(input) == 3);
+    assert(memcmp(kill_text(input), "baz", 3) == 0);
 
     tui_textinput_free(input);
 }
@@ -1491,14 +1471,13 @@ static void test_alt_b_f_d_word_motion_and_kill(void)
 static void test_meta_a_selects_all_then_typing_replaces(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abc");
 
     send_meta(input, 'a');
-    assert(input->has_mark == 1);
-    assert(input->mark_byte == 0);
-    assert(input->cursor_byte == 3);
-    assert(input->mark_from_shift == 1);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(tui_textinput_mark(input) == 0);
+    assert(tui_textinput_cursor(input) == 3);
 
     send_char(input, 'x');
     assert(strcmp(tui_textinput_text(input), "x") == 0);
@@ -1509,7 +1488,7 @@ static void test_meta_a_selects_all_then_typing_replaces(void)
 static void test_meta_c_copies_selection_only(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abcdef");
@@ -1526,14 +1505,14 @@ static void test_meta_c_copies_selection_only(void)
     assert(strcmp(sink.text, "ab") == 0);
     /* A copy is not an edit: text and selection survive. */
     assert(strcmp(tui_textinput_text(input), "abcdef") == 0);
-    assert(input->has_mark == 1);
-    assert(input->kill_buf_len == 0);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(kill_len(input) == 0);
 
     tui_textinput_free(input);
 
     /* No selection: copies nothing at all (no whole-input fallback). */
     input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink empty = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &empty);
     send_string(input, "abc");
@@ -1547,7 +1526,7 @@ static void test_meta_c_copies_selection_only(void)
 static void test_meta_x_cuts_selection(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abcdef");
@@ -1564,8 +1543,8 @@ static void test_meta_x_cuts_selection(void)
     assert(sink.len == 2);
     assert(strcmp(sink.text, "bc") == 0);
     /* A cut enters the ring, and it is exactly the cut bytes. */
-    assert(input->kill_buf_len == 2);
-    assert(memcmp(input->kill_buf, "bc", 2) == 0);
+    assert(kill_len(input) == 2);
+    assert(memcmp(kill_text(input), "bc", 2) == 0);
 
     tui_textinput_free(input);
 }
@@ -1573,7 +1552,7 @@ static void test_meta_x_cuts_selection(void)
 static void test_meta_x_without_selection_is_noop(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
@@ -1583,7 +1562,7 @@ static void test_meta_x_without_selection_is_noop(void)
     assert(r.cmd == NULL);
     assert(strcmp(tui_textinput_text(input), "abc") == 0);
     assert(sink.calls == 0);
-    assert(input->kill_buf == NULL);
+    assert(kill_text(input) == NULL);
 
     tui_textinput_free(input);
 }
@@ -1591,14 +1570,14 @@ static void test_meta_x_without_selection_is_noop(void)
 static void test_ctrl_delete_kills_word_forward(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "foo bar");
     tui_textinput_set_cursor(input, 0);
 
     run_update(input, tui_msg_key(TUI_KEY_DELETE, 0, TUI_MOD_CTRL));
     assert(strcmp(tui_textinput_text(input), "bar") == 0);
-    assert(input->kill_buf_len == 4);
-    assert(memcmp(input->kill_buf, "foo ", 4) == 0);
+    assert(kill_len(input) == 4);
+    assert(memcmp(kill_text(input), "foo ", 4) == 0);
 
     tui_textinput_free(input);
 }
@@ -1606,7 +1585,7 @@ static void test_ctrl_delete_kills_word_forward(void)
 static void test_shift_delete_cuts_the_selection(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abcdef");
@@ -1616,7 +1595,7 @@ static void test_shift_delete_cuts_the_selection(void)
 
     run_update(input, tui_msg_key(TUI_KEY_DELETE, 0, TUI_MOD_SHIFT));
     assert(strcmp(tui_textinput_text(input), "abcf") == 0);
-    assert(input->cursor_byte == 3);
+    assert(tui_textinput_cursor(input) == 3);
     assert(sink.calls == 1);
     assert(sink.kind == TUI_TEXTINPUT_CLIP_CUT);
     assert(strcmp(sink.text, "de") == 0);
@@ -1632,7 +1611,7 @@ static void test_shift_delete_cuts_the_selection(void)
 static void test_meta_v_and_shift_insert_request_paste(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
@@ -1660,14 +1639,14 @@ static void test_meta_v_and_shift_insert_request_paste(void)
 static void test_meta_q_inserts_nothing(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
 
     send_meta(input, 'q');
     assert(strcmp(tui_textinput_text(input), "abc") == 0);
-    assert(input->cursor_byte == 3);
+    assert(tui_textinput_cursor(input) == 3);
     assert(sink.calls == 0);
 
     tui_textinput_free(input);
@@ -1676,30 +1655,30 @@ static void test_meta_q_inserts_nothing(void)
 static void test_ctrl_z_undo_leaves_stack_shallow(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_char(input, 'a');
     send_char(input, 'b');
-    assert(input->undo_count == 2);
+    assert(tui_textinput_undo_depth(input) == 2);
 
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'z', TUI_MOD_CTRL));
     assert(strcmp(tui_textinput_text(input), "a") == 0);
-    assert(input->undo_count == 1);
+    assert(tui_textinput_undo_depth(input) == 1);
 
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'z', TUI_MOD_CTRL));
     assert(strcmp(tui_textinput_text(input), "") == 0);
     /* Undo did not grow the stack: the snapshot it took was dropped. */
-    assert(input->undo_count == 0);
+    assert(tui_textinput_undo_depth(input) == 0);
 
     /* Cmd+Z behaves identically. */
     send_char(input, 'x');
     send_char(input, 'y');
-    assert(input->undo_count == 2);
+    assert(tui_textinput_undo_depth(input) == 2);
     send_meta(input, 'z');
     assert(strcmp(tui_textinput_text(input), "x") == 0);
-    assert(input->undo_count == 1);
+    assert(tui_textinput_undo_depth(input) == 1);
     send_meta(input, 'z');
     assert(strcmp(tui_textinput_text(input), "") == 0);
-    assert(input->undo_count == 0);
+    assert(tui_textinput_undo_depth(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -1707,7 +1686,7 @@ static void test_ctrl_z_undo_leaves_stack_shallow(void)
 static void test_ctrl_shift_c_copies(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello");
@@ -1734,7 +1713,7 @@ static void test_ctrl_shift_c_copies(void)
 static void test_ctrl_insert_copies(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "hello");
@@ -1754,7 +1733,7 @@ static void test_ctrl_insert_copies(void)
 static void test_plain_ctrl_v_is_untouched(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     ClipSink sink = { 0 };
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
@@ -1763,7 +1742,7 @@ static void test_plain_ctrl_v_is_untouched(void)
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'v', TUI_MOD_CTRL));
     assert(sink.calls == 0);
     assert(strcmp(tui_textinput_text(input), "abc") == 0);
-    assert(input->cursor_byte == 3);
+    assert(tui_textinput_cursor(input) == 3);
 
     tui_textinput_free(input);
 }
@@ -1771,11 +1750,11 @@ static void test_plain_ctrl_v_is_untouched(void)
 static void test_ctrl_a_moves_to_line_start_by_default(void)
 {
     TuiTextInput *input = multiline_input("aaa\nbbb");
-    assert(input->cursor_byte == 7);
+    assert(tui_textinput_cursor(input) == 7);
 
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'a', TUI_MOD_CTRL));
-    assert(input->cursor_byte == 4);
-    assert(input->has_mark == 0);
+    assert(tui_textinput_cursor(input) == 4);
+    assert(tui_textinput_has_mark(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -1786,11 +1765,10 @@ static void test_ctrl_a_select_all_when_enabled(void)
     tui_textinput_set_ctrl_a_select_all(input, 1);
 
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'a', TUI_MOD_CTRL));
-    assert(input->has_mark == 1);
-    assert(input->mark_byte == 0);
-    assert(input->cursor_byte == input->text_len);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(tui_textinput_mark(input) == 0);
+    assert(tui_textinput_cursor(input) == tui_textinput_len(input));
     /* Same selection semantics as Cmd+A, not a second select-all. */
-    assert(input->mark_from_shift == 1);
 
     send_char(input, 'x');
     assert(strcmp(tui_textinput_text(input), "x") == 0);
@@ -1801,20 +1779,19 @@ static void test_ctrl_a_select_all_when_enabled(void)
     tui_textinput_set_ctrl_a_select_all(input, 1);
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'a', TUI_MOD_CTRL));
     run_update(input, tui_msg_key(TUI_KEY_LEFT, 0, TUI_MOD_NONE));
-    assert(input->has_mark == 0);
-    assert(input->cursor_byte == 6);
+    assert(tui_textinput_has_mark(input) == 0);
+    assert(tui_textinput_cursor(input) == 6);
     tui_textinput_free(input);
 }
 
 static void test_meta_a_selects_all_without_the_knob(void)
 {
     TuiTextInput *input = multiline_input("abc");
-    assert(input->ctrl_a_select_all == 0);
 
     send_meta(input, 'a');
-    assert(input->has_mark == 1);
-    assert(input->mark_byte == 0);
-    assert(input->cursor_byte == 3);
+    assert(tui_textinput_has_mark(input) == 1);
+    assert(tui_textinput_mark(input) == 0);
+    assert(tui_textinput_cursor(input) == 3);
 
     tui_textinput_free(input);
 }
@@ -1826,7 +1803,7 @@ static void test_clipboard_hook_kinds(void)
 
     /* KILL */
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
     tui_textinput_set_cursor(input, 0);
@@ -1838,7 +1815,7 @@ static void test_clipboard_hook_kinds(void)
 
     /* COPY */
     input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
     tui_textinput_set_cursor(input, 0);
@@ -1851,7 +1828,7 @@ static void test_clipboard_hook_kinds(void)
 
     /* CUT */
     input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_string(input, "abc");
     tui_textinput_set_cursor(input, 0);
@@ -1864,7 +1841,7 @@ static void test_clipboard_hook_kinds(void)
 
     /* PASTE_REQUEST: no text at all. */
     input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_clipboard_hook(input, clip_sink, &sink);
     send_meta(input, 'v');
     assert(sink.kind == TUI_TEXTINPUT_CLIP_PASTE_REQUEST);
@@ -1876,14 +1853,14 @@ static void test_clipboard_hook_kinds(void)
 static void test_edit_clears_mark(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abc");
     run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
-    assert(input->has_mark == 1);
+    assert(tui_textinput_has_mark(input) == 1);
 
     /* Insert a character — mark should clear. */
     send_char(input, 'x');
-    assert(input->has_mark == 0);
+    assert(tui_textinput_has_mark(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -1891,13 +1868,13 @@ static void test_edit_clears_mark(void)
 static void test_escape_clears_mark(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "abc");
     run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
-    assert(input->has_mark == 1);
+    assert(tui_textinput_has_mark(input) == 1);
 
     run_update(input, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
-    assert(input->has_mark == 0);
+    assert(tui_textinput_has_mark(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -1905,7 +1882,7 @@ static void test_escape_clears_mark(void)
 static void test_view_renders_selection_with_reverse(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "hello");
     tui_textinput_set_cursor(input, 0);
     run_update(input, tui_msg_key(TUI_KEY_NONE, ' ', TUI_MOD_CTRL));
@@ -1930,15 +1907,15 @@ static void test_overflow_single_line(void)
     TuiTextInputConfig cfg = { 0 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_show_prompt(input, 0);
-    tui_textinput_set_terminal_width(input, 20);
+    set_width(input, 20);
 
     for (int i = 0; i < 30; i++)
         send_char(input, 'a' + (i % 26));
 
     /* Window must have shifted right and stay within content_width */
-    assert(input->offset > 0);
-    assert(input->offset_right - input->offset <= 20);
-    assert(input->offset_right >= 30); /* cursor visible at right edge */
+    assert(hoff(input) > 0);
+    assert(hoff_right(input) - hoff(input) <= 20);
+    assert(hoff_right(input) >= 30); /* cursor visible at right edge */
 
     tui_textinput_free(input);
 }
@@ -1948,7 +1925,7 @@ static void test_overflow_multiline_cursor_line(void)
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_show_prompt(input, 0);
-    tui_textinput_set_terminal_width(input, 20);
+    set_width(input, 20);
 
     /* Short first line, then a long second line. In multiline mode
      * plain Enter submits (clears the buffer); Shift+Enter inserts
@@ -1963,15 +1940,14 @@ static void test_overflow_multiline_cursor_line(void)
 
     /* Offsets reflect cursor's logical line (the long second line),
      * not a global codepoint index across the whole buffer. */
-    assert(input->cursor_row == 1);
-    assert(input->offset > 0);
-    assert(input->offset_right - input->offset <= 20);
+    assert(hoff(input) > 0);
+    assert(hoff_right(input) - hoff(input) <= 20);
     /* offset_right is in line-local codepoint space and includes the
      * cursor sentinel (one past the last character). For a 40-char
      * second line that's 41 — see the single-line case at line 677
      * (30 chars → offset_right == 31). If offsets were global it
      * would land in the 40s+ once you count "short\n" prefix bytes. */
-    assert(input->offset_right <= 41);
+    assert(hoff_right(input) <= 41);
 
     tui_textinput_free(input);
 }
@@ -1981,18 +1957,18 @@ static void test_overflow_resize_recomputes(void)
     TuiTextInputConfig cfg = { 0 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_show_prompt(input, 0);
-    tui_textinput_set_terminal_width(input, 80);
+    set_width(input, 80);
 
     for (int i = 0; i < 50; i++)
         send_char(input, 'a' + (i % 26));
 
     /* All 50 chars fit within 80 cols → no scroll yet */
-    assert(input->offset == 0);
+    assert(hoff(input) == 0);
 
     /* Resize narrower without further input — offsets must update */
-    tui_textinput_set_terminal_width(input, 20);
-    assert(input->offset > 0);
-    assert(input->offset_right - input->offset <= 20);
+    set_width(input, 20);
+    assert(hoff(input) > 0);
+    assert(hoff_right(input) - hoff(input) <= 20);
 
     tui_textinput_free(input);
 }
@@ -2002,15 +1978,15 @@ static void test_overflow_cursor_left_scrolls_back(void)
     TuiTextInputConfig cfg = { 0 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_show_prompt(input, 0);
-    tui_textinput_set_terminal_width(input, 20);
+    set_width(input, 20);
 
     for (int i = 0; i < 40; i++)
         send_char(input, 'a' + (i % 26));
-    assert(input->offset > 0);
+    assert(hoff(input) > 0);
 
     /* Move cursor to start of line — offset must reset to 0 */
     run_update(input, tui_msg_key(TUI_KEY_NONE, 'a', TUI_MOD_CTRL));
-    assert(input->offset == 0);
+    assert(hoff(input) == 0);
 
     tui_textinput_free(input);
 }
@@ -2021,9 +1997,9 @@ static void test_cursor_pos_focused_absolute(void)
 {
     TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
-    tui_textinput_set_terminal_width(input, 80);
-    tui_textinput_set_terminal_row(input, 5);
+    run_update(input, tui_msg_focus());
+    set_width(input, 80);
+    tui_textinput_set_placement(input, 5);
 
     send_string(input, "abc");
 
@@ -2040,9 +2016,9 @@ static void test_cursor_pos_blurred(void)
 {
     TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_width(input, 80);
-    tui_textinput_set_terminal_row(input, 5);
-    tui_textinput_set_focus(input, 0);
+    set_width(input, 80);
+    tui_textinput_set_placement(input, 5);
+    run_update(input, tui_msg_blur());
 
     TuiCursor c = tui_textinput_cursor_pos(input);
     assert(c.visible == 0);
@@ -2056,7 +2032,7 @@ static void test_cursor_pos_relative_abstains(void)
      * row 1 as relative reference. The runtime converts this to
      * relative cursor movement in inline flush. */
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "hello");
 
     TuiCursor c = tui_textinput_cursor_pos(input);
@@ -2072,9 +2048,9 @@ static void test_cursor_pos_multiline(void)
 {
     TuiTextInputConfig cfg = { .prompt = ">>> ", .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
-    tui_textinput_set_terminal_width(input, 80);
-    tui_textinput_set_terminal_row(input, 10);
+    run_update(input, tui_msg_focus());
+    set_width(input, 80);
+    tui_textinput_set_placement(input, 10);
 
     /* Build "ab\ncd" with cursor at end (row=1, col=2). Newline insertion
      * in multiline mode goes through Ctrl+J, the same path used when the
@@ -2103,9 +2079,9 @@ static void test_view_no_longer_emits_trailing_cup(void)
      * prompt; verify it no longer appears. */
     TuiTextInputConfig cfg = { .prompt = "> ", .multiline = 0 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
-    tui_textinput_set_terminal_width(input, 80);
-    tui_textinput_set_terminal_row(input, 7);
+    run_update(input, tui_msg_focus());
+    set_width(input, 80);
+    tui_textinput_set_placement(input, 7);
     send_string(input, "hi");
 
     DynamicBuffer *buf = dynamic_buffer_create(256);
@@ -2172,7 +2148,7 @@ static void test_textinput_no_renderer_plain_text(void)
 static void test_textinput_inline_cursor_visible(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_row(input, 5);
+    tui_textinput_set_placement(input, 5);
     send_string(input, "hello");
     TuiCursor c = tui_textinput_cursor_pos(input);
     assert(c.visible == 1);
@@ -2184,7 +2160,7 @@ static void test_textinput_inline_cursor_column(void)
 {
     TuiTextInputConfig cfg = { .prompt = ">>> " };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_row(input, 1);
+    tui_textinput_set_placement(input, 1);
     send_string(input, "hi");
     /* cursor after "hi" = col 7 (4 prompt + 2 text + 1 for 1-indexed) */
     TuiCursor c = tui_textinput_cursor_pos(input);
@@ -2238,7 +2214,7 @@ static void test_ctrl_d_empty_multiline_is_noop(void)
 static void test_eof_message_deletes_char_under_cursor(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "hello");
     tui_textinput_set_cursor(input, 3);
     run_update(input, tui_msg_eof());
@@ -2251,7 +2227,7 @@ static void test_eof_message_deletes_char_under_cursor(void)
 static void test_eof_message_at_end_of_line_is_noop(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "hello");
     run_update(input, tui_msg_eof());
     assert(strcmp(tui_textinput_text(input), "hello") == 0);
@@ -2264,7 +2240,7 @@ static void test_eof_message_at_end_of_line_is_noop(void)
 static void test_eof_message_on_empty_input_is_noop(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     run_update(input, tui_msg_eof());
     assert(tui_textinput_len(input) == 0);
     tui_textinput_free(input);
@@ -2275,7 +2251,7 @@ static void test_eof_message_on_empty_input_is_noop(void)
 static void test_eof_message_is_undoable(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     send_string(input, "hello");
     tui_textinput_set_cursor(input, 0);
     run_update(input, tui_msg_eof());
@@ -2284,7 +2260,7 @@ static void test_eof_message_is_undoable(void)
     send_ctrl(input, 'z');
     assert(strcmp(tui_textinput_text(input), "hello") == 0);
     /* Undo did not grow the stack. */
-    assert(input->undo_count == 5);
+    assert(tui_textinput_undo_depth(input) == 5);
     tui_textinput_free(input);
 }
 
@@ -2369,30 +2345,30 @@ static void test_multiline_relative_clears_between_lines(void)
 static void test_soft_wrap_height(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghijklmno"); /* 15 chars, width 10 → 2 visual rows */
-    assert(tui_textinput_get_height(input) == 2);
+    assert(tui_textinput_visible_rows(input) == 2);
     tui_textinput_free(input);
 }
 
 static void test_soft_wrap_height_short(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "hello"); /* 5 chars fits in 10 → 1 row */
-    assert(tui_textinput_get_height(input) == 1);
+    assert(tui_textinput_visible_rows(input) == 1);
     tui_textinput_free(input);
 }
 
 static void test_soft_wrap_height_exact(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghij"); /* exactly 10 → 1 row */
-    assert(tui_textinput_get_height(input) == 1);
+    assert(tui_textinput_visible_rows(input) == 1);
     tui_textinput_free(input);
 }
 
@@ -2400,14 +2376,14 @@ static void test_soft_wrap_height_multiline(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "hello");
     TuiUpdateResult r = tui_textinput_update(input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
     if (r.cmd)
         tui_cmd_free(r.cmd);
     send_string(input, "world!");
-    assert(tui_textinput_get_height(input) == 2);
+    assert(tui_textinput_visible_rows(input) == 2);
     tui_textinput_free(input);
 }
 
@@ -2415,23 +2391,23 @@ static void test_soft_wrap_height_multiline_wrap(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghijklmno");
     TuiUpdateResult r = tui_textinput_update(input, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
     if (r.cmd)
         tui_cmd_free(r.cmd);
     send_string(input, "xy");
-    assert(tui_textinput_get_height(input) == 3);
+    assert(tui_textinput_visible_rows(input) == 3);
     tui_textinput_free(input);
 }
 
 static void test_soft_wrap_cursor_row(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_placement(input, 1);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghijklmno"); /* 15 chars → 2 visual rows */
     TuiCursor c = tui_textinput_cursor_pos(input);
     assert(c.visible == 1);
@@ -2443,9 +2419,9 @@ static void test_soft_wrap_cursor_row(void)
 static void test_soft_wrap_disabled_default(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(input, 10);
+    set_width(input, 10);
     send_string(input, "abcdefghijklmno");
-    assert(tui_textinput_get_height(input) == 1);
+    assert(tui_textinput_visible_rows(input) == 1);
     tui_textinput_free(input);
 }
 
@@ -2460,9 +2436,9 @@ static void test_soft_wrap_absolute_splits_into_visual_rows(void)
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10); /* content width = 8 */
+    tui_textinput_set_placement(input, 1);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghijklmno"); /* 15 chars -> 2 visual rows */
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
@@ -2487,16 +2463,16 @@ static void test_soft_wrap_absolute_splits_into_visual_rows(void)
 }
 
 /* Row count emitted by soft-wrapped absolute rendering must match the height
- * reported by tui_textinput_get_height(), and the cursor's row must fall
+ * reported by tui_textinput_visible_rows(), and the cursor's row must fall
  * within that range — otherwise the parent under-reserves space. */
 static void test_soft_wrap_absolute_rows_match_height(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 12); /* content width = 10 */
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 12); /* content width = 10 */
+    tui_textinput_set_placement(input, 1);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
 
     /* Two logical lines, both long enough to wrap. */
     send_string(input, "hello foo bar baz"); /* 18 chars, line 0 */
@@ -2506,7 +2482,7 @@ static void test_soft_wrap_absolute_rows_match_height(void)
         tui_cmd_free(r.cmd);
     send_string(input, "second line"); /* 11 chars, line 1 */
 
-    int height = tui_textinput_get_height(input);
+    int height = tui_textinput_visible_rows(input);
     assert(height == 4); /* 2 + 2 visual rows */
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
@@ -2534,9 +2510,9 @@ static void test_soft_wrap_absolute_single_line(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_placement(input, 1);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghijklmno");
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
@@ -2558,15 +2534,15 @@ static void test_no_soft_wrap_absolute_stays_single_row(void)
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 10);
-    tui_textinput_set_terminal_row(input, 1);
+    set_width(input, 10);
+    tui_textinput_set_placement(input, 1);
     send_string(input, "abcdefghijklmno");
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
     tui_textinput_view(input, buf);
     const char *data = dynamic_buffer_data(buf);
 
-    assert(tui_textinput_get_height(input) == 1);
+    assert(tui_textinput_visible_rows(input) == 1);
     assert(strstr(data, "\x1b[1;1H") != NULL);
     assert(strstr(data, "\x1b[2;1H") == NULL);
 
@@ -2583,9 +2559,9 @@ static void test_soft_wrap_absolute_erases_surplus_rows(void)
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10); /* content width = 8 */
+    tui_textinput_set_placement(input, 1);
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghijklmno"); /* 2 visual rows */
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
@@ -2615,13 +2591,13 @@ static void test_soft_wrap_relative_splits_into_rows(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10); /* content width = 8 */
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
     send_string(input, "abcdefghijklmno"); /* 15 chars → 2 visual rows */
 
-    assert(tui_textinput_get_height(input) == 2);
+    assert(tui_textinput_visible_rows(input) == 2);
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
     tui_textinput_view(input, buf);
@@ -2638,16 +2614,16 @@ static void test_soft_wrap_relative_splits_into_rows(void)
 
 /* The runtime derives the inline frame height from the count of '\n' bytes
  * in the rendered content. For soft-wrapped relative output that count (+1)
- * must equal tui_textinput_get_height(), or the tracked and painted row
+ * must equal tui_textinput_visible_rows(), or the tracked and painted row
  * counts diverge. */
 static void test_soft_wrap_relative_rows_match_height(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 12); /* content width = 10 */
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 12); /* content width = 10 */
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
 
     /* Two logical lines, both long enough to wrap. */
     send_string(input, "hello foo bar baz"); /* 18 chars → 2 rows */
@@ -2657,7 +2633,7 @@ static void test_soft_wrap_relative_rows_match_height(void)
         tui_cmd_free(r.cmd);
     send_string(input, "second line"); /* 11 chars → 2 rows */
 
-    int height = tui_textinput_get_height(input);
+    int height = tui_textinput_visible_rows(input);
     assert(height == 4);
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
@@ -2683,10 +2659,10 @@ static void test_soft_wrap_cursor_exact_wrap_boundary(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10); /* content width = 8 */
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
 
     /* Exactly one row of content: cursor stays on row 1, at the row's end. */
     send_string(input, "abcdefgh");
@@ -2700,7 +2676,7 @@ static void test_soft_wrap_cursor_exact_wrap_boundary(void)
     c = tui_textinput_cursor_pos(input);
     assert(c.row == 2);
     assert(c.col == 10);
-    assert(tui_textinput_get_height(input) == 2);
+    assert(tui_textinput_visible_rows(input) == 2);
 
     tui_textinput_free(input);
 }
@@ -2714,12 +2690,12 @@ static void test_soft_wrap_cursor_exact_wrap_boundary(void)
 static void test_no_chrome_row_in_geometry(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_prompt(input, "> ");
     send_string(input, "cmd");
 
     /* Height: the input's rows alone. Cursor: row 1, the prompt's row. */
-    assert(tui_textinput_get_height(input) == 1);
+    assert(tui_textinput_visible_rows(input) == 1);
     TuiCursor c = tui_textinput_cursor_pos(input);
     assert(c.visible == 1);
     assert(c.row == 1);
@@ -2731,7 +2707,7 @@ static void test_no_chrome_row_in_geometry(void)
     assert(strncmp(dynamic_buffer_data(buf), "\r\033[K> cmd", 11) == 0);
 
     /* Absolute mode: terminal_row IS the input's first row. */
-    tui_textinput_set_terminal_row(input, 5);
+    tui_textinput_set_placement(input, 5);
     dynamic_buffer_clear(buf);
     tui_textinput_view(input, buf);
     assert(strstr(dynamic_buffer_data(buf), "\033[5;1H\033[K> cmd") != NULL);
@@ -2756,7 +2732,7 @@ static void send_rune(TuiTextInput *input, uint32_t cp)
 static void test_wide_cluster_prompt_cursor_column(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_prompt(input, "\xE2\x9A\xA1 "); /* 3 cells */
 
     send_string(input, "cmd");
@@ -2774,14 +2750,14 @@ static void test_wide_cluster_input_soft_wrap_cursor(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
     tui_textinput_set_prompt(input, "> ");
-    tui_textinput_set_terminal_width(input, 10); /* content width = 8 */
-    tui_textinput_set_soft_wrap(input, 1);
+    set_width(input, 10); /* content width = 8 */
+    tui_textinput_set_wrap(input, TUI_TEXTINPUT_WRAP);
 
     send_string(input, "abcdefg"); /* 7 cells: ⚡ would make 9 > 8 */
     send_rune(input, 0x26A1);
-    assert(tui_textinput_get_height(input) == 2);
+    assert(tui_textinput_visible_rows(input) == 2);
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
     tui_textinput_view(input, buf);
@@ -2803,10 +2779,10 @@ static void test_wide_cluster_input_soft_wrap_cursor(void)
 static void test_wide_cluster_input_scroll_window(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
-    tui_textinput_set_focus(input, 1);
-    tui_textinput_set_terminal_width(input, 10); /* content width = 10 */
-    send_string(input, "0123456789abcdefghij");  /* 20 cells */
-    send_rune(input, 0x26A1);                    /* + 2 = 22 cells */
+    run_update(input, tui_msg_focus());
+    set_width(input, 10);                       /* content width = 10 */
+    send_string(input, "0123456789abcdefghij"); /* 20 cells */
+    send_rune(input, 0x26A1);                   /* + 2 = 22 cells */
 
     DynamicBuffer *buf = dynamic_buffer_create(0);
     tui_textinput_view(input, buf);
@@ -2833,7 +2809,7 @@ static void test_vertical_motion_keeps_display_column(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "ab");
     TuiUpdateResult r =
@@ -2862,7 +2838,7 @@ static void test_vertical_motion_lands_on_cluster_boundary(void)
 {
     TuiTextInputConfig cfg = { .multiline = 1 };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_focus(input, 1);
+    run_update(input, tui_msg_focus());
 
     send_string(input, "a");
     TuiUpdateResult r =
@@ -2955,8 +2931,8 @@ static void test_grapheme_echo_masks_cluster_once(void)
 {
     TuiTextInputConfig cfg = { .prompt = "> " };
     TuiTextInput *input = tui_textinput_create(&cfg);
-    tui_textinput_set_terminal_row(input, 1);
-    tui_textinput_set_terminal_width(input, 20);
+    tui_textinput_set_placement(input, 1);
+    set_width(input, 20);
     tui_textinput_set_echo_mode(input, 1);
     send_paste(input, "e\xCC\x81x");
 
@@ -3101,8 +3077,8 @@ static int count_substr(const char *hay, const char *needle)
 static void test_spans_style_exactly_their_bytes(void)
 {
     TuiTextInput *in = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(in, 40);
-    tui_textinput_set_terminal_row(in, 1);
+    set_width(in, 40);
+    tui_textinput_set_placement(in, 1);
     tui_textinput_set_text(in, "see @a.c now");
     TuiTextSpan sp = underline_span(4, 8);
     assert(tui_textinput_set_spans(in, &sp, 1) == 0);
@@ -3135,9 +3111,9 @@ static void test_spans_survive_soft_wrap_split(void)
      * so a token wrapped over two rows could not be recognised. Offsets
      * are absolute, so both halves are underlined. */
     TuiTextInput *in = tui_textinput_create(&(TuiTextInputConfig){ .multiline = 1 });
-    tui_textinput_set_soft_wrap(in, 1);
-    tui_textinput_set_terminal_width(in, 12);
-    tui_textinput_set_terminal_row(in, 1);
+    tui_textinput_set_wrap(in, TUI_TEXTINPUT_WRAP);
+    set_width(in, 12);
+    tui_textinput_set_placement(in, 1);
     tui_textinput_set_text(in, "ab @src/very/long/path.c");
     TuiTextSpan sp = underline_span(3, 24);
     assert(tui_textinput_set_spans(in, &sp, 1) == 0);
@@ -3150,8 +3126,8 @@ static void test_spans_survive_soft_wrap_split(void)
 static void test_spans_compose_with_selection(void)
 {
     TuiTextInput *in = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(in, 40);
-    tui_textinput_set_terminal_row(in, 1);
+    set_width(in, 40);
+    tui_textinput_set_placement(in, 1);
     tui_textinput_set_text(in, "xx @a.c yy");
     tui_textinput_set_cursor(in, 0);
     send_ctrl(in, ' '); /* mark at 0 */
@@ -3172,8 +3148,8 @@ static void test_spans_compose_with_selection(void)
 static void test_spans_respect_echo_mode(void)
 {
     TuiTextInput *in = tui_textinput_create(NULL);
-    tui_textinput_set_terminal_width(in, 40);
-    tui_textinput_set_terminal_row(in, 1);
+    set_width(in, 40);
+    tui_textinput_set_placement(in, 1);
     tui_textinput_set_echo_mode(in, 1);
     tui_textinput_set_text(in, "secret");
     TuiTextSpan sp = underline_span(0, 6);
@@ -3226,8 +3202,6 @@ int main(void)
     RUN_TEST(test_ctrl_binding_survives_associated_text);
     RUN_TEST(test_focused_blurred_styles_differ);
     RUN_TEST(test_prompt_style_applies_in_multiline_mode);
-    RUN_TEST(test_legacy_color_still_works);
-    RUN_TEST(test_style_overrides_legacy);
     RUN_TEST(test_history_navigation);
     RUN_TEST(test_tab_emits_command);
     RUN_TEST(test_tab_word_start);
