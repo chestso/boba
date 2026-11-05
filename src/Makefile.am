@@ -18,6 +18,8 @@ libboba_a_SOURCES = \
     base64.h \
     style.c \
     text.c \
+    fit.c \
+    fit.h \
     stream.c \
     stream_internal.h \
     terminal_profile.c \
