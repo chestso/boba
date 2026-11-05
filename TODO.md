@@ -139,17 +139,49 @@ deleted. Deferred:
   component — a taller row breaks the separator contract and the frame
   budget math the one-row shape is built on.
 
+## textinput overflow (follow-ups)
+
+The vertical window landed: one layout, one emitter, `NATURAL` / `FIXED` /
+`FLOW` sizing, `tui_textinput_scroll_state()`, PgUp/PgDn, and the runtime's
+inline cursor-up clamp. Deliberately left for later:
+
+- **Adopt `src/fit.h` in viewport and statusline.** Both still take an
+  app-computed height/width. The helper exists precisely so the screen
+  clamp is written once; the migration is mechanical but touches their
+  render paths.
+- **Incremental layout.** `layout_get()` rebuilds from the whole text on
+  any edit. A dirty-from byte (the first edited logical line) would make a
+  megabyte paste cost one row rebuild instead of two full walks.
+- **Detached scrolling** (mouse wheel, Ctrl+Up/Down) needs a "cursor
+  off-window" state, and so does mouse drag-to-select: both want the
+  screen-to-byte map the layout can now answer. Design them together.
+- **Bottom docking.** Chat apps compute `row = term_h - H + 1` after every
+  edit. Now that the component knows `term_h` and H, a
+  `tui_textinput_dock(BOTTOM)` helper could own that arithmetic.
+- **`TuiView.max_inline_rows`.** A runtime-side clip would protect a
+  component that does not self-limit. It cannot replace a component's own
+  decision (H must be known _before_ painting to choose the top row), so
+  it stays a safety net only.
+- **In-component hidden-row indicators.** Apps draw "↑ 12 more" from
+  `scroll_state()` today. An in-component variant would spend a content row
+  and needs its own placement policy; not worth it until a second consumer
+  asks.
+
 ## Declarative API alignment
 
 - **Declarative replacements for textinput/viewport setters.** The
   bulk of `tui_textinput_set_*()` / `tui_viewport_set_*()` setters
-  (`set_history_size`, `set_terminal_width`, `set_terminal_row`,
-  `set_show_dividers`, `set_echo_mode`, `set_word_chars`, etc.) are
-  imperative and don't yet have a declarative equivalent. Designing
-  one needs three calls: which init-time options grow on
-  `TuiTextInputConfig`, where render-time positioning lives (likely
-  new `TuiView` fields or parent-dispatched messages), and which
-  mid-life mutations become message-driven vs. stay as setters. Once
-  designed, these setters become deprecation candidates. Tracked
-  separately from the v2-alignment plan because it's API design, not
-  a mechanical attribute pass.
+  (`set_history_size`, `set_show_dividers`, `set_echo_mode`,
+  `set_word_chars`, etc.) are imperative and don't yet have a declarative
+  equivalent. Textinput's size/placement already moved to the declarative
+  `TuiTextInputGeometry`; the rest needs the same treatment: which
+  init-time options grow on `TuiTextInputConfig`, where render-time
+  positioning lives (likely new `TuiView` fields or parent-dispatched
+  messages), and which mid-life mutations become message-driven vs. stay
+  as setters. Once designed, these setters become deprecation candidates.
+  Tracked separately from the v2-alignment plan because it's API design,
+  not a mechanical attribute pass.
+- **Opaque component structs, project-wide.** `TuiTextInput` is the pilot
+  (state read through accessors only). `TuiViewport`, `TuiStatusLine` and
+  `TuiListPopup` still expose their fields; migrating them the same way
+  removes the "field order is an API" constraint everywhere.

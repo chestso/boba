@@ -1,0 +1,69 @@
+boba NEWS
+=========
+
+Unreleased (pre-alpha)
+----------------------
+
+textinput: content larger than the terminal, and resize
+
+  TuiTextInput no longer assumes its content fits on screen. It paints
+  through a window over its visual rows, never emits a row outside the
+  screen (alt-screen or inline), keeps the cursor inside the window, and
+  reacts to terminal resizes.
+
+  This is an INTERFACE RESET, not an additive change. boba is pre-alpha and
+  the old surface had accumulated six overlapping size/placement setters, a
+  `terminal_row == 0` sentinel doing two jobs, and a public struct whose
+  dead fields (`height`, `scroll_offset`) had never been read.
+
+  Added:
+    - TuiTextInputGeometry (one struct) + tui_textinput_set_geometry() /
+      tui_textinput_geometry(): `sizing` (TUI_TEXTINPUT_NATURAL / _FIXED /
+      _FLOW), `place` (TUI_TEXTINPUT_INLINE / _AT_ROW) + `row`, `width`,
+      `rows`, `min_rows`, `reserve_above`, `reserve_below`, `side_margin`,
+      `scrolloff`
+    - tui_textinput_set_placement(), tui_textinput_set_rows(),
+      tui_textinput_set_wrap() as one-line setters over the same struct
+    - TuiTextInputScroll + tui_textinput_scroll_state() (both axes)
+    - tui_textinput_total_rows(), tui_textinput_visible_rows(),
+      tui_textinput_cursor_visual()
+    - tui_textinput_has_mark(), tui_textinput_mark(),
+      tui_textinput_has_selection(), tui_textinput_selection_range(),
+      tui_textinput_undo_depth()
+    - PgUp / PgDn move the cursor by visible_rows - 1
+    - TUI_MSG_WINDOW_SIZE is consumed by the component (before the focus
+      gate, so a resize while blurred still moves its window)
+
+  Changed:
+    - TuiTextInput is opaque. Read state through the accessors above.
+    - tui_textinput_set_soft_wrap(int) -> tui_textinput_set_wrap(TuiTextInputWrap)
+    - TuiTextInputConfig: `width`/`height` -> `rows` + `geometry`
+    - TuiTextInputConfig.geometry is a seed for the model, not a
+      declaration the component re-reads
+    - `get_height()` semantics were ambiguous, so the name is gone:
+      visible_rows() is H, total_rows() is the natural height
+    - CLIP mode scrolls every row under ONE horizontal window (previously
+      only the cursor's row moved sideways)
+    - single-line and multi-line no longer render differently: one emitter
+
+  Removed (compile errors, not deprecations):
+    - tui_textinput_set_terminal_width(), tui_textinput_set_terminal_row()
+    - tui_textinput_get_height()
+    - tui_textinput_set_soft_wrap()
+    - tui_textinput_set_focus() (send tui_msg_focus()/tui_msg_blur())
+    - tui_textinput_set_prompt_color() (use the TuiStyle prompt setters)
+
+  Fixed:
+    - alt-screen: rows past the bottom were emitted as CSI r;1H with
+      r > term_h, so terminals clamped them onto the last row and overdrew
+      it; the surplus-erase loop had the same problem
+    - inline: a frame taller than the terminal stranded its top rows in
+      scrollback and repainted from mid-frame (duplicated / walking prompt)
+    - resizes in either dimension now re-lay-out and keep the cursor
+      visible; no stale or duplicated rows
+
+  Internal:
+    - src/fit.h: tui_fit_rows()/tui_fit_cols(), shared fit arithmetic for
+      every component that paints a box of rows
+    - runtime: inline cursor-up is clamped to the screen, erasing from the
+      frame top down when the window shrank under an older frame

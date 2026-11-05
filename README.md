@@ -348,13 +348,15 @@ Features:
 - **Tab completion** - Emits `TUI_CMD_TAB_COMPLETE` with prefix and word position
 - **Kill ring** - Consecutive kills join the same buffer in document order (backward kills prepend), readable through `tui_textinput_kill_buffer`
 - **Undo** - Multiple undo levels with Ctrl+\_, Ctrl+X Ctrl+U, Ctrl+Z or Cmd+Z
-- **Absolute cursor positioning** - Flicker-free rendering at a parent-supplied row
+- **Absolute or inline placement** - Flicker-free rendering at a parent-supplied row, or relative rows the runtime counts
+- **A window over tall content** - The input never paints a row outside the screen: it caps itself to the space it was given and scrolls vertically inside it, with the cursor always visible (`tui_textinput_geometry`, `tui_textinput_scroll_state`)
 - **Prompt support** - Custom prompt strings with proper UTF-8 width calculation
 - **Configurable word characters** - Whitelist-based word boundaries for completion and movement
 - **Echo mode** - Password masking (shows `*` per codepoint)
 - **Focus-aware styling** - Separate focused / blurred `TuiStyle` for the prompt
 - **Continuation prompt** - Custom prompt for lines after the first in multi-line mode
-- **Soft-wrap mode** - Long lines wrap to the next visual row instead of horizontal scrolling (`tui_textinput_set_soft_wrap`)
+- **Wrap or clip** - Long lines either wrap to the next visual row or scroll under one horizontal window shared by every row (`tui_textinput_set_wrap`)
+- **Resize-aware** - `TUI_MSG_WINDOW_SIZE` updates the layout; a resize in either direction leaves a correct frame, with no stale or duplicated rows
 - **Syntax-highlighting callback** - Host applications can inject per-token styling via `tui_textinput_set_text_renderer`; the callback returns a malloc'd ANSI-escaped string that replaces raw text in the rendered output
 - **Style spans, revision and range replace** - `tui_textinput_set_spans` styles absolute byte ranges (a file mention, a command word); spans compose with selection and echo mode, survive soft-wrap splits, and stop painting after an edit until re-declared. `tui_textinput_revision` changes whenever the text's bytes do (not on movement), and `tui_textinput_replace_range` replaces `[start, end)` as one undoable edit
 - **List popup note rows** - `tui_list_popup_set_empty_text` draws a muted "no matches" row instead of nothing, `tui_list_popup_set_footer` adds a one-line key hint, and `tui_list_popup_set_selected` opens on a chosen item
@@ -369,9 +371,16 @@ textinput renders only the input line(s).
 TuiTextInput *input = tui_textinput_create(NULL);
 tui_textinput_set_prompt(input, "> ");
 tui_textinput_set_history_size(input, 100);
-tui_textinput_set_terminal_row(input, 23);     /* Absolute positioning */
 tui_textinput_set_word_chars(input, "abc..."); /* Word boundary chars */
 tui_textinput_set_echo_mode(input, 1);         /* Password masking */
+
+/* Size and placement live in ONE struct. A zeroed geometry is NATURAL
+ * sizing, inline placement, no caps: the input paints every row the text
+ * needs and the app owns the frame. */
+TuiTextInputGeometry g = { 0 };
+g.place = TUI_TEXTINPUT_AT_ROW; /* absolute rows... */
+g.row = 23;                     /* ...starting at screen row 23 */
+tui_textinput_set_geometry(input, &g);
 
 /* Focus-aware prompt styling */
 TuiStyle pink = tui_style_foreground(tui_style_new(), tui_color_hex("#ff06b7"));
@@ -379,6 +388,55 @@ TuiStyle dim  = tui_style_faint(tui_style_new(), 1);
 tui_textinput_set_focused_prompt_style(input, pink);
 tui_textinput_set_blurred_prompt_style(input, dim);
 ```
+
+#### Content larger than the terminal
+
+The input never paints a row outside the screen. Set one of the named
+sizing modes and it works out its own height every frame:
+
+| sizing    | height                                                                                                           |
+| --------- | ---------------------------------------------------------------------------------------------------------------- |
+| `NATURAL` | every row the text needs (the default)                                                                           |
+| `FIXED`   | `geometry.rows`, scrolling vertically inside it                                                                  |
+| `FLOW`    | what the terminal can give: `term_h - reserve_above - reserve_below`, floored by `min_rows` and capped by `rows` |
+
+`FLOW` is the one to reach for in a full-screen app: it derives the width
+from the terminal too (`term_w - side_margin`), so the whole recipe is a
+`TUI_MSG_WINDOW_SIZE` handler that forwards the message and nothing else:
+
+```c
+TuiTextInputGeometry g = {
+    .sizing = TUI_TEXTINPUT_FLOW,
+    .place = TUI_TEXTINPUT_AT_ROW,
+    .row = 1,            /* the input's first screen row */
+    .reserve_below = 1,  /* keep a hint line at the bottom */
+    .rows = 8,           /* never taller than 8 rows */
+};
+tui_textinput_set_geometry(input, &g);
+
+/* update(): forward the resize — the input consumes it itself. */
+if (msg.type == TUI_MSG_WINDOW_SIZE)
+    return tui_textinput_update(input, msg);
+```
+
+The window follows the cursor: `scrolloff` rows of context are kept where
+the text allows, and the window never leaves blank rows at the bottom.
+PgUp/PgDn move the cursor by a screenful (`visible_rows - 1`), so scrolling
+is always cursor motion.
+
+To draw an "↑ 12 more" indicator in your own chrome row, read the window
+instead of guessing:
+
+```c
+TuiTextInputScroll s = tui_textinput_scroll_state(input);
+if (s.hidden_above > 0)
+    printf("↑ %d more", s.hidden_above);
+```
+
+`tui_textinput_visible_rows()` is the height the input will paint (H);
+`tui_textinput_total_rows()` is the height the text needs. The two are
+equal whenever nothing caps the input, which is why an app that never sets
+a geometry sees the old behaviour.
 
 ### viewport
 
@@ -832,9 +890,9 @@ tests/
     └── focus_shift_tab.sh
 ```
 
-A mini-app is a few dozen lines of C that wraps a component, handles `TUI_MSG_WINDOW_SIZE` to call the relevant `set_terminal_width`, and calls `tui_runtime_run()`. No quit key is needed — the driver tears down with `tmux kill-session`.
+A mini-app is a few dozen lines of C that wraps a component, forwards `TUI_MSG_WINDOW_SIZE` to it (or resizes it), and calls `tui_runtime_run()`. No quit key is needed — the driver tears down with `tmux kill-session`.
 
-`lib.sh` exposes `tmux_start`, `tmux_send`, `tmux_capture`, `tmux_cursor`, `tmux_kill`, `tmux_wait_for`, `dump_pane`, `assert_pane_contains`, `assert_pane_lacks`, and `assert_cursor_x_lt`.
+`lib.sh` exposes `tmux_start`, `tmux_send`, `tmux_capture`, `tmux_cursor`, `tmux_kill`, `tmux_wait_for`, `tmux_wait_row_count`, `dump_pane`, `assert_pane_contains`, `assert_pane_lacks`, and `assert_cursor_x_lt`.
 
 #### Adding a new tmux test
 
