@@ -74,6 +74,27 @@ dump_pane()
     echo "--- end pane ---" >&2
 }
 
+# Poll until exactly `want` lines of the pane match the regex, or timeout.
+# This is how a resize test waits for the REPAINT: after a resize the old
+# frame is still on screen, so waiting for a string that already existed
+# would read the pre-resize state.
+tmux_wait_row_count()
+{
+    local session=$1 regex=$2 want=$3 timeout_ms=${4:-3000}
+    local deadline=$(( $(date +%s) + ( timeout_ms / 1000 ) + 1 ))
+    local got
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        got=$(tmux_capture "$session" | grep -cE -- "$regex" || true)
+        if [ "$got" = "$want" ]; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "tmux_wait_row_count: /$regex/ never reached $want rows (last: $got)" >&2
+    dump_pane "$session"
+    return 1
+}
+
 assert_pane_contains()
 {
     local session=$1 needle=$2

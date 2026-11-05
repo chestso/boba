@@ -1,10 +1,10 @@
 # tests/Makefile.am - Build and run boba unit tests
 
-UNIT_TESTS = test_ansi test_statusline test_textinput test_viewport test_runtime test_focus test_clipboard test_input_parser test_style test_list_popup test_stream test_terminal_profile test_unicode test_text
+UNIT_TESTS = test_ansi test_statusline test_textinput test_textinput_overflow test_viewport test_runtime test_focus test_clipboard test_input_parser test_style test_list_popup test_stream test_terminal_profile test_unicode test_text
 
 check_PROGRAMS = $(UNIT_TESTS)
 
-AM_CPPFLAGS = -I$(top_srcdir)/include
+AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src
 LDADD = $(top_builddir)/src/libboba.a $(SOCKET_LIBS)
 
 # The unit tests assert() their expectations, so they must be built with
@@ -36,6 +36,7 @@ LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
 test_ansi_SOURCES = test_ansi.c
 test_statusline_SOURCES = test_statusline.c
 test_textinput_SOURCES = test_textinput.c
+test_textinput_overflow_SOURCES = test_textinput_overflow.c
 test_viewport_SOURCES = test_viewport.c
 test_runtime_SOURCES = test_runtime.c
 test_focus_SOURCES = test_focus.c
@@ -52,15 +53,17 @@ test_text_SOURCES = test_text.c
 # detected at configure time, so a regression in shell-driven UI tests
 # can never silently slip through. The mini-apps the scripts drive are
 # in check_PROGRAMS, so automake builds them before TESTS runs.
-TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh tmux/wrap_multiline.sh tmux/wrap_inline.sh tmux/width_model.sh
+TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh tmux/wrap_multiline.sh tmux/wrap_inline.sh tmux/width_model.sh \
+	tmux/overflow_alt.sh tmux/overflow_inline.sh tmux/overflow_wrap_resize.sh
 
 if HAVE_TMUX
-check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap apps/tmux_textinput_wrap apps/tmux_textinput_inline apps/width_probe
+check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap apps/tmux_textinput_wrap apps/tmux_textinput_inline apps/width_probe apps/tmux_textinput_overflow
 apps_tmux_textinput_multi_SOURCES = apps/tmux_textinput_multi.c
 apps_tmux_focus_swap_SOURCES = apps/tmux_focus_swap.c
 apps_tmux_textinput_wrap_SOURCES = apps/tmux_textinput_wrap.c
 apps_tmux_textinput_inline_SOURCES = apps/tmux_textinput_inline.c
 apps_width_probe_SOURCES = apps/width_probe.c
+apps_tmux_textinput_overflow_SOURCES = apps/tmux_textinput_overflow.c
 TESTS = $(UNIT_TESTS) $(TMUX_TESTS)
 else
 TESTS = $(UNIT_TESTS)
