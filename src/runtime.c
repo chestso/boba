@@ -1297,6 +1297,18 @@ static void inline_clear_reflowed(TuiRuntime *runtime)
     if (phys_cursor > phys_total - 1)
         phys_cursor = phys_total - 1;
 
+    /* Same screen clamp as the plain paint path (see runtime_paint): a
+     * frame taller than the terminal has already lost its top rows to
+     * scrollback, so neither the cursor-up nor the row-by-row erase may
+     * address rows that are no longer there. */
+    int screen_rows = runtime->term_height;
+    if (screen_rows > 0) {
+        if (phys_cursor > screen_rows - 1)
+            phys_cursor = screen_rows - 1;
+        if (phys_total > screen_rows)
+            phys_total = screen_rows;
+    }
+
     char buf[16];
     if (phys_cursor > 0) {
         ansi_format_cursor_up(buf, sizeof(buf), phys_cursor);
@@ -1450,12 +1462,36 @@ static void runtime_paint(TuiRuntime *runtime, const RuntimeFrame *frame)
 
         /* Move cursor up to where the previous frame's content started.
          * The cursor was placed at prev_cursor_row (0-indexed) after
-         * the last flush. Go up prev_cursor_row lines to reach row 0. */
+         * the last flush. Go up prev_cursor_row lines to reach row 0.
+         *
+         * Clamped to the screen: when the terminal got SHORTER than the
+         * frame we painted, the terminal already pushed the frame's top
+         * rows into scrollback, and moving up by more rows than the screen
+         * has would clamp at the top — the next paint would then start
+         * mid-frame and leave its stale tail behind (the walking prompt /
+         * duplicated rows symptom). The rows that scrolled away stay away;
+         * that is the loss every inline TUI takes when the window is
+         * shrunk below its height, and it is documented rather than
+         * fixed. What we can do is erase from the new frame top down, so
+         * the remains of the old frame below us cannot survive. */
+        int frame_top_lost = 0;
         if (!reflow_cleared && prev_cursor_row > 0) {
+            int up = prev_cursor_row;
+            int screen_rows = runtime->term_height;
+            if (screen_rows > 0 && up > screen_rows - 1) {
+                up = screen_rows - 1;
+                frame_top_lost = 1;
+            }
             char up_buf[16];
-            ansi_format_cursor_up(up_buf, sizeof(up_buf),
-                                  prev_cursor_row);
+            ansi_format_cursor_up(up_buf, sizeof(up_buf), up);
             runtime_emit_str(runtime, up_buf);
+        }
+        if (!reflow_cleared &&
+            (frame_top_lost ||
+             (runtime->term_height > 0 && prev_lines > runtime->term_height))) {
+            runtime_emit_str(runtime, "\r");
+            runtime_emit_str(runtime, ED_TO_END);
+            prev_lines = 0;
         }
 
         /* Write content. */
