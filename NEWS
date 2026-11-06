@@ -1,6 +1,21 @@
 boba NEWS
 =========
 
+0.9.0 (pre-alpha)
+-----------------
+
+textinput: read access to the history ring
+
+  The ring was write-only: an app could add lines, but not read them
+  back, so a shell that persists history had to keep its own copy — and
+  that copy could disagree with what Up/Down actually walk.
+
+  Added:
+    - tui_textinput_history_count(): how many lines the ring holds
+    - tui_textinput_history_entry(): a line by index, 0 = the most
+      recently added, count - 1 = the oldest. Borrowed: valid until the
+      next history_add() or set_history_size().
+
 0.8.0 (pre-alpha)
 -----------------
 
