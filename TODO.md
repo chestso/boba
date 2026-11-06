@@ -166,6 +166,28 @@ inline cursor-up clamp. Deliberately left for later:
   `scroll_state()` today. An in-component variant would spend a content row
   and needs its own placement policy; not worth it until a second consumer
   asks.
+- **`tui_textinput_set_placement(0)` means INLINE.** The geometry reset
+  retired the `terminal_row == 0` sentinel from the struct but this one-line
+  setter kept it, so an app that computes `row = term_h - rows` on a screen
+  too short for its own frame gets inline placement instead of an absolute
+  row (mudlark guards `row >= 1` by hand). It is documented in the header;
+  the fix is to deprecate the setter (`BOBA_DEPRECATED`) in favour of
+  `set_geometry()` with an explicit `place`, or to reject `row == 0`
+  outright.
+- **`FIXED` with no `width` does no clipping and no wrapping.** A zero width
+  means "no constraint", so a 30-column line is emitted whole on a 20-column
+  terminal even with `term_w` known. That is the horizontal mirror of the
+  vertical clamp question, and the answer is the same one chosen there:
+  document it (done in `textinput.h`), rather than have `FIXED` partly follow
+  the screen and blur what it means.
+- **`TuiTextInputConfig.geometry` is copied verbatim**, so a config that
+  names one field (`{ .geometry = { .width = 20 } }`) also zeroes `sizing`,
+  `place` and `scrolloff`. `tui_textinput_create()` lifts a zeroed
+  `scrolloff` back to 1, but a `sizing`/`place` the caller meant to keep is
+  not restored. Harmless today (NATURAL/INLINE are the defaults) and a sharp
+  edge for the next field added. The robust fix is the contract the other
+  geometry fields already have — the zero value of every field means the
+  default — so no fix-up pass is needed at all.
 
 ## Declarative API alignment
 
