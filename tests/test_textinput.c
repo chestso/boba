@@ -640,6 +640,39 @@ static void test_history_navigation(void)
     tui_textinput_free(input);
 }
 
+/* Read access to the ring: index 0 is what Up reaches first */
+static void test_history_accessors(void)
+{
+    TuiTextInput *input = tui_textinput_create(NULL);
+
+    /* Empty ring: no entries, no index valid */
+    assert(tui_textinput_history_count(input) == 0);
+    assert(tui_textinput_history_entry(input, 0) == NULL);
+
+    tui_textinput_set_history_size(input, 10);
+    tui_textinput_history_add(input, "first");
+    tui_textinput_history_add(input, "second");
+
+    assert(tui_textinput_history_count(input) == 2);
+    assert(strcmp(tui_textinput_history_entry(input, 0), "second") == 0);
+    assert(strcmp(tui_textinput_history_entry(input, 1), "first") == 0);
+    assert(tui_textinput_history_entry(input, 2) == NULL);
+    assert(tui_textinput_history_entry(input, -1) == NULL);
+
+    /* The same line again moves to index 0 instead of piling up */
+    tui_textinput_history_add(input, "first");
+    assert(tui_textinput_history_count(input) == 2);
+    assert(strcmp(tui_textinput_history_entry(input, 0), "first") == 0);
+    assert(strcmp(tui_textinput_history_entry(input, 1), "second") == 0);
+
+    /* Shrinking the ring drops the oldest entries */
+    tui_textinput_set_history_size(input, 1);
+    assert(tui_textinput_history_count(input) == 1);
+    assert(strcmp(tui_textinput_history_entry(input, 0), "first") == 0);
+
+    tui_textinput_free(input);
+}
+
 static void test_tab_emits_command(void)
 {
     TuiTextInput *input = tui_textinput_create(NULL);
@@ -3203,6 +3236,7 @@ int main(void)
     RUN_TEST(test_focused_blurred_styles_differ);
     RUN_TEST(test_prompt_style_applies_in_multiline_mode);
     RUN_TEST(test_history_navigation);
+    RUN_TEST(test_history_accessors);
     RUN_TEST(test_tab_emits_command);
     RUN_TEST(test_tab_word_start);
     RUN_TEST(test_tab_with_shift_is_noop);

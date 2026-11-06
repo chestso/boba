@@ -2989,6 +2989,20 @@ void tui_textinput_history_add(TuiTextInput *input, const char *line)
     input->history_pos = -1;
 }
 
+/* How many lines the history ring holds */
+int tui_textinput_history_count(const TuiTextInput *input)
+{
+    return input ? input->history_count : 0;
+}
+
+/* A history line by index: 0 is the most recent, count - 1 the oldest */
+const char *tui_textinput_history_entry(const TuiTextInput *input, int index)
+{
+    if (!input || !input->history || index < 0 || index >= input->history_count)
+        return NULL;
+    return input->history[index];
+}
+
 /* Insert a completion word, replacing the current word from word_start to cursor */
 void tui_textinput_insert_completion(TuiTextInput *input, int word_start,
                                      const char *word)

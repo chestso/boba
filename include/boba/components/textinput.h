@@ -393,6 +393,19 @@ void tui_textinput_set_history_size(TuiTextInput *input, int size);
 /* Add a line to history */
 void tui_textinput_history_add(TuiTextInput *input, const char *line);
 
+/* How many lines the history ring holds (the lines Up/Down walk). */
+int tui_textinput_history_count(const TuiTextInput *input);
+
+/* A history line by index, 0 = the most recently added, count - 1 = the
+ * oldest. Borrowed: valid until the next history_add() or
+ * set_history_size(). Returns NULL when index is out of range.
+ *
+ * Pull-style read access, like tui_textinput_kill_buffer(): an app that
+ * persists history owns the file and the escaping, but not the ring —
+ * caching its own copy would only be able to disagree with Up/Down about
+ * what was said. */
+const char *tui_textinput_history_entry(const TuiTextInput *input, int index);
+
 /* Insert a completion word, replacing the current word starting at word_start.
  * word_start is the byte offset of the word being completed. */
 void tui_textinput_insert_completion(TuiTextInput *input, int word_start,
