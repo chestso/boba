@@ -28,10 +28,23 @@
  *   FLOW     follow the terminal window, inside the app's reserves and caps
  *
  * and placement is explicit (INLINE or AT_ROW) instead of "terminal_row
- * happens to be non-zero". The terminal size is consumed from
- * TUI_MSG_WINDOW_SIZE whenever the app routes it to the input, in every
- * mode: knowing the screen is what makes the clamps possible, so it is not
- * an opt-in.
+ * happens to be non-zero".
+ *
+ * ## The screen size is routed, not discovered
+ *
+ * The input learns the terminal size from one source only: a
+ * TUI_MSG_WINDOW_SIZE that reaches its update(). The runtime sends that to
+ * the ROOT component, so a composing parent must forward it down (or the
+ * app must deliver it itself) — in every mode, not just FLOW: NATURAL,
+ * FIXED and both placements all get their clamps from knowing the screen.
+ *
+ * Once the size has arrived, no clamp can paint a row outside the screen.
+ * Until it arrives the input does not know there is one: an AT_ROW box
+ * paints `rows` (or every row the text needs) from `row` regardless of
+ * where the screen ends, and an inline frame is not capped either. Nothing
+ * diagnoses the forgotten message beyond a debug assert that fires only
+ * when the size IS known and the frame ignores it — so route it, and treat
+ * "the input runs off the bottom" as a missing resize, not a layout bug.
  */
 
 #ifndef BOBA_TEXTINPUT_H
@@ -108,7 +121,8 @@ typedef struct TuiTextInput TuiTextInput;
  *            the app is responsible for the frame fitting (this is the
  *            behaviour of every version before the window existed).
  *   FIXED    the app owns the box: `rows` caps the painted rows and the
- *            input scrolls vertically inside them.
+ *            input scrolls vertically inside them. The screen still caps
+ *            the box, but only once TUI_MSG_WINDOW_SIZE reaches the input.
  *   FLOW     the input follows the terminal window itself: the usable
  *            height is term_h - reserve_above - reserve_below, further
  *            capped by `rows` and floored by `min_rows`. Requires the app
@@ -124,7 +138,9 @@ typedef enum
 /* Where the first painted row goes. INLINE rows are relative: the runtime
  * counts the frame's newlines to move the cursor, so the input emits one
  * row separator per row and nothing else. AT_ROW rows are absolute screen
- * coordinates starting at `row` (1-based). */
+ * coordinates starting at `row` (1-based). The screen bounds them only once
+ * the input has been told the terminal size (TUI_MSG_WINDOW_SIZE): without
+ * it an AT_ROW box paints `rows` rows from `row` wherever that lands. */
 typedef enum
 {
     TUI_TEXTINPUT_INLINE = 0,
@@ -134,7 +150,11 @@ typedef enum
 /* What happens to a logical line wider than the content width.
  *
  *   CLIP  one horizontal window, shared by every row: the text scrolls
- *         under a fixed column window centred on the cursor
+ *         under a fixed column window centred on the cursor. The window is
+ *         one column range, budgeted against the widest prompt any row
+ *         carries, so a row is never clipped earlier than the box requires
+ *         and a longer line beside the cursor's is never cut at the cursor
+ *         line's end.
  *   WRAP  the line continues on the next visual row, aligned under the
  *         text column, so nothing is hidden horizontally
  */
@@ -151,12 +171,18 @@ typedef enum
  *
  *   sizing         NATURAL | FIXED | FLOW (above)
  *   place, row     INLINE, or AT_ROW with `row` = the 1-based screen row
- *                  of the input's first row
+ *                  of the input's first row. `rows`/the text decide how
+ *                  many rows, and the screen caps them — but only once
+ *                  TUI_MSG_WINDOW_SIZE has reached the input. Until then
+ *                  `row + rows - 1` may sit past the bottom of the screen
+ *                  and nothing says so.
  *   width          content width in columns. FIXED: the box width. FLOW:
  *                  0 means derive from the terminal (term_w - side_margin);
  *                  a non-zero width wins, for apps that box the input in a
  *                  border. 0 in NATURAL/FIXED means "no constraint": no
- *                  wrapping and no horizontal clipping.
+ *                  wrapping and no horizontal clipping, so the terminal
+ *                  width does not bound a row either — a 200-column line is
+ *                  emitted whole on an 80-column terminal.
  *   rows           maximum rows painted; 0 = no cap
  *   min_rows       floor for FLOW sizing (>= 1); never lifts the result
  *                  above the text's own height or above what the screen
@@ -215,7 +241,9 @@ typedef struct TuiTextInputScroll
     int hidden_above; /* visual rows scrolled out above                  */
     int hidden_below; /* visual rows scrolled out below                  */
     int offset_left;  /* CLIP only: left display column of the window    */
-    int offset_right; /* CLIP only: right display column of the window   */
+    int offset_right; /* CLIP only: right edge column of the window;
+                       * offset_right - offset_left is its width, shared by
+                       * every row, and is never the cursor line's length  */
 } TuiTextInputScroll;
 
 /* ------------------------------------------------------------------ */
@@ -406,8 +434,11 @@ void tui_textinput_set_show_prompt(TuiTextInput *input, int show);
 void tui_textinput_set_prompt(TuiTextInput *input, const char *prompt);
 
 /* Set the continuation prompt string (shown on lines after the first, and
- * on wrapped rows). Must have the same display width as the main prompt.
- * Pass NULL to fall back to space-padding (default behavior). */
+ * on wrapped rows). Must have the same display width as the main prompt,
+ * or the rows' text columns no longer line up — a mismatch is tolerated
+ * (CLIP budgets its one window against the wider of the two, so no row
+ * overflows the box) but it is not a layout. Pass NULL to fall back to
+ * space-padding (default behavior). */
 void tui_textinput_set_continuation_prompt(TuiTextInput *input,
                                            const char *prompt);
 

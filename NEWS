@@ -8,8 +8,8 @@ textinput: content larger than the terminal, and resize
 
   TuiTextInput no longer assumes its content fits on screen. It paints
   through a window over its visual rows, never emits a row outside the
-  screen (alt-screen or inline), keeps the cursor inside the window, and
-  reacts to terminal resizes.
+  screen (alt-screen or inline) once it knows the terminal size, keeps the
+  cursor inside the window, and reacts to terminal resizes.
 
   This is an INTERFACE RESET, not an additive change. boba is pre-alpha and
   the old surface had accumulated six overlapping size/placement setters, a
@@ -61,6 +61,14 @@ textinput: content larger than the terminal, and resize
       scrollback and repainted from mid-frame (duplicated / walking prompt)
     - resizes in either dimension now re-lay-out and keep the cursor
       visible; no stale or duplicated rows
+
+  Note on those clamps: they need the terminal size, and the input learns it
+  from one place only — a TUI_MSG_WINDOW_SIZE that reaches its update(). The
+  runtime sends that to the ROOT component, so a parent that composes the
+  input must forward it down, in every sizing mode and both placements. An
+  input that never sees one paints where it was told (an AT_ROW box runs off
+  the bottom of the screen; an inline frame is not capped), exactly as
+  before this version.
 
   Internal:
     - src/fit.h: tui_fit_rows()/tui_fit_cols(), shared fit arithmetic for

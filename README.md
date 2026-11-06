@@ -349,7 +349,7 @@ Features:
 - **Kill ring** - Consecutive kills join the same buffer in document order (backward kills prepend), readable through `tui_textinput_kill_buffer`
 - **Undo** - Multiple undo levels with Ctrl+\_, Ctrl+X Ctrl+U, Ctrl+Z or Cmd+Z
 - **Absolute or inline placement** - Flicker-free rendering at a parent-supplied row, or relative rows the runtime counts
-- **A window over tall content** - The input never paints a row outside the screen: it caps itself to the space it was given and scrolls vertically inside it, with the cursor always visible (`tui_textinput_geometry`, `tui_textinput_scroll_state`)
+- **A window over tall content** - The input never paints a row outside the screen: it caps itself to the space it was given and scrolls vertically inside it, with the cursor always visible (`tui_textinput_geometry`, `tui_textinput_scroll_state`). The caps need the terminal size, so the app must route `TUI_MSG_WINDOW_SIZE` to the input — see [Content larger than the terminal](#content-larger-than-the-terminal)
 - **Prompt support** - Custom prompt strings with proper UTF-8 width calculation
 - **Configurable word characters** - Whitelist-based word boundaries for completion and movement
 - **Echo mode** - Password masking (shows `*` per codepoint)
@@ -381,6 +381,8 @@ TuiTextInputGeometry g = { 0 };
 g.place = TUI_TEXTINPUT_AT_ROW; /* absolute rows... */
 g.row = 23;                     /* ...starting at screen row 23 */
 tui_textinput_set_geometry(input, &g);
+/* Absolute rows are clamped to the screen only once the input has been told
+ * how tall it is — forward the resize (see below). */
 
 /* Focus-aware prompt styling */
 TuiStyle pink = tui_style_foreground(tui_style_new(), tui_color_hex("#ff06b7"));
@@ -400,9 +402,27 @@ sizing modes and it works out its own height every frame:
 | `FIXED`   | `geometry.rows`, scrolling vertically inside it                                                                  |
 | `FLOW`    | what the terminal can give: `term_h - reserve_above - reserve_below`, floored by `min_rows` and capped by `rows` |
 
+All three need the terminal size to clamp against, and the input learns it
+from one place only: a `TUI_MSG_WINDOW_SIZE` that reaches its `update()`. The
+runtime sends that to the **root** component, so a composing parent has to
+forward it down — in every mode and in both placements, not just `FLOW`:
+
+```c
+/* update(): forward the resize — the input consumes it itself. */
+if (msg.type == TUI_MSG_WINDOW_SIZE)
+    return tui_textinput_update(input, msg);
+```
+
+Without that message the input has no screen to clamp to: an `AT_ROW` box
+paints `rows` rows from `row` even when they run past the bottom, and an
+inline frame is not capped either. Nothing warns you — the frame simply runs
+off the screen, exactly as it did before the window existed. `width == 0`
+(no constraint) is the same story horizontally: the terminal width does not
+bound a row, so a 200-column line is emitted whole on an 80-column terminal.
+
 `FLOW` is the one to reach for in a full-screen app: it derives the width
-from the terminal too (`term_w - side_margin`), so the whole recipe is a
-`TUI_MSG_WINDOW_SIZE` handler that forwards the message and nothing else:
+from the terminal too (`term_w - side_margin`), so the whole recipe is that
+`TUI_MSG_WINDOW_SIZE` handler and nothing else:
 
 ```c
 TuiTextInputGeometry g = {
@@ -414,7 +434,7 @@ TuiTextInputGeometry g = {
 };
 tui_textinput_set_geometry(input, &g);
 
-/* update(): forward the resize — the input consumes it itself. */
+/* update(): the same forwarded resize as above. */
 if (msg.type == TUI_MSG_WINDOW_SIZE)
     return tui_textinput_update(input, msg);
 ```

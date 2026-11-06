@@ -142,6 +142,36 @@ static int cup_rows(const char *out, int *rows, int max)
     return n;
 }
 
+/* Display width of the widest row a frame painted, with the escape
+ * sequences it emits (EL, SGR, CUP) removed and rows split on '\r'/'\n'.
+ * These tests paint no wide clusters, so counting bytes is counting
+ * columns; that is what makes "a row is wider than the box" assertable. */
+static int widest_row_cols(const char *out)
+{
+    int widest = 0, cur = 0;
+    for (const char *p = out; *p; p++) {
+        if (*p == '\r' || *p == '\n') {
+            if (cur > widest)
+                widest = cur;
+            cur = 0;
+            continue;
+        }
+        if (*p == '\x1b') {
+            p++;
+            if (*p == '[') {
+                p++;
+                while (*p && !(*p >= '@' && *p <= '~'))
+                    p++;
+            }
+            continue;
+        }
+        cur++;
+    }
+    if (cur > widest)
+        widest = cur;
+    return widest;
+}
+
 /* Build `count` logical lines of FIXED width (8 columns + '\n'), so a
  * line's byte offset is line * 9 and the tests can name one. */
 #define LINE_BYTES 9
@@ -421,6 +451,189 @@ static void test_clip_scrolls_every_row_together(void)
     assert(strstr(out, "b") == NULL);
     assert(strstr(out, "c") == NULL);
     free(out);
+    tui_textinput_free(in);
+}
+
+static void test_screen_clamp_needs_the_size_message(void)
+{
+    /* The clamp is not a discovery. Without a routed TUI_MSG_WINDOW_SIZE the
+     * input has no screen to clamp to, so an AT_ROW box paints its rows
+     * wherever `row` says — the documented consequence of forgetting it
+     * (see "The screen size is routed, not discovered" in the header).
+     * Route the size and the very same box clamps. */
+    TuiTextInput *in = make_input();
+
+    TuiTextInputGeometry g = { 0 };
+    g.sizing = TUI_TEXTINPUT_FIXED;
+    g.place = TUI_TEXTINPUT_AT_ROW;
+    g.row = 35; /* first screen row, on a 40-row terminal */
+    g.width = 40;
+    g.rows = 10;
+    tui_textinput_set_geometry(in, &g);
+    tui_textinput_set_text(in, "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10");
+
+    assert(tui_textinput_visible_rows(in) == 10); /* no screen to cap it */
+    char *out = render_view(in);
+    int rows[16];
+    int n = cup_rows(out, rows, 16);
+    assert(n == 10);
+    assert(rows[0] == 35);
+    assert(rows[9] == 44); /* four rows past the bottom */
+    free(out);
+
+    /* Told the size, the window stops at the last screen row. */
+    send_size(in, 80, 40);
+    assert(tui_textinput_visible_rows(in) == 6);
+
+    out = render_view(in);
+    n = cup_rows(out, rows, 16);
+    assert(n == 6);
+    assert(rows[0] == 35);
+    assert(rows[5] == 40);
+    free(out);
+    tui_textinput_free(in);
+}
+
+static void test_clip_does_not_clip_a_row_to_the_cursor_lines_length(void)
+{
+    /* The CLIP window's right edge is a COLUMN, not the cursor line's
+     * length: a box wider than every line paints every line whole, wherever
+     * the cursor happens to be. */
+    TuiTextInput *in = tui_textinput_create(&(TuiTextInputConfig){
+        .multiline = 1, .wrap = TUI_TEXTINPUT_CLIP });
+    assert(in != NULL);
+    TuiTextInputGeometry g = tui_textinput_geometry(in);
+    g.sizing = TUI_TEXTINPUT_FIXED;
+    g.width = 120; /* wider than both lines: nothing needs clipping */
+    tui_textinput_set_geometry(in, &g);
+
+    tui_textinput_set_text(in, "alpha\nbeta"); /* cursor on "beta" */
+    assert(tui_textinput_scroll_state(in).offset_right == 120);
+
+    char *out = render_view(in);
+    assert(strstr(out, "alpha") != NULL); /* was "alph": clipped at 4 */
+    assert(strstr(out, "beta") != NULL);
+    free(out);
+    tui_textinput_free(in);
+}
+
+static void test_clip_window_is_one_column_range_for_every_row(void)
+{
+    /* Cursor on the longest line: the window scrolls (rather than "fitting"),
+     * and the shorter rows are still painted through the same COLUMN window,
+     * so what they show is what falls inside it — not "everything up to
+     * where the cursor's line ends". */
+    TuiTextInput *in = make_input();
+    TuiTextInputGeometry g = tui_textinput_geometry(in);
+    g.sizing = TUI_TEXTINPUT_FIXED;
+    g.width = 10;
+    tui_textinput_set_geometry(in, &g);
+
+    tui_textinput_set_text(in,
+                           "0123456789ABCDEF\n0123456789ABCDEFGH\nab");
+    /* set_text leaves the cursor at the end of the "ab" line, so the window
+     * starts at column 0. Then move it onto the 16-column line: the window
+     * scrolls to keep it in view. */
+    tui_textinput_set_cursor(in, 16); /* end of line 0 */
+
+    TuiTextInputScroll s = tui_textinput_scroll_state(in);
+    assert(s.offset_left == 7);   /* 17 - 10 */
+    assert(s.offset_right == 17); /* a column, past the cursor's line end */
+
+    char *out = render_view(in);
+    /* Line 0 from column 7: the window's last 9 columns. */
+    assert(strstr(out, "789ABCDEF") != NULL);
+    assert(strstr(out, "0123456") == NULL);
+    /* "ab" is entirely left of the window, so its row is blank... */
+    assert(strstr(out, "ab") == NULL);
+    /* ...while the 18-column line keeps painting to the window's right
+     * edge, one column past where the cursor's line ends. */
+    assert(strstr(out, "789ABCDEFG") != NULL);
+    free(out);
+    tui_textinput_free(in);
+}
+
+static void test_clip_short_line_resets_the_window_to_column_zero(void)
+{
+    /* Scrolled to the right on a long line, then the cursor moves to a line
+     * that fits: the window jumps back to column 0, and every row follows
+     * (this is the "one window for every row" rule, not a per-row one). */
+    TuiTextInput *in = make_input();
+    TuiTextInputGeometry g = tui_textinput_geometry(in);
+    g.sizing = TUI_TEXTINPUT_FIXED;
+    g.width = 10;
+    tui_textinput_set_geometry(in, &g);
+
+    tui_textinput_set_text(in, "0123456789ABCDEF\nab");
+    tui_textinput_set_cursor(in, 16); /* end of the long line */
+    assert(tui_textinput_scroll_state(in).offset_left > 0);
+
+    tui_textinput_set_cursor(in, tui_textinput_len(in)); /* end of "ab" */
+    TuiTextInputScroll s = tui_textinput_scroll_state(in);
+    assert(s.offset_left == 0);
+    assert(s.offset_right == 10);
+
+    char *out = render_view(in);
+    assert(strstr(out, "0123456789") != NULL); /* the long row is back */
+    assert(strstr(out, "ab") != NULL);
+    free(out);
+    tui_textinput_free(in);
+}
+
+static void test_clip_window_is_budgeted_against_the_widest_prompt(void)
+{
+    /* A continuation prompt wider than the main one is not a layout, but it
+     * must not overflow the box: the one shared window is sized for the
+     * wider prompt, so both rows stay inside `width`. */
+    TuiTextInput *in = tui_textinput_create(&(TuiTextInputConfig){
+        .multiline = 1, .prompt = "> ", .wrap = TUI_TEXTINPUT_CLIP });
+    assert(in != NULL);
+    tui_textinput_set_continuation_prompt(in, "...."); /* 4 > 2 */
+
+    TuiTextInputGeometry g = tui_textinput_geometry(in);
+    g.sizing = TUI_TEXTINPUT_FIXED;
+    g.width = 12;
+    tui_textinput_set_geometry(in, &g);
+
+    tui_textinput_set_text(in, "0123456789ABCDEFGHIJ\nabcdefghijklmnopqrst");
+    tui_textinput_set_cursor(in, 20); /* end of line 0 */
+
+    TuiTextInputScroll s = tui_textinput_scroll_state(in);
+    assert(s.offset_right - s.offset_left == 8); /* 12 - the wider prompt */
+
+    char *out = render_view(in);
+    assert(widest_row_cols(out) <= 12);
+    /* Both rows show the same slice of their line, "> " and "...." aside. */
+    assert(strstr(out, "> DEFGHIJ") != NULL);
+    assert(strstr(out, "....nopqrst") != NULL);
+    free(out);
+    tui_textinput_free(in);
+}
+
+static void test_clip_rows_never_exceed_the_box(void)
+{
+    /* The invariant behind the two tests above, over every cursor position:
+     * no painted row is wider than the box, whatever the cursor does. */
+    TuiTextInput *in = tui_textinput_create(&(TuiTextInputConfig){
+        .multiline = 1, .prompt = "> ", .wrap = TUI_TEXTINPUT_CLIP });
+    assert(in != NULL);
+    tui_textinput_set_continuation_prompt(in, "....");
+
+    TuiTextInputGeometry g = tui_textinput_geometry(in);
+    g.sizing = TUI_TEXTINPUT_FIXED;
+    g.width = 12;
+    tui_textinput_set_geometry(in, &g);
+
+    tui_textinput_set_text(in,
+                           "0123456789ABCDEFGHIJ\nabcdefghij\nklmnopqrstuvwxyz"
+                           "\n\nx\n0123456789ABCDEFGHIJ0123456789");
+
+    for (size_t pos = 0; pos <= tui_textinput_len(in); pos++) {
+        tui_textinput_set_cursor(in, pos);
+        char *out = render_view(in);
+        assert(widest_row_cols(out) <= 12);
+        free(out);
+    }
     tui_textinput_free(in);
 }
 
@@ -809,6 +1022,12 @@ int main(void)
     RUN_TEST(test_scrolloff_is_capped_at_half_the_window);
     RUN_TEST(test_wrap_puts_the_prompt_on_the_first_row_only);
     RUN_TEST(test_clip_scrolls_every_row_together);
+    RUN_TEST(test_clip_does_not_clip_a_row_to_the_cursor_lines_length);
+    RUN_TEST(test_clip_window_is_one_column_range_for_every_row);
+    RUN_TEST(test_clip_short_line_resets_the_window_to_column_zero);
+    RUN_TEST(test_clip_window_is_budgeted_against_the_widest_prompt);
+    RUN_TEST(test_clip_rows_never_exceed_the_box);
+    RUN_TEST(test_screen_clamp_needs_the_size_message);
     RUN_TEST(test_one_column_width_always_progresses);
     RUN_TEST(test_prompt_is_dropped_when_it_cannot_fit);
     RUN_TEST(test_empty_and_trailing_newline_rows);

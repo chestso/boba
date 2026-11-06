@@ -5,6 +5,7 @@
 #include <boba/components/textinput.h>
 #include <boba/text.h>
 #include <boba/unicode.h>
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,8 +86,10 @@ struct TuiTextInput
 
     /* Horizontal window for CLIP mode, in display columns. Shared by every
      * row: the text scrolls under one fixed column window, and the window
-     * follows the cursor. Derived state, kept in step by
-     * recalculate_cursor_position(). */
+     * follows the cursor. Both edges are COLUMNS of the logical line's
+     * text — offset_right is never "where this line ends" — and
+     * offset_right - offset is the window's width. Derived state, kept in
+     * step by recalculate_cursor_position(). */
     int offset;
     int offset_right;
 
@@ -251,6 +254,19 @@ static int line_prompt_width(const TuiTextInput *input, int line_index)
     if (input->continuation_prompt && input->continuation_prompt_len > 0)
         return input->continuation_prompt_len;
     return input->prompt_len;
+}
+
+/* Display width of the widest prompt any painted row can carry: line 0 uses
+ * the main prompt, every later line the continuation prompt (or a blank
+ * indent of the main prompt's width). CLIP's one window has to fit inside
+ * every row's content area, so it is budgeted against the widest of them —
+ * budgeting it per cursor line let the wider-prompt rows overflow the box
+ * and the narrower-prompt ones get clipped early. */
+static int widest_prompt(const TuiTextInput *input)
+{
+    int first = line_prompt_width(input, 0);
+    int rest = line_prompt_width(input, 1);
+    return first > rest ? first : rest;
 }
 
 /* Byte range of the logical line containing the cursor */
@@ -566,53 +582,51 @@ static void ensure_cursor_visible(TuiTextInput *input)
     input->top_byte = total > 0 ? L->rows[top].byte_start : 0;
 }
 
-/* Adjust horizontal scroll offset so cursor stays visible on its line.
- * offset/offset_right are display-column offsets within the logical line,
- * shared by every row in CLIP mode. */
+/* Adjust the horizontal window so the cursor stays visible on its line.
+ *
+ * offset/offset_right are display columns of the logical line's TEXT (the
+ * prompt is outside them) and are shared by every row in CLIP mode, so
+ * offset_right is a COLUMN — the window's right edge — and its width is
+ * offset_right - offset. It is budgeted against the widest prompt the rows
+ * can carry, so the same window fits inside every row's content area. */
 static void handle_overflow(TuiTextInput *input)
 {
+    int window_width = input->content_width - widest_prompt(input);
+
+    if (window_width <= 0) {
+        /* No column budget to clip against: an unconstrained width, or a
+         * box no wider than the prompt. offset_right <= offset is
+         * clip_range()'s "paint the whole line" exit. */
+        input->offset = 0;
+        input->offset_right = 0;
+        return;
+    }
+
     size_t line_start, line_end;
     cursor_line_bounds(input, &line_start, &line_end);
-    size_t line_bytes = line_end - line_start;
 
-    int prompt_width = line_prompt_width(input, (int)input->cursor_row);
-    int content_width = input->content_width - prompt_width;
-
-    int total = tui_utf8_display_width_n(input->text + line_start, line_bytes);
-
-    if (content_width <= 0) {
-        input->offset = 0;
-        input->offset_right = total;
-        return;
-    }
-
+    int total = tui_utf8_display_width_n(input->text + line_start,
+                                         line_end - line_start);
     int cursor_col = (int)input->cursor_col;
 
-    if (total <= content_width) {
-        /* Everything fits */
+    if (total <= window_width) {
+        /* This line fits: the window starts at column 0, which is where
+         * every other row's left edge is too, so a short line never shifts
+         * its neighbours sideways. */
         input->offset = 0;
-        input->offset_right = total;
-        return;
-    }
-
-    if (cursor_col < input->offset) {
-        /* Cursor scrolled left of window */
+    } else if (cursor_col < input->offset) {
+        /* Cursor scrolled left of the window */
         input->offset = cursor_col;
-        input->offset_right = input->offset + content_width;
-        if (input->offset_right > total)
-            input->offset_right = total;
-    } else if (cursor_col >= input->offset_right) {
-        /* Cursor scrolled right of window */
-        input->offset_right = cursor_col + 1;
-        input->offset = input->offset_right - content_width;
+    } else if (cursor_col >= input->offset + window_width) {
+        /* Cursor scrolled right of the window */
+        input->offset = cursor_col + 1 - window_width;
         if (input->offset < 0)
             input->offset = 0;
-    } else {
-        /* Cursor in view — clamp offset_right */
-        input->offset_right = input->offset + content_width;
-        if (input->offset_right > total)
-            input->offset_right = total;
     }
+
+    /* The right edge is a column in every branch, never this line's length:
+     * another row may be longer than the cursor's line. */
+    input->offset_right = input->offset + window_width;
 }
 
 /* Count lines and find cursor position */
@@ -2643,6 +2657,14 @@ void tui_textinput_view(const TuiTextInput *input, DynamicBuffer *out)
     int absolute = mutable_input->first_row > 0;
     int wrap = input->wrap == TUI_TEXTINPUT_WRAP && input->content_width > 0;
     int prev_rows = mutable_input->last_render_rows;
+
+    /* An absolutely-placed frame whose last row is past the screen is a bug
+     * the component can see — but only when it knows the screen. With
+     * term_h == 0 (the app never routed TUI_MSG_WINDOW_SIZE to it) there is
+     * nothing to compare against, which is why this cannot be the safety
+     * net: see "The screen size is routed, not discovered" in the header. */
+    assert(!absolute || mutable_input->term_h <= 0 ||
+           mutable_input->first_row + H - 1 <= mutable_input->term_h);
 
     char pos_buf[32];
 
