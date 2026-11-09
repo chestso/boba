@@ -35,8 +35,8 @@ stream: the commit path validates UTF-8 and owns the attribute state
   live frame records nothing; its attributes are its own, repainted
   every frame.
 
-  This is the first published release: 0.10.0's carriage-return reading
-  of the system stream ships here too (see below).
+  Builds on 0.10.0, which shipped the carriage-return reading of the
+  system stream (see below).
 
 0.10.0 (pre-alpha)
 ------------------
