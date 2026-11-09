@@ -1429,9 +1429,11 @@ static void test_split_escape_sequence_passthrough(void)
     h_send(h, tui_msg_stream_text(-1, csi_tail, strlen(csi_tail)));
     h_flush(h);
     const char *out = h_read(h);
-    assert(strstr(out, "\x1b[31mred\r\n") != NULL); /* SGR kept, one row */
-    assert(strstr(out, "\r\nmred\r\n") == NULL);    /* no fresh-line lie */
-    assert(h->rt->inline_partial_open == 0);        /* row completed */
+    /* SGR kept, one row — and the write ends at default (see the SGR
+     * containment tests: the live region is repainted in the same write) */
+    assert(strstr(out, "\x1b[31mred\x1b[0m\r\n") != NULL);
+    assert(strstr(out, "\r\nmred\r\n") == NULL); /* no fresh-line lie */
+    assert(h->rt->inline_partial_open == 0);     /* row completed */
 
     /* Policy: framing sequences (cursor movement, EL) are stripped,
      * SGR survives. */
@@ -1448,13 +1450,15 @@ static void test_split_escape_sequence_passthrough(void)
     h_flush(h);
     out = h_read(h);
     assert(strstr(out, "\x1b]0;title") == NULL);
-    assert(strstr(out, "visible\r\n") != NULL);
+    /* the colour set above is still in effect, so this write restates it
+     * in front of the text (SGR containment) — the text is what matters */
+    assert(strstr(out, "visible") != NULL);
     static const char apc[] = "\x1b_G a=T\x1b\\plain\n";
     h_send(h, tui_msg_stream_text(-1, apc, strlen(apc)));
     h_flush(h);
     out = h_read(h);
     assert(strstr(out, "\x1b_G") == NULL);
-    assert(strstr(out, "plain\r\n") != NULL);
+    assert(strstr(out, "plain") != NULL);
 
     /* Sink path: split across two tui_row_text calls, the carry state
      * must keep the sequence at zero width (pad_to sees col 2). */
@@ -1463,7 +1467,8 @@ static void test_split_escape_sequence_passthrough(void)
     h_flush(h);
     g_row_probe = NULL;
     out = h_read(h);
-    assert(strstr(out, "\x1b[31mAB   Z\r\n") != NULL);
+    /* the sink's own SGR, and the write's closing reset inside the row */
+    assert(strstr(out, "\x1b[31mAB   Z\x1b[0m\r\n") != NULL);
 
     /* An open byte row holding only zero-width SGR bytes still counts
      * as open: the next rendered unit starts below it, not on it. */
@@ -1474,10 +1479,14 @@ static void test_split_escape_sequence_passthrough(void)
     out = h_read(h);
     /* the extension anchors at the open SGR row (up-1, CR); the
      * pending "y" (lookahead) commits first, then "A" — never R| rows
-     * on the SGR's row */
+     * on the SGR's row. The write also restates the state it continues
+     * (after the leading break) and closes at default inside the last
+     * row, which is why the rows are not the whole of the payload. */
     assert(strstr(out, "\x1b[1A\r\r\n") != NULL);
     assert(strstr(out, "\x1b[1A\rR|") == NULL);
-    assert(strstr(out, "\r\nR|y\r\nR|A\r\n") != NULL);
+    assert(strstr(out, "R|y\r\nR|A") != NULL);
+    assert(strstr(out, "\x1b[31m\x1b[32mR|y") != NULL);
+    assert(strstr(out, "R|A\x1b[0m\r\n") != NULL);
 
     h_free(h);
 }
@@ -2407,13 +2416,15 @@ static void test_cr_keeps_sgr_of_the_replaced_frame(void)
     const char *frame = strstr(out, "100%");
     assert(sgr && frame && sgr < frame);
     assert(strstr(out, "50%") == NULL);
+    /* and the write closes at default, inside the row */
+    assert(strstr(out, "100%\x1b[0m\r\n") != NULL);
 
     size_t mark = strlen(h_read(h));
     CR_SEND(h, "x\r\x1b[1;31my\n");
     h_flush(h);
     out = h_after(h, mark);
     sgr = strstr(out, "\x1b[1;31m");
-    frame = strstr(out, "y\r\n");
+    frame = strstr(out, "y");
     assert(sgr && frame && sgr < frame);
     assert(strchr(out, 'x') == NULL);
 
@@ -2900,6 +2911,140 @@ static void test_utf8_carry_through_the_image_gate(void)
     h_free(h);
 }
 
+/* ------------------------------------------------------------------ */
+/* SGR containment                                                     */
+/* ------------------------------------------------------------------ */
+
+/* A stream that leaves a colour open must not colour what comes after
+ * it: every committed write ends in the terminal's default state. */
+static void test_sgr_write_ends_in_default_state(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "\x1b[31mred\n");
+    h_flush(h);
+    const char *out = h_read(h);
+    assert(strstr(out, "\x1b[31mred\x1b[0m\r\n") != NULL);
+
+    /* a stream that resets itself needs no help from boba */
+    size_t mark = strlen(out);
+    TEXT_SEND(h, "\x1b[32mgreen\x1b[0m\n");
+    h_flush(h);
+    out = h_after(h, mark);
+    assert(strstr(out, "\x1b[32mgreen\x1b[0m\r\n") != NULL);
+    assert(strstr(out, "\x1b[0m\x1b[0m") == NULL);
+
+    h_free(h);
+}
+
+/* Extending an open row restates the state the row is drawn in — the
+ * write that started it ended at default, so without this the colour
+ * would stop at the batch boundary. */
+static void test_sgr_extend_restates_the_state(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "\x1b[31mred");
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 1);
+    assert(strstr(h_read(h), "\x1b[31mred\x1b[0m") != NULL);
+
+    size_t mark = strlen(h_read(h));
+    TEXT_SEND(h, "der\n");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), "\x1b[31mder\x1b[0m\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* The attribute state is stream state, not row state: a colour set on one
+ * line applies to the next, as on a terminal — and the restatement makes
+ * that true across the write boundary. */
+static void test_sgr_state_carries_across_rows(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "\x1b[31mone\n");
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 0); /* the row ENDED; the colour did not */
+    assert(strstr(h_read(h), "\x1b[31mone\x1b[0m\r\n") != NULL);
+    size_t mark = strlen(h_read(h));
+    TEXT_SEND(h, "two\n");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), "\x1b[31mtwo\x1b[0m\r\n") != NULL);
+
+    /* and a reset in the stream ends it */
+    mark = strlen(h_read(h));
+    TEXT_SEND(h, "\x1b[0mthree\n");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), "\x1b[0mthree\r\n") != NULL);
+    mark = strlen(h_read(h));
+    TEXT_SEND(h, "four\n");
+    h_flush(h);
+    const char *out = h_after(h, mark);
+    assert(strstr(out, "four\r\n") != NULL);
+    assert(strstr(out, "\x1b[31m") == NULL);
+    assert(strstr(out, "\x1b[0m") == NULL);
+
+    h_free(h);
+}
+
+/* A replace draws the new frame in the state the CR left: the frame that
+ * went away took its glyphs, not its attributes. */
+static void test_sgr_cr_replace_replays_the_state_at_the_cr(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    /* within one batch: the frame's SGR is replayed where it stood */
+    CR_SEND(h, "\x1b[32m10%\r50%\n");
+    h_flush(h);
+    assert(strstr(h_read(h), "\x1b[32m50%\x1b[0m\r\n") != NULL);
+    assert(strstr(h_read(h), "10%") == NULL);
+
+    /* across batches: the rewind carries the replay too */
+    size_t mark = strlen(h_read(h));
+    CR_SEND(h, "\x1b[1m77%\r88%");
+    h_flush(h);
+    mark = strlen(h_read(h));
+    CR_SEND(h, "\r99%\n");
+    h_flush(h);
+    const char *out = h_after(h, mark);
+    /* the whole state at the CR, in order, where the frame starts */
+    assert(strstr(out, REWIND_UP(1) "\x1b[32m\x1b[1m99%") != NULL);
+    assert(strstr(out, "77%") == NULL);
+    assert(strstr(out, "88%") == NULL);
+
+    h_free(h);
+}
+
+/* clear() starts the new chat at default: nothing from the old one is
+ * restated into it. */
+static void test_sgr_state_does_not_survive_clear(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "\x1b[35mmagenta\n");
+    h_flush(h);
+    h_send(h, tui_msg_transcript_clear());
+    h_flush(h);
+    size_t mark = strlen(h_read(h));
+    TEXT_SEND(h, "fresh\n");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), "\x1b[35m") == NULL);
+
+    h_free(h);
+}
+
 int main(void)
 {
     printf("test_stream: streaming transcript component\n");
@@ -2974,6 +3119,11 @@ int main(void)
     RUN_TEST(test_utf8_chunking_is_byte_independent);
     RUN_TEST(test_utf8_cr_replace_across_a_split_glyph);
     RUN_TEST(test_utf8_carry_through_the_image_gate);
+    RUN_TEST(test_sgr_write_ends_in_default_state);
+    RUN_TEST(test_sgr_extend_restates_the_state);
+    RUN_TEST(test_sgr_state_carries_across_rows);
+    RUN_TEST(test_sgr_cr_replace_replays_the_state_at_the_cr);
+    RUN_TEST(test_sgr_state_does_not_survive_clear);
     printf("test_stream: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

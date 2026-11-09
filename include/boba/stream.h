@@ -72,6 +72,17 @@
  * Inline mode only: "commit to the scrollback" has no meaning in an
  * alt-screen layout; this component targets boba's inline frame.
  *
+ * Attribute state: boba scans every SGR and keeps the set the stream has
+ * left in effect. A committed write ENDS in the default state, because
+ * the live region is repainted inside that same write and must not
+ * inherit a colour the app left open; a write that CONTINUES an open row
+ * (or REPLACES it, the CR reading) restates the state at the point it
+ * continues from, so nothing appears to lose its colour at a batch
+ * boundary. The set is a byte log of the sequences since the last reset
+ * — replaying it from a default terminal reproduces the attributes
+ * exactly — capped at a kilobyte, past which only the newest sequence is
+ * kept.
+ *
  * The image tier is complete: an IMAGE unit whose rendering depends
  * on the terminal profile (measure_image installed) is DEFERRED —
  * held with everything freezing behind it, in freeze order — until

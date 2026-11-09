@@ -197,6 +197,32 @@ struct TuiTranscript
     unsigned char utf8_carry[4];
     int utf8_carry_len;
 
+    /* SGR attribute state — the styling the stream has left in effect.
+     *
+     * A terminal keeps attributes across a row break, so a colour left open
+     * bleeds into the next thing written — and boba repaints the live
+     * region in the SAME write as the transcript bytes, so it bled into the
+     * app's own frame. The transcript scans every SGR already, so it owns
+     * the state:
+     *
+     *   sgr_state     the sequences in effect since the last reset (a reset
+     *                 clears it) — replaying it from a default terminal
+     *                 reproduces the attributes exactly
+     *   sgr_committed the state as the CURRENT batch found it: every
+     *                 committed write ends in the default state (see the
+     *                 commit pass), so a batch that continues an open row
+     *                 restates this before its bytes
+     *   sgr_cr        the state at the pending CR (a replace draws the new
+     *                 frame in it — a terminal's CR leaves attributes
+     *                 alone, so the frame that is being dropped must leave
+     *                 its state behind)
+     *
+     * Byte mode and rendered rows both feed it (the sink records only its
+     * commit destination, never the live frame). */
+    DynamicBuffer *sgr_state;
+    DynamicBuffer *sgr_committed;
+    DynamicBuffer *sgr_cr;
+
     int orphan_partial; /* clear() while a row was open: forget, emit nothing */
     unsigned long commit_count;
 
@@ -245,6 +271,106 @@ static void transcript_row_reset(TuiTranscript *t)
     t->cr_pending = 0;
     /* a half-received character belongs to the row that is ending */
     t->utf8_carry_len = 0;
+    /* ... and so does the attribute snapshot taken at its CR */
+    if (t->sgr_cr)
+        dynamic_buffer_clear(t->sgr_cr);
+}
+
+/* ------------------------------------------------------------------ */
+/* Staging scratch                                                     */
+/* ------------------------------------------------------------------ */
+
+/* Insert bytes into staging at `at` (which may equal its length). The
+ * buffer has no insert of its own; growing first reserves the room, then
+ * the tail moves up. `bytes` must not live in the buffer being grown. */
+static void staging_insert(TuiTranscript *t, size_t at, const char *bytes,
+                           size_t len)
+{
+    DynamicBuffer *b = t->staging;
+    if (!b || !bytes || len == 0)
+        return;
+    if (at > b->len)
+        at = b->len;
+    dynamic_buffer_append(b, bytes, len);
+    memmove(b->data + at + len, b->data + at, b->len - len - at);
+    memcpy(b->data + at, bytes, len);
+}
+
+/* The first byte after any leading row breaks: where this batch's CONTENT
+ * starts (a break at the top ends the row the previous batch left open,
+ * and has no glyphs for the state to apply to). */
+static size_t staging_body_start(const DynamicBuffer *b)
+{
+    size_t i = 0;
+    while (i + 1 < b->len && b->data[i] == '\r' && b->data[i + 1] == '\n')
+        i += 2;
+    return i;
+}
+
+/* The end of this batch's content: before any trailing row breaks (a reset
+ * there belongs INSIDE the row it resets, and the row-open decision the
+ * runtime makes from the last byte must still see the break). */
+static size_t staging_body_end(const DynamicBuffer *b)
+{
+    size_t end = b->len;
+    while (end >= 2 && b->data[end - 2] == '\r' && b->data[end - 1] == '\n')
+        end -= 2;
+    return end;
+}
+
+/* ------------------------------------------------------------------ */
+/* SGR attribute state                                                 */
+/* ------------------------------------------------------------------ */
+
+/* The set is a byte log, not a parsed struct: boba passes SGR verbatim and
+ * never interprets one, and replaying the log from a default terminal
+ * reproduces the attributes exactly. A stream that changes attributes on
+ * every glyph without ever resetting could grow it without bound, so it is
+ * capped — the newest sequence decides what the next glyph looks like, so
+ * that is what a collapsed set keeps. */
+#define SGR_STATE_MAX 1024
+
+enum
+{
+    SGR_RESET_NONE = 0,
+    SGR_RESET_ALL = 1
+};
+
+/* "\x1b[m" and "\x1b[0m" (and "\x1b[0;0m") put every attribute back to
+ * default; nothing else does. */
+static int sgr_resets_all(const char *seq, size_t len)
+{
+    if (len < 3 || seq[0] != '\x1b' || seq[1] != '[' || seq[len - 1] != 'm')
+        return SGR_RESET_NONE;
+    for (size_t i = 2; i + 1 < len; i++) {
+        if (seq[i] != '0' && seq[i] != ';')
+            return SGR_RESET_NONE;
+    }
+    return SGR_RESET_ALL;
+}
+
+static void sgr_copy(DynamicBuffer *dst, const DynamicBuffer *src)
+{
+    if (!dst)
+        return;
+    dynamic_buffer_clear(dst);
+    if (src && src->len > 0)
+        dynamic_buffer_append(dst, src->data, src->len);
+}
+
+/* Record one complete SGR sequence as stream state. */
+static void sgr_note(TuiTranscript *t, const char *seq, size_t len)
+{
+    DynamicBuffer *st = t->sgr_state;
+    if (!st || !seq || len == 0)
+        return;
+    if (sgr_resets_all(seq, len)) {
+        dynamic_buffer_clear(st);
+        return;
+    }
+    if (st->len + len > SGR_STATE_MAX)
+        dynamic_buffer_clear(st);
+    dynamic_buffer_append(st, seq, len);
 }
 
 /* ------------------------------------------------------------------ */
@@ -332,6 +458,7 @@ static void stage_escape(TuiTranscript *t, const char *bytes, size_t len,
         if (tui_ansi_scan_feed(&t->esc, c, &kind)) {
             if (kind == TUI_ANSI_KIND_SGR) {
                 dynamic_buffer_append(t->staging, t->esc.buf, t->esc.len);
+                sgr_note(t, t->esc.buf, t->esc.len);
                 t->row_open = 1; /* bytes (even zero-width) are on the row */
             }
             t->esc.len = 0;
@@ -349,14 +476,14 @@ static void stage_escape(TuiTranscript *t, const char *bytes, size_t len,
  * batch they were already written, so the runtime is told to rewind that
  * row (replace_open) and whatever this batch staged for it drops out too.
  *
- * The SGR sequences inside the dropped frame are KEPT, in order: they are
- * zero-width state, not content. A terminal's CR leaves the attribute
- * state alone, so `ESC[32m 50% CR 100%` stays green, and dropping the
- * escape with the glyphs would repaint the new frame in the default
- * colour. Staging holds only complete SGR sequences and glyph bytes
- * between a row's terminator and its end (every other escape was dropped
- * on the way in), so the keep pass is a plain ESC..final-byte walk, and it
- * compacts in place: no scratch, no allocation. */
+ * The frame goes WHOLE — its glyphs and the attributes it set — and the
+ * attribute state goes back to what it was when the CR arrived. That is
+ * what a terminal does: a CR leaves attribute state alone, so the new
+ * frame is drawn in the state the old one ended in, and the attributes set
+ * inside the discarded frame are already part of that state (sgr_state
+ * carries them; sgr_cr is the snapshot). The replay is inserted where the
+ * frame's first byte was, so it lands on the frame and not on a row above
+ * it. */
 static void stage_replace_row(TuiTranscript *t)
 {
     DynamicBuffer *b = t->staging;
@@ -371,26 +498,12 @@ static void stage_replace_row(TuiTranscript *t)
         }
     }
 
-    size_t w = start;
-    for (size_t r = start; r < mark;) {
-        if ((unsigned char)b->data[r] != 0x1b) {
-            r++;
-            continue;
-        }
-        size_t e = r + 1;
-        if (e < mark && b->data[e] == '[') {
-            e++;
-            while (e < mark && (unsigned char)b->data[e] < 0x40)
-                e++; /* parameter + intermediate bytes */
-        }
-        if (e >= mark || b->data[e] != 'm')
-            break; /* not a whole SGR: nothing staged ever looks like this */
-        memmove(b->data + w, b->data + r, e - r + 1);
-        w += e - r + 1;
-        r = e + 1;
-    }
-    memmove(b->data + w, b->data + mark, b->len - mark);
-    b->len = w + (b->len - mark);
+    memmove(b->data + start, b->data + mark, b->len - mark);
+    b->len = start + (b->len - mark);
+    /* The state at the CR is what the new frame is drawn in; sgr_state is
+     * already that state plus whatever the stream set after the CR (those
+     * sequences are staged after `mark` and stay), so it needs no trim. */
+    staging_insert(t, start, t->sgr_cr->data, t->sgr_cr->len);
 
     if (!in_batch && t->carried_open)
         t->replace_open = 1;
@@ -573,6 +686,9 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len,
                 if (t->row_open) {
                     t->cr_pending = 1;
                     t->cr_mark = t->staging->len;
+                    /* the attributes the row is drawn with, for the
+                     * frame that will replace it */
+                    sgr_copy(t->sgr_cr, t->sgr_state);
                 }
             } else {
                 stage_row_break(t);
@@ -700,6 +816,10 @@ static void sink_escape(TuiRowSink *s, const char *utf8, size_t len,
                  * includes it (capture happens at row end). */
                 sink_note_row_start(s);
                 dynamic_buffer_append(s->buf, s->esc.buf, s->esc.len);
+                /* Only the commit destination is stream state; the live
+                 * frame's attributes are its own, repainted every frame. */
+                if (s->dest == SINK_COMMIT && s->t)
+                    sgr_note(s->t, s->esc.buf, s->esc.len);
             }
             s->esc.len = 0;
             s->esc.nostore = 0;
@@ -1837,6 +1957,29 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
     if (t->staging->len == 0)
         return 0;
 
+    /* Attribute state, one write in and one write out:
+     *
+     *  - every write restates the state the stream is in when the write
+     *    has glyphs at all. It has to: the previous write ended in the
+     *    default state (below), and the app's stream did not — a colour
+     *    set on one line applies to the next, on a terminal. The
+     *    restatement goes after any leading row break (a break ends the
+     *    old row and has no glyphs to style).
+     *  - a REPLACE already inserted the state as of its CR where the
+     *    replaced frame began (stage_replace_row), which is the state a
+     *    terminal's CR would have left.
+     *  - the write ENDS in the default state whenever the stream has
+     *    attributes in effect: the live region is repainted inside this
+     *    same write, and a colour left open by the app must not bleed
+     *    into the app's own frame. The reset goes before any trailing
+     *    row break — inside the row it resets, and out of the way of the
+     *    runtime's "does this payload end open?" decision. */
+    if (!t->replace_open && t->sgr_committed->len > 0)
+        staging_insert(t, staging_body_start(t->staging),
+                       t->sgr_committed->data, t->sgr_committed->len);
+    if (t->sgr_state->len > 0)
+        staging_insert(t, staging_body_end(t->staging), "\x1b[0m", 4);
+
     tui_runtime_transcript_write_ex(
         rt, t->staging->data, t->staging->len,
         t->replace_open ? TUI_TRANSCRIPT_REPLACE_OPEN_ROW : 0);
@@ -1848,6 +1991,8 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
     t->carried_open = t->row_open;
     t->replace_open = 0;
     t->cr_mark = 0;
+    /* the state at the start of the next batch */
+    sgr_copy(t->sgr_committed, t->sgr_state);
     transcript_trim(t);
     return 1;
 }
@@ -1981,7 +2126,11 @@ TuiTranscript *tui_transcript_create(const TuiTranscriptConfig *cfg)
     t->height = 24;
     t->staging = dynamic_buffer_create(STREAM_STAGE_INIT);
     t->live_scratch = dynamic_buffer_create(1024);
-    if (!t->staging || !t->live_scratch)
+    t->sgr_state = dynamic_buffer_create(64);
+    t->sgr_committed = dynamic_buffer_create(64);
+    t->sgr_cr = dynamic_buffer_create(64);
+    if (!t->staging || !t->live_scratch || !t->sgr_state ||
+        !t->sgr_committed || !t->sgr_cr)
         goto fail;
 
     t->n_user = t->cfg.n_streams;
@@ -2031,6 +2180,9 @@ void tui_transcript_free(TuiTranscript *t)
     }
     dynamic_buffer_destroy(t->staging);
     dynamic_buffer_destroy(t->live_scratch);
+    dynamic_buffer_destroy(t->sgr_state);
+    dynamic_buffer_destroy(t->sgr_committed);
+    dynamic_buffer_destroy(t->sgr_cr);
     free(t->defer);
     free(t->row_starts);
     free(t->row_ends);
@@ -2152,6 +2304,10 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
         t->esc.state = 0;
         t->esc.len = 0;
         t->defer_len = 0;
+        /* no attribute of the old chat may be restated in the new one */
+        sgr_copy(t->sgr_state, NULL);
+        sgr_copy(t->sgr_committed, NULL);
+        sgr_copy(t->sgr_cr, NULL);
         dynamic_buffer_clear(t->staging);
         for (size_t i = 0; i <= t->n_user; i++)
             stream_reset(t, &t->streams[i]);

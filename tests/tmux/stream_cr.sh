@@ -97,4 +97,20 @@ tmux_send "$SESSION" l
 tmux_wait_for "$SESSION" '^break$'
 rows | grep -q '^legacy$' || fail "legacy CR must break the row, keeping 'legacy'"
 
+# 9) a colour left OPEN at the end of the app's row does not bleed into the
+#    frame below it: every committed write ends in the default state. The
+#    row itself keeps its colour (that is the stream's state, faithfully).
+tmux_send "$SESSION" r
+tmux_wait_for "$SESSION" '^bleed$'
+attributed=$(tmux capture-pane -t "$SESSION" -p -e)
+bleed=$(printf '%s\n' "$attributed" | grep 'bleed' | head -1)
+case "$bleed" in
+*"[31m"*) ;;
+*) fail "the bleed row lost its colour: $bleed" ;;
+esac
+prompt_line=$(printf '%s\n' "$attributed" | grep '> ready' | head -1)
+case "$prompt_line" in
+*"[31m"*) fail "an open colour bled into the frame: $prompt_line" ;;
+esac
+
 echo "PASS: stream_cr"

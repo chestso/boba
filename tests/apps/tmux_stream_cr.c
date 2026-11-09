@@ -85,6 +85,11 @@ static TuiUpdateResult app_update(TuiModel *m, TuiMsg msg)
     case 'z':
         post_cr(a, "\r\x1b[32mgreen\x1b[0m");
         break;
+    case 'r':
+        /* a colour left OPEN at the end of the row: the transcript closes
+         * its writes at default, so the frame below must not inherit it */
+        post_cr(a, "\x1b[31mbleed");
+        break;
     case 'l':
     {
         TuiMsg t = tui_msg_stream_text(-1, "legacy\rbreak\n", 13);
