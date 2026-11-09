@@ -1,6 +1,33 @@
 boba NEWS
 =========
 
+0.10.0 (pre-alpha)
+------------------
+
+stream: a carriage return can replace the open row
+
+  Terminal-style output is CR-driven: a child's progress meter writes
+  `10%\r50%\r100%\n`, and the system stream turned every bare CR into a row
+  break — three rows and no animation, with no way for the app to take the
+  bytes back. A hold in the app (wait for a newline, a settle timer) costs
+  every user latency and shows no progress while the command runs.
+
+  The transcript now reads a bare CR as a carriage return when the message
+  says so. The CR marks the open row and the next glyph or tab replaces it,
+  in the same one-write paint the runtime already uses to extend that row;
+  a CR alone leaves the last frame standing, `CR LF` is a line break (also
+  across messages), and the SGR of a replaced frame is kept, because a
+  terminal's CR leaves attribute state alone. Rows already ended are never
+  touched, and nothing is held back.
+
+  Added:
+    - tui_msg_stream_text_ex() + TUI_STREAM_TEXT_CR_REPLACES, and
+      TuiStreamMsg.flags to carry the reading
+    - tui_runtime_transcript_write_ex() + TUI_TRANSCRIPT_REPLACE_OPEN_ROW
+
+  Unchanged: tui_msg_stream_text and tui_runtime_transcript_write keep
+  CR = row break, byte for byte.
+
 0.9.0 (pre-alpha)
 -----------------
 
