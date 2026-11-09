@@ -399,7 +399,15 @@ TuiMsg tui_msg_stream_delta(int stream_id, const char *text, size_t len);
  * (cursor movement, EL, OSC, APC/DCS) is dropped — no raw \r and no
  * app-controlled cursor bytes ever reach the scrollback. A bare CR is a
  * row break (the legacy reading); see tui_msg_stream_text_ex for the
- * carriage-return reading. */
+ * carriage-return reading.
+ *
+ * Bytes may be cut anywhere: a process's output arrives in whatever
+ * chunks the read returned, so the byte path validates UTF-8 itself. A
+ * character split across two messages is completed by the second one (a
+ * truncated tail is held, never committed), and a sequence that is not
+ * well-formed prints U+FFFD — one per maximal subpart — instead of
+ * swallowing the byte after it. Where the caller cut its bytes therefore
+ * cannot change what reaches the terminal. */
 TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len);
 
 /* tui_msg_stream_text with options. `flags` is a bit set — the reading

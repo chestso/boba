@@ -2667,6 +2667,239 @@ static void test_runtime_write_ex_replace_needs_an_open_row(void)
     h_free(h);
 }
 
+/* ------------------------------------------------------------------ */
+/* UTF-8 chunk independence                                            */
+/* ------------------------------------------------------------------ */
+
+/* A message boundary is wherever the read landed, so the byte path — not
+ * the app — owns character boundaries: a tail cut off by the end of a
+ * message is carried to the next one, and an ill-formed byte is U+FFFD
+ * rather than something that swallows its neighbour. */
+
+#define TEXT_SEND(h, lit) \
+    h_send((h), tui_msg_stream_text(-1, (lit), strlen(lit)))
+#define FFFD "\xef\xbf\xbd"
+
+/* The lead byte is held, not printed and not lost: the next message's
+ * continuation closes the character. */
+static void test_utf8_split_tail_completes(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "ab\xc3");
+    h_flush(h);
+    assert(strstr(h_read(h), "\xc3") == NULL); /* half a character */
+    assert(strstr(h_read(h), FFFD) == NULL);   /* ... is not an error yet */
+
+    TEXT_SEND(h, "\xa9z\n");
+    h_flush(h);
+    assert(strstr(h_read(h), "\xc3\xa9z\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* A three-byte character, one byte per message: no lone lead byte ever
+ * reaches the terminal. */
+static void test_utf8_byte_at_a_time(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    const char text[] = "h\xc3\xa9llo \xe2\x82\xac\n";
+    for (size_t i = 0; i < strlen(text); i++) {
+        char one[2] = { text[i], '\0' };
+        h_send(h, tui_msg_stream_text(-1, one, 1));
+        h_flush(h);
+    }
+    const char *out = h_read(h);
+    assert(strstr(out, FFFD) == NULL);
+    assert(strstr(out, "\xc3\xa9") != NULL);
+    assert(strstr(out, "\xe2\x82\xac") != NULL);
+    /* every lead byte that appears is part of a whole sequence */
+    assert(count_substr(out, "\xc3") == count_substr(out, "\xc3\xa9"));
+    assert(count_substr(out, "\xe2") == count_substr(out, "\xe2\x82\xac"));
+
+    h_free(h);
+}
+
+/* A lead byte followed by a non-continuation is not a character, and it
+ * must not eat the byte after it (the old walker's swallow). */
+static void test_utf8_bad_lead_does_not_swallow(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "\xc3"
+                 "a\n");
+    h_flush(h);
+    assert(strstr(h_read(h), FFFD "a\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* One replacement per maximal subpart: a sequence that breaks part way
+ * replaces only the bytes it had, and the byte that broke it is read as
+ * itself. */
+static void test_utf8_maximal_subpart_replacement(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    /* three-byte lead, two bytes valid, then ASCII */
+    TEXT_SEND(h, "\xe2\x82"
+                 "a\n");
+    h_flush(h);
+    assert(strstr(h_read(h), FFFD "a\r\n") != NULL);
+
+    /* overlong start (C0) and a bare continuation byte: one each */
+    size_t mark = strlen(h_read(h));
+    TEXT_SEND(h, "\xc0\xaf\n");
+    h_flush(h);
+    assert(count_substr(h_after(h, mark), FFFD) == 2);
+
+    /* a surrogate (ED A0) is not a character either: the lead stands
+     * alone, so each of the three bytes is its own replacement */
+    mark = strlen(h_read(h));
+    TEXT_SEND(h, "\xed\xa0\x80\n");
+    h_flush(h);
+    assert(count_substr(h_after(h, mark), FFFD) == 3);
+
+    /* past U+10FFFF (F4 90) is the same story */
+    mark = strlen(h_read(h));
+    TEXT_SEND(h, "\xf4\x90\x80\x80\n");
+    h_flush(h);
+    assert(count_substr(h_after(h, mark), FFFD) == 4);
+
+    h_free(h);
+}
+
+/* A character cannot outlive its row: a tail still held when the row
+ * breaks prints U+FFFD, and the row ends normally. */
+static void test_utf8_truncated_tail_ends_the_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "ab\xc3");
+    TEXT_SEND(h, "\n");
+    h_flush(h);
+    assert(strstr(h_read(h), "ab" FFFD "\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* ... and clear() drops it instead: nothing on that screen is kept. */
+static void test_utf8_carry_does_not_survive_clear(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    TEXT_SEND(h, "ab\xc3");
+    h_flush(h);
+    h_send(h, tui_msg_transcript_clear());
+    h_flush(h);
+    size_t mark = strlen(h_read(h));
+    TEXT_SEND(h, "z\n");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), FFFD) == NULL);
+    assert(strstr(h_after(h, mark), "z\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* The property the whole thing exists for: where the caller cut its bytes
+ * cannot change what the transcript commits. Every two-way split of a
+ * mixed ASCII/2/3/4-byte line stages the same bytes as the whole. */
+static void test_utf8_chunking_is_byte_independent(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const char whole[] = "h\xc3\xa9llo \xe2\x82\xac \xf0\x9f\x98\x80 ok\n";
+    size_t n = strlen(whole);
+
+    H *ref = h_new(streams, NULL, 1);
+    assert(ref);
+    h_send(ref, tui_msg_stream_text(-1, whole, n));
+    h_flush(ref);
+    char *want = strdup(h_read(ref));
+    assert(want);
+    h_free(ref);
+
+    for (size_t cut = 1; cut < n; cut++) {
+        H *h = h_new(streams, NULL, 1);
+        assert(h);
+        /* no flush between: one commit sees the whole line, however it
+         * was chopped */
+        h_send(h, tui_msg_stream_text(-1, whole, cut));
+        h_send(h, tui_msg_stream_text(-1, whole + cut, n - cut));
+        h_flush(h);
+        assert(strcmp(h_read(h), want) == 0);
+        h_free(h);
+    }
+
+    free(want);
+}
+
+/* The replacing glyph of a CR frame may itself arrive in two halves: the
+ * replace fires when the character is whole, not when its lead byte is. */
+static void test_utf8_cr_replace_across_a_split_glyph(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "10%");
+    h_flush(h);
+    CR_SEND(h, "\r\xc3");
+    h_flush(h);
+    /* nothing printed yet: the row still shows its last frame */
+    assert(h->rt->inline_partial_open == 1);
+    assert(h->rt->inline_partial_cols == 3);
+
+    size_t mark = strlen(h_read(h));
+    CR_SEND(h, "\xa9");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), REWIND_UP(1) "\xc3\xa9") != NULL);
+    assert(h->rt->inline_partial_cols == 1);
+
+    h_free(h);
+}
+
+/* Through the IMAGE gate the bytes replay in order, so a character split
+ * across two held units completes exactly as it would live. */
+static void test_utf8_carry_through_the_image_gate(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+
+    h->rt->probe_state = 2;
+    h->rt->probe_deadline_ms = 0;
+    h_send(h, tui_msg_stream_image(0, "!img a:b", 8));
+    TEXT_SEND(h, "ab\xc3");
+    TEXT_SEND(h, "\xa9z\n");
+    h_flush(h);
+    assert(strstr(h_read(h), "ab\xc3\xa9z") == NULL); /* held */
+
+    h_profile_kitty(h);
+    h_flush(h);
+    const char *out = h_read(h);
+    const char *img = strstr(out, "\x1b_Ga=T,f=100");
+    const char *line = strstr(out, "ab\xc3\xa9z\r\n");
+    assert(img && line && line > img);
+
+    h_free(h);
+}
+
 int main(void)
 {
     printf("test_stream: streaming transcript component\n");
@@ -2732,6 +2965,15 @@ int main(void)
     RUN_TEST(test_cr_replace_through_the_image_gate);
     RUN_TEST(test_cr_many_frames_collapse_in_staging);
     RUN_TEST(test_runtime_write_ex_replace_needs_an_open_row);
+    RUN_TEST(test_utf8_split_tail_completes);
+    RUN_TEST(test_utf8_byte_at_a_time);
+    RUN_TEST(test_utf8_bad_lead_does_not_swallow);
+    RUN_TEST(test_utf8_maximal_subpart_replacement);
+    RUN_TEST(test_utf8_truncated_tail_ends_the_row);
+    RUN_TEST(test_utf8_carry_does_not_survive_clear);
+    RUN_TEST(test_utf8_chunking_is_byte_independent);
+    RUN_TEST(test_utf8_cr_replace_across_a_split_glyph);
+    RUN_TEST(test_utf8_carry_through_the_image_gate);
     printf("test_stream: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

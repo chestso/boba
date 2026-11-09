@@ -184,6 +184,19 @@ struct TuiTranscript
     int carried_open;
     int replace_open;
 
+    /* An incomplete UTF-8 sequence held for the next message.
+     *
+     * The byte path validates every sequence it stages, so a message that
+     * ends mid-character (a read boundary, a 1-byte-per-write child) does
+     * not lose the tail or mangle the next message's continuation bytes.
+     * `utf8_carry` holds the LEAD BYTE and its valid continuations so far
+     * (<= 3 bytes: a sequence is at most 4); the next message completes
+     * it. Part of the ROW's state like cr_pending, so it dies with the
+     * row — as U+FFFD, because those bytes were text the app meant to
+     * print. See stage_utf8_at. */
+    unsigned char utf8_carry[4];
+    int utf8_carry_len;
+
     int orphan_partial; /* clear() while a row was open: forget, emit nothing */
     unsigned long commit_count;
 
@@ -220,6 +233,7 @@ static void transcript_close_row(TuiTranscript *t);
 static int defer_active(const TuiTranscript *t);
 static int defer_push(TuiTranscript *t, int type, int stream_idx,
                       TuiBlockKind kind, size_t off, size_t len, int image_id);
+static void stage_flush_utf8_carry(TuiTranscript *t);
 
 /* The output row closed: no open row, no columns, and no CR waiting to
  * replace a row that no longer exists. The ONE place a row closes, so a
@@ -229,6 +243,8 @@ static void transcript_row_reset(TuiTranscript *t)
     t->row_open = 0;
     t->row_col = 0;
     t->cr_pending = 0;
+    /* a half-received character belongs to the row that is ending */
+    t->utf8_carry_len = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -287,6 +303,7 @@ int tui_rowcols_advance(int col, const char *bytes, size_t len,
  * the only break the commit path emits: the terminal owns wrapping. */
 static void stage_row_break(TuiTranscript *t)
 {
+    stage_flush_utf8_carry(t); /* a character cannot outlive its row */
     dynamic_buffer_append(t->staging, "\r\n", 2);
     transcript_row_reset(t);
 }
@@ -381,6 +398,151 @@ static void stage_replace_row(TuiTranscript *t)
     t->row_col = 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* UTF-8 validation (byte mode)                                        */
+/* ------------------------------------------------------------------ */
+
+/* Whatever a child writes arrives cut wherever the read landed, so the
+ * byte path — not the app — owns character boundaries: a message that ends
+ * mid-character must not lose that tail, and the next message's
+ * continuation bytes must not be printed as if they were characters. The
+ * grammar is Unicode's, not a lead-byte guess: C0/C1 (overlong starts), a
+ * bare continuation byte, and F5..FF (past U+10FFFF) cannot start a
+ * sequence at all. */
+
+#define UTF8_MAX_BYTES     4
+#define UTF8_REPLACEMENT   "\xef\xbf\xbd"
+#define UTF8_REPLACEMENT_N 3
+
+/* Length the lead byte announces (1..4), or 0 when it cannot start a
+ * well-formed sequence. */
+static int utf8_lead_len(unsigned char c)
+{
+    if (c < 0x80)
+        return 1;
+    if (c >= 0xC2 && c <= 0xDF)
+        return 2;
+    if (c >= 0xE0 && c <= 0xEF)
+        return 3;
+    if (c >= 0xF0 && c <= 0xF4)
+        return 4;
+    return 0;
+}
+
+/* Is `b` a legal continuation byte at `pos` (0-based, after the lead) of
+ * a sequence that `lead` announced? The second byte is where the table's
+ * holes live — E0 A0 (overlong), ED 9F (surrogate), F0 90 (underflow),
+ * F4 8F (past U+10FFFF); every later position is the plain 80..BF. */
+static int utf8_cont_ok(unsigned char lead, size_t pos, unsigned char b)
+{
+    unsigned char lo = 0x80, hi = 0xBF;
+    if (pos == 0) {
+        if (lead == 0xE0)
+            lo = 0xA0;
+        else if (lead == 0xED)
+            hi = 0x9F;
+        else if (lead == 0xF0)
+            lo = 0x90;
+        else if (lead == 0xF4)
+            hi = 0x8F;
+    }
+    return b >= lo && b <= hi;
+}
+
+/* Stage whatever a truncated sequence left behind, as U+FFFD: the bytes
+ * were text the app meant to print, and their row is over, so no later
+ * message can complete them. */
+static void stage_flush_utf8_carry(TuiTranscript *t)
+{
+    if (t->utf8_carry_len <= 0)
+        return;
+    t->utf8_carry_len = 0;
+    if (t->cr_pending)
+        stage_replace_row(t); /* it prints: it is the replacing glyph */
+    stage_glyph(t, UTF8_REPLACEMENT, UTF8_REPLACEMENT_N, 1);
+}
+
+/* Stage one glyph from bytes[i..len), completing a sequence carried from
+ * the previous message first, and return the input bytes consumed (always
+ * >= 1, so the caller's walk always progresses).
+ *
+ *   complete and well-formed -> staged (the cluster walker groups it)
+ *   cut off by the message end -> carried, printed by the next message
+ *   ill-formed -> U+FFFD for its maximal subpart, and the byte that broke
+ *                 it is NOT consumed (a bad lead can never swallow the
+ *                 byte after it)
+ *
+ * A cluster (base + combining marks / selector / ZWJ) whose bytes straddle
+ * a message boundary is deliberately not reassembled: what is carried is
+ * one codepoint's bytes, which is exactly what a truncated tail is.
+ * Everything downstream (row columns, staging offsets, the terminal)
+ * therefore only ever sees valid UTF-8. */
+static size_t stage_utf8_at(TuiTranscript *t, const char *bytes, size_t len,
+                            size_t i)
+{
+    unsigned char seq[UTF8_MAX_BYTES];
+    size_t have = 0;
+    size_t used = 0;
+    int carried = t->utf8_carry_len > 0;
+
+    if (carried) {
+        have = (size_t)t->utf8_carry_len;
+        memcpy(seq, t->utf8_carry, have);
+    } else {
+        seq[have++] = (unsigned char)bytes[i];
+        used = 1;
+    }
+
+    int need = utf8_lead_len(seq[0]);
+    if (need == 0) {
+        t->utf8_carry_len = 0;
+        if (t->cr_pending)
+            stage_replace_row(t);
+        stage_glyph(t, UTF8_REPLACEMENT, UTF8_REPLACEMENT_N, 1);
+        return used;
+    }
+
+    while (have < (size_t)need) {
+        if (i + used >= len) {
+            memcpy(t->utf8_carry, seq, have);
+            t->utf8_carry_len = (int)have;
+            return used;
+        }
+        unsigned char b = (unsigned char)bytes[i + used];
+        if (!utf8_cont_ok(seq[0], have - 1, b)) {
+            t->utf8_carry_len = 0;
+            if (t->cr_pending)
+                stage_replace_row(t);
+            stage_glyph(t, UTF8_REPLACEMENT, UTF8_REPLACEMENT_N, 1);
+            return used;
+        }
+        seq[have++] = b;
+        used++;
+    }
+
+    if (carried) {
+        /* the sequence was split: it is a cluster of its own */
+        size_t cl = 0;
+        int gw = tui_next_cluster((const char *)seq, have, &cl);
+        if (cl == 0)
+            cl = have;
+        t->utf8_carry_len = 0;
+        if (t->cr_pending)
+            stage_replace_row(t);
+        stage_glyph(t, (const char *)seq, cl, gw);
+        return used;
+    }
+
+    size_t cl = 0;
+    int gw = tui_next_cluster(bytes + i, len - i, &cl);
+    if (cl == 0)
+        cl = used; /* cannot happen for a validated lead; never stall */
+    if (t->cr_pending)
+        stage_replace_row(t);
+    stage_glyph(t, bytes + i, cl, gw);
+    return cl;
+}
+
 /* Normalize raw byte-run text into the staging buffer. Handles
  * LF/CRLF -> \r\n, hard tabs (physical-column stops), ANSI passthrough
  * with no width wrap (the terminal soft-wraps), and no raw \r on output.
@@ -446,14 +608,9 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len,
             i++; /* drop stray controls */
             continue;
         }
-        size_t cl = 0;
-        int gw = tui_next_cluster(bytes + i, len - i, &cl);
-        if (cl == 0)
-            break;
-        if (t->cr_pending)
-            stage_replace_row(t);
-        stage_glyph(t, bytes + i, cl, gw);
-        i += cl;
+        /* one validated UTF-8 glyph (carrying a truncated tail, replete
+         * with U+FFFD for an ill-formed one) */
+        i += stage_utf8_at(t, bytes, len, i);
     }
 }
 
@@ -1173,6 +1330,9 @@ static void sink_commit_begin(TuiTranscript *t, TuiRowSink *s)
     s->dest = SINK_COMMIT;
     s->buf = t->staging;
     s->width = t->width > 1 ? t->width : 80;
+    /* A byte-mode row ending here finishes its half-received character
+     * first (it prints, so it opens the row for the break below). */
+    stage_flush_utf8_carry(t);
     if (t->row_open) {
         /* a byte-mode partial row is open; a full rendered unit starts
          * on its own row */
@@ -1629,8 +1789,9 @@ static void transcript_trim(TuiTranscript *t)
  * below it (called at stream end / submit). */
 static void transcript_close_row(TuiTranscript *t)
 {
-    if (!t->row_open)
+    if (!t->row_open && t->utf8_carry_len == 0)
         return;
+    stage_flush_utf8_carry(t); /* a half-received character becomes U+FFFD */
     dynamic_buffer_append(t->staging, "\r\n", 2);
     transcript_row_reset(t);
     t->esc.state = 0;
