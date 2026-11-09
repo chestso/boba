@@ -1,6 +1,43 @@
 boba NEWS
 =========
 
+0.10.1 (pre-alpha)
+------------------
+
+stream: the commit path validates UTF-8 and owns the attribute state
+
+  Two faults in the byte path, both of which made the committed
+  scrollback depend on something the app cannot control.
+
+  Chunking. A child's output arrives in whatever chunks the read
+  returned. A truncated multibyte tail was dropped (`ab\xc3` + `\xa9z`
+  printed `ab`, then a stray continuation byte as if it were a
+  character), and a lead byte followed by a non-continuation swallowed
+  that byte. Each sequence is now validated against the Unicode tables
+  before it is staged: a tail cut off by the end of a message is carried
+  (at most three bytes of row state) and completed by the next message,
+  and an ill-formed sequence prints U+FFFD once per maximal subpart,
+  never swallowing the byte that broke it. Where the caller cut its
+  bytes cannot change what reaches the terminal.
+
+  Attribute state. boba passed SGR through verbatim and never reset
+  between writes, so a colour the app left open bled into the app's own
+  live region — the transcript bytes and the frame repaint leave in the
+  same write. The CR replace kept a replaced frame's SGR by scanning the
+  bytes out of staging, which is a copy of the state, not the state:
+  attributes set between the CR and the next glyph, or in an earlier
+  batch, could not be expressed at all. The transcript now tracks the
+  set the stream has left in effect — a byte log of the sequences since
+  the last reset, capped at a kilobyte, where the newest sequence wins.
+  A committed write ends in the default state, a write that continues an
+  open row restates the state first, a CR replace restates the state as
+  of its CR, and clear() drops it with the rest of the old chat. The
+  live frame records nothing; its attributes are its own, repainted
+  every frame.
+
+  This is the first published release: 0.10.0's carriage-return reading
+  of the system stream ships here too (see below).
+
 0.10.0 (pre-alpha)
 ------------------
 
