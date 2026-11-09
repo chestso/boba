@@ -439,6 +439,33 @@ void tui_runtime_clear_inline(TuiRuntime *runtime);
 void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
                                   size_t len);
 
+/* tui_runtime_transcript_write with options. `flags` is a bit set:
+ *
+ * TUI_TRANSCRIPT_REPLACE_OPEN_ROW — the bytes REPLACE the open partial row
+ *   instead of extending it. The row a previous write left open is erased
+ *   (the cursor goes back up its rows, to its first column, and clears to
+ *   the end of the screen: the frame below it is already erased) and the
+ *   bytes are written from there, in the same one-call, one-baseline,
+ *   one-write paint as every transcript write. The open row's column count
+ *   restarts from 0. With no open row (or outside inline mode) the flag
+ *   does nothing and the write is an ordinary one.
+ *
+ *   The rows to go back up are derived from the row's display columns and
+ *   the terminal width, the arithmetic extending a row already trusts; a
+ *   row that scrolled off the top of the screen cannot be reached, and the
+ *   terminal clamps the move there. A wide glyph that wraps early at the
+ *   right edge can make a real terminal use one row more than the count
+ *   (the extend path shares that edge; both would need a width-aware wrap
+ *   model to fix).
+ *
+ * Unknown bits are ignored here (the transcript masks the message flags
+ * before it gets this far, so a newer flag reads as the legacy one).
+ * Flags 0 is tui_runtime_transcript_write. */
+#define TUI_TRANSCRIPT_REPLACE_OPEN_ROW 0x1u
+
+void tui_runtime_transcript_write_ex(TuiRuntime *runtime, const char *bytes,
+                                     size_t len, unsigned flags);
+
 /* Attach a streaming transcript (stream.h) to the runtime. The
  * transcript's commit pass then runs at the top of every
  * tui_runtime_flush: all emission units staged since the last flush

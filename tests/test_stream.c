@@ -2243,6 +2243,430 @@ static void test_container_open_finalizes_live_block(void)
     h_free(h);
 }
 
+/* ------------------------------------------------------------------ */
+/* Carriage return replaces the open row (TUI_STREAM_TEXT_CR_REPLACES)  */
+/* ------------------------------------------------------------------ */
+
+#define CR_SEND(h, lit)                                        \
+    h_send((h), tui_msg_stream_text_ex(-1, (lit), strlen(lit), \
+                                       TUI_STREAM_TEXT_CR_REPLACES))
+#define REWIND_UP(n) "\x1b[" #n "A\r\x1b[J"
+
+/* Everything the runtime wrote after `mark` bytes of output. */
+static const char *h_after(H *h, size_t mark)
+{
+    return h_read(h) + mark;
+}
+
+/* Frames inside one message collapse in staging: nothing but the last
+ * frame is ever written, and no rewind is needed. */
+static void test_cr_replaces_within_one_batch(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "10%\r50%\r100%\n");
+    h_flush(h);
+    const char *out = h_read(h);
+    assert(strstr(out, "100%\r\n") != NULL);
+    assert(strstr(out, "10%") == NULL || strstr(out, "10%") > strstr(out, "100%"));
+    assert(strstr(out, "50%") == NULL);
+    assert(strstr(out, "\x1b[J") == NULL); /* staged only: no screen rewind */
+    assert(h->rt->inline_partial_open == 0);
+    assert(tui_transcript_commit_count(h->t) == 1);
+
+    h_free(h);
+}
+
+/* A frame already committed (an earlier flush) is rewound on the screen:
+ * up its one row, to column 0, clear, then the new frame — in the same
+ * write that carries it. The open row's column count restarts. */
+static void test_cr_replaces_row_open_from_earlier_batch(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "10%");
+    h_flush(h);
+    assert(h->rt->inline_partial_open == 1);
+    assert(h->rt->inline_partial_cols == 3);
+    size_t mark = strlen(h_read(h));
+
+    CR_SEND(h, "\r50%");
+    h_flush(h);
+    const char *out = h_after(h, mark);
+    assert(strstr(out, REWIND_UP(1) "50%") != NULL);
+    assert(h->rt->inline_partial_open == 1);
+    assert(h->rt->inline_partial_cols == 3);
+
+    /* a SHORTER frame: the row is replaced, the old tail does not stay */
+    mark = strlen(h_read(h));
+    CR_SEND(h, "\r7%");
+    h_flush(h);
+    out = h_after(h, mark);
+    assert(strstr(out, REWIND_UP(1) "7%") != NULL);
+    assert(h->rt->inline_partial_cols == 2);
+
+    /* and the row still ends normally */
+    mark = strlen(h_read(h));
+    CR_SEND(h, "\r100%\n");
+    h_flush(h);
+    out = h_after(h, mark);
+    assert(strstr(out, REWIND_UP(1) "100%\r\n") != NULL);
+    assert(h->rt->inline_partial_open == 0);
+
+    h_free(h);
+}
+
+/* A CR alone changes nothing on screen, in the transcript or in the
+ * runtime: the row keeps showing its last frame until something prints. */
+static void test_cr_alone_keeps_the_last_frame(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "50%");
+    h_flush(h);
+    unsigned long commits = tui_transcript_commit_count(h->t);
+    size_t mark = strlen(h_read(h));
+
+    CR_SEND(h, "\r");
+    h_flush(h);
+    assert(tui_transcript_commit_count(h->t) == commits); /* nothing to write */
+    assert(strlen(h_read(h)) == mark);
+    assert(h->rt->inline_partial_open == 1);
+    assert(h->rt->inline_partial_cols == 3);
+
+    /* the next frame performs the replace */
+    CR_SEND(h, "60%\n");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), REWIND_UP(1) "60%\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* CR LF is a line break and nothing else, also when the two arrive in
+ * different messages: the frame stays, nothing is rewound. */
+static void test_cr_lf_split_across_messages_is_a_break(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "done\r");
+    h_flush(h);
+    size_t mark = strlen(h_read(h));
+    CR_SEND(h, "\nnext\n");
+    h_flush(h);
+    const char *out = h_after(h, mark);
+    assert(strstr(out, "\x1b[J") == NULL);
+    assert(strstr(out, "next\r\n") != NULL);
+    assert(strstr(h_read(h), "done") != NULL);
+
+    h_free(h);
+}
+
+/* A row ended by stream end (or submit) while a CR is pending keeps its
+ * last frame; the CR does not leak onto the next row. */
+static void test_cr_pending_dies_with_the_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "50%\r");
+    h_send(h, tui_msg_stream_end(-1));
+    h_flush(h);
+    assert(strstr(h_read(h), "50%") != NULL);
+    size_t mark = strlen(h_read(h));
+
+    CR_SEND(h, "next\n");
+    h_flush(h);
+    const char *out = h_after(h, mark);
+    assert(strstr(out, "\x1b[J") == NULL);
+    assert(strstr(out, "next\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* SGR is state, not content: the attributes of a replaced frame survive
+ * it, and attributes set between the CR and the first glyph stay. */
+static void test_cr_keeps_sgr_of_the_replaced_frame(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "\x1b[32m50%\r100%\n");
+    h_flush(h);
+    const char *out = h_read(h);
+    const char *sgr = strstr(out, "\x1b[32m");
+    const char *frame = strstr(out, "100%");
+    assert(sgr && frame && sgr < frame);
+    assert(strstr(out, "50%") == NULL);
+
+    size_t mark = strlen(h_read(h));
+    CR_SEND(h, "x\r\x1b[1;31my\n");
+    h_flush(h);
+    out = h_after(h, mark);
+    sgr = strstr(out, "\x1b[1;31m");
+    frame = strstr(out, "y\r\n");
+    assert(sgr && frame && sgr < frame);
+    assert(strchr(out, 'x') == NULL);
+
+    h_free(h);
+}
+
+/* An open row that soft-wrapped is rewound across all of its rows. */
+static void test_cr_replace_rewinds_a_wrapped_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1); /* width 60 */
+    assert(h);
+
+    char run[131];
+    memset(run, 'w', 130); /* 130 cols: three physical rows (60+60+10) */
+    h_send(h, tui_msg_stream_text_ex(-1, run, 130, TUI_STREAM_TEXT_CR_REPLACES));
+    h_flush(h);
+    assert(h->rt->inline_partial_cols == 130);
+    size_t mark = strlen(h_read(h));
+
+    CR_SEND(h, "\rshort");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), REWIND_UP(3) "short") != NULL);
+    assert(h->rt->inline_partial_cols == 5);
+
+    h_free(h);
+}
+
+/* A last glyph that exactly filled a row still counts ONE row: the
+ * pending wrap made the frame's \r\n land on the row after it. */
+static void test_cr_replace_rewinds_an_exactly_full_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1); /* width 60 */
+    assert(h);
+
+    char run[61];
+    memset(run, 'f', 60);
+    h_send(h, tui_msg_stream_text_ex(-1, run, 60, TUI_STREAM_TEXT_CR_REPLACES));
+    h_flush(h);
+    size_t mark = strlen(h_read(h));
+
+    CR_SEND(h, "\rg");
+    h_flush(h);
+    assert(strstr(h_after(h, mark), REWIND_UP(1) "g") != NULL);
+
+    h_free(h);
+}
+
+/* A CR on a row with nothing on it has nothing to replace. */
+static void test_cr_on_an_empty_row_is_a_noop(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "\rabc\n");
+    h_flush(h);
+    const char *out = h_read(h);
+    assert(strstr(out, "abc\r\n") != NULL);
+    assert(strstr(out, "\x1b[J") == NULL);
+
+    h_free(h);
+}
+
+/* A tab prints too: it is a first byte on the row that replaces it, and
+ * its stop is measured from column 0 of the new frame. */
+static void test_cr_then_tab_replaces(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "old frame\r\tx\n");
+    h_flush(h);
+    const char *out = h_read(h);
+    assert(strstr(out, "old frame") == NULL);
+    assert(strstr(out, "        x\r\n") != NULL); /* 8 spaces, then x */
+
+    h_free(h);
+}
+
+/* Rows that ended before the CR are never touched: only the open row is
+ * replaced, wherever in the batch it began. */
+static void test_cr_replaces_only_the_open_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "a\nb\rc\n");
+    h_flush(h);
+    const char *out = h_read(h);
+    assert(strstr(out, "a\r\nc\r\n") != NULL);
+    assert(strchr(out, 'b') == NULL);
+    assert(strstr(out, "\x1b[J") == NULL);
+
+    /* a row open from an earlier batch that a LATER row's CR must not
+     * rewind: the batch ended the carried row with its own LF first */
+    CR_SEND(h, "carried");
+    h_flush(h);
+    size_t mark = strlen(h_read(h));
+    CR_SEND(h, " tail\nnext\rreplaced\n");
+    h_flush(h);
+    out = h_after(h, mark);
+    assert(strstr(out, "\x1b[J") == NULL);
+    assert(strstr(out, "replaced\r\n") != NULL);
+    assert(strstr(out, "next") == NULL);
+    assert(strstr(out, "tail\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* The default reading of a bare CR is unchanged: a row break. */
+static void test_plain_text_cr_still_breaks_rows(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    h_send(h, tui_msg_stream_text(-1, "10%\r50%\r100%\n", 13));
+    h_flush(h);
+    assert(strstr(h_read(h), "10%\r\n50%\r\n100%\r\n") != NULL);
+
+    /* flag 0 through the _ex constructor is the same message, and an
+     * unknown bit is ignored */
+    size_t mark = strlen(h_read(h));
+    h_send(h, tui_msg_stream_text_ex(-1, "a\rb\n", 4, 0x80u));
+    h_flush(h);
+    assert(strstr(h_after(h, mark), "a\r\nb\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* The pending CR is the ROW's state: a later message without the flag
+ * that prints on that row still replaces the frame it marked. */
+static void test_cr_pending_is_row_state_not_message_state(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "50%\r");
+    h_flush(h);
+    size_t mark = strlen(h_read(h));
+    h_send(h, tui_msg_stream_text(-1, "done\n", 5));
+    h_flush(h);
+    assert(strstr(h_after(h, mark), REWIND_UP(1) "done\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* Clear orphans the open row: the next write starts below it and must
+ * not rewind into the old chat, whatever was pending. */
+static void test_cr_state_does_not_survive_clear(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    CR_SEND(h, "50%\r");
+    h_flush(h);
+    h_send(h, tui_msg_transcript_clear());
+    h_flush(h);
+    size_t mark = strlen(h_read(h));
+    CR_SEND(h, "fresh\n");
+    h_flush(h);
+    const char *out = h_after(h, mark);
+    assert(strstr(out, "\x1b[J") == NULL);
+    assert(strstr(out, "fresh\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* The IMAGE gate: bytes held behind a deferred unit replay in order, and
+ * the CR reading travels with them. */
+static void test_cr_replace_through_the_image_gate(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    const TuiClassifier *classifiers[1] = { &image_cls };
+    g_measure_enabled = 1;
+    H *h = h_new(streams, classifiers, 1);
+    g_measure_enabled = 0;
+    assert(h);
+
+    h->rt->probe_state = 2;
+    h->rt->probe_deadline_ms = 0;
+    h_send(h, tui_msg_stream_image(0, "!img a:b", 8));
+    CR_SEND(h, "10%\r50%\r100%\n");
+    h_flush(h);
+    assert(tui_transcript_commit_gated(h->t) == 1);
+
+    h_profile_kitty(h);
+    h_flush(h);
+    const char *out = h_read(h);
+    const char *img = strstr(out, "\x1b_Ga=T,f=100");
+    const char *frame = strstr(out, "100%\r\n");
+    assert(img && frame && frame > img);
+    assert(strstr(out, "50%") == NULL);
+
+    h_free(h);
+}
+
+/* Memory: a long run of frames in one message leaves one frame in
+ * staging, not the run. */
+static void test_cr_many_frames_collapse_in_staging(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    DynamicBuffer *frames = dynamic_buffer_create(4096);
+    assert(frames);
+    char one[32];
+    for (int i = 0; i < 2000; i++) {
+        int n = snprintf(one, sizeof(one), "\r%3d%%", i % 100);
+        dynamic_buffer_append(frames, one, (size_t)n);
+    }
+    dynamic_buffer_append(frames, "\n", 1);
+    h_send(h, tui_msg_stream_text_ex(-1, frames->data, frames->len,
+                                     TUI_STREAM_TEXT_CR_REPLACES));
+    h_flush(h);
+    assert(strlen(h_read(h)) < 200); /* the last frame and chrome, not 2000 */
+    assert(strstr(h_read(h), " 99%\r\n") != NULL);
+
+    dynamic_buffer_destroy(frames);
+    h_free(h);
+}
+
+/* The runtime half on its own: the flag with no open row is an ordinary
+ * write, and with one it rewinds exactly the open row. */
+static void test_runtime_write_ex_replace_needs_an_open_row(void)
+{
+    TuiStreamSpec streams[1] = { { "content" } };
+    H *h = h_new(streams, NULL, 1);
+    assert(h);
+
+    tui_runtime_transcript_write_ex(h->rt, "plain\r\n", 7,
+                                    TUI_TRANSCRIPT_REPLACE_OPEN_ROW);
+    assert(strstr(h_read(h), "\x1b[J") == NULL);
+    assert(strstr(h_read(h), "plain\r\n") != NULL);
+
+    tui_runtime_transcript_write(h->rt, "open", 4);
+    assert(h->rt->inline_partial_open == 1);
+    size_t mark = strlen(h_read(h));
+    tui_runtime_transcript_write_ex(h->rt, "new", 3,
+                                    TUI_TRANSCRIPT_REPLACE_OPEN_ROW);
+    assert(strstr(h_after(h, mark), REWIND_UP(1) "new") != NULL);
+    assert(h->rt->inline_partial_cols == 3);
+
+    h_free(h);
+}
+
 int main(void)
 {
     printf("test_stream: streaming transcript component\n");
@@ -2291,6 +2715,23 @@ int main(void)
     RUN_TEST(test_committed_byte_run_is_not_width_wrapped);
     RUN_TEST(test_partial_row_wrapped_extends_at_column);
     RUN_TEST(test_partial_row_exact_wrap_extends_on_row);
+    RUN_TEST(test_cr_replaces_within_one_batch);
+    RUN_TEST(test_cr_replaces_row_open_from_earlier_batch);
+    RUN_TEST(test_cr_alone_keeps_the_last_frame);
+    RUN_TEST(test_cr_lf_split_across_messages_is_a_break);
+    RUN_TEST(test_cr_pending_dies_with_the_row);
+    RUN_TEST(test_cr_keeps_sgr_of_the_replaced_frame);
+    RUN_TEST(test_cr_replace_rewinds_a_wrapped_row);
+    RUN_TEST(test_cr_replace_rewinds_an_exactly_full_row);
+    RUN_TEST(test_cr_on_an_empty_row_is_a_noop);
+    RUN_TEST(test_cr_then_tab_replaces);
+    RUN_TEST(test_cr_replaces_only_the_open_row);
+    RUN_TEST(test_plain_text_cr_still_breaks_rows);
+    RUN_TEST(test_cr_pending_is_row_state_not_message_state);
+    RUN_TEST(test_cr_state_does_not_survive_clear);
+    RUN_TEST(test_cr_replace_through_the_image_gate);
+    RUN_TEST(test_cr_many_frames_collapse_in_staging);
+    RUN_TEST(test_runtime_write_ex_replace_needs_an_open_row);
     printf("test_stream: %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

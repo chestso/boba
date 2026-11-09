@@ -397,8 +397,56 @@ TuiMsg tui_msg_stream_delta(int stream_id, const char *text, size_t len);
  * panels, command replies, error bodies. LF is normalized to CRLF by
  * boba, and escape bytes are scanned: SGR styling survives, framing
  * (cursor movement, EL, OSC, APC/DCS) is dropped — no raw \r and no
- * app-controlled cursor bytes ever reach the scrollback. */
+ * app-controlled cursor bytes ever reach the scrollback. A bare CR is a
+ * row break (the legacy reading); see tui_msg_stream_text_ex for the
+ * carriage-return reading. */
 TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len);
+
+/* tui_msg_stream_text with options. `flags` is a bit set — the reading
+ * belongs to the producer of the bytes, so it rides the MESSAGE, and the
+ * system stream is the only place it can mean anything (this constructor
+ * is byte mode: user streams classify deltas instead):
+ *
+ * TUI_STREAM_TEXT_CR_REPLACES — read the bytes as a TERMINAL's output
+ *   (a child process's, a serial line's): a bare CR is a carriage return,
+ *   not a line break.
+ *
+ *   A CR leaves the open row exactly as it is. The first glyph or tab
+ *   that follows it REPLACES the row's content with what comes next, so a
+ *   progress meter (`10%\r50%\r100%\n`) occupies one row and ends on its
+ *   last frame, and a meter that stops at a CR keeps showing its last
+ *   frame. `CR LF` is an ordinary line break (also when the two arrive in
+ *   different messages). A CR on a row with nothing on it does nothing.
+ *
+ *   The replacement happens on the open row only — the row the stream is
+ *   still writing, which is the one place boba may still change what is on
+ *   the screen. Rows already ended with a line break are never touched. It
+ *   costs no latency and holds nothing back: every byte is committed in
+ *   the flush that received it, and the next frame rewrites the row in the
+ *   same atomic write (runtime.h, TUI_TRANSCRIPT_REPLACE_OPEN_ROW).
+ *
+ *   Where it differs from a terminal, deliberately: the new frame replaces
+ *   the whole row rather than overwriting its first columns, so a shorter
+ *   frame never leaves the tail of a longer one behind. Programs that need
+ *   the tail are rare; programs that rely on the row being cleared (`CR`
+ *   then `ESC[K`, or padding) are the norm, and `ESC[K` itself is a
+ *   framing sequence boba drops. SGR attributes in a replaced frame are
+ *   kept (they are state, not content), so a colour set before the CR still
+ *   applies to the frame after it.
+ *
+ *   Limit: a row that has soft-wrapped past the top of the screen cannot
+ *   be rewound beyond it; the part already in the terminal's scrollback
+ *   stays.
+ *
+ * Unknown bits are masked off here (TUI_STREAM_TEXT_ALL is the set this
+ * version understands), so a caller that passes a newer flag to an older
+ * boba keeps the legacy reading rather than an undefined one. Flags 0 is
+ * tui_msg_stream_text. */
+#define TUI_STREAM_TEXT_CR_REPLACES 0x1u
+#define TUI_STREAM_TEXT_ALL         (TUI_STREAM_TEXT_CR_REPLACES)
+
+TuiMsg tui_msg_stream_text_ex(int stream_id, const char *text, size_t len,
+                              unsigned flags);
 
 /* Whole image unit for a user stream (stream_id >= 0). The block text
  * is copied and must be markdown-shaped ("![alt](src)"), without trailing

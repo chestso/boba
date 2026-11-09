@@ -179,6 +179,8 @@ typedef struct
     int stream_id; /* user stream index, or -1 for the system stream */
     char *text;    /* owned; also null-terminated for convenience */
     size_t len;
+    unsigned flags; /* TUI_STREAM_TEXT_* (stream.h); 0 for every constructor
+                     * but tui_msg_stream_text_ex */
 } TuiStreamMsg;
 
 /* Transcript submit payload (TUI_MSG_TRANSCRIPT_SUBMIT). Owned like

@@ -1160,10 +1160,13 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
  * write's would each be presented as a frame of their own (the caret
  * hop). */
 static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
-                                   size_t len)
+                                   size_t len, unsigned flags)
 {
-    int extend = runtime->inline_partial_open && runtime->in_inline_mode;
+    int open = runtime->inline_partial_open && runtime->in_inline_mode;
+    int replace = open && (flags & TUI_TRANSCRIPT_REPLACE_OPEN_ROW);
+    int extend = open && !replace;
     int cols = extend ? runtime->inline_partial_cols : 0;
+    int old_cols = runtime->inline_partial_cols;
 
     /* Erase the current frame in place; the cursor lands at frame
      * row 0 (or wherever it is with no frame — nothing to erase). */
@@ -1181,6 +1184,23 @@ static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
      * needed. See the row/column derivation: the append point is
      * cols/width rows below the row the run started on, col
      * cols%width. */
+    if (replace) {
+        /* Replace path: the frame sat one row below the open row, and
+         * `\r\n` advanced exactly one row from the row carrying its LAST
+         * glyph, so the row's first row is ceil(old_cols / width) rows up
+         * (one row for an open row that holds only zero-width bytes). The
+         * same count holds when the last glyph exactly filled a physical
+         * row: the pending wrap made `\r\n` land on the row after it.
+         * The frame is already erased, so nothing below the cursor is
+         * live: ED clears the old row's every wrapped row at once. */
+        int width = runtime->term_width > 1 ? runtime->term_width : 80;
+        int rows = old_cols > 0 ? (old_cols + width - 1) / width : 1;
+        char up_buf[16];
+        ansi_format_cursor_up(up_buf, sizeof(up_buf), rows);
+        runtime_emit_str(runtime, up_buf);
+        runtime_emit_str(runtime, "\r\x1b[J");
+    }
+
     if (extend) {
         int width = runtime->term_width > 1 ? runtime->term_width : 80;
         int up = (cols > 0 && cols % width == 0) ? 0 : 1;
@@ -1199,10 +1219,10 @@ static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
      * leaves the row open for the next call to extend. */
     runtime_emit(runtime, bytes, len);
 
-    int open = bytes[len - 1] != '\n';
+    int ends_open = bytes[len - 1] != '\n';
     TuiAnsiScan esc = { 0 };
     int col = tui_rowcols_advance(cols, bytes, len, &esc);
-    if (open) {
+    if (ends_open) {
         runtime->inline_partial_open = 1;
         runtime->inline_partial_cols = col;
         /* move below the open row so the live region renders on its
@@ -1225,14 +1245,20 @@ static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
     tui_runtime_flush(runtime);
 }
 
-void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
-                                  size_t len)
+void tui_runtime_transcript_write_ex(TuiRuntime *runtime, const char *bytes,
+                                     size_t len, unsigned flags)
 {
     if (!runtime || !bytes || len == 0)
         return;
     runtime_paint_begin(runtime);
-    transcript_write_paint(runtime, bytes, len);
+    transcript_write_paint(runtime, bytes, len, flags);
     runtime_paint_end(runtime);
+}
+
+void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
+                                  size_t len)
+{
+    tui_runtime_transcript_write_ex(runtime, bytes, len, 0);
 }
 
 /* Attach a streaming transcript; the commit pass then runs at the top

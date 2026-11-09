@@ -144,6 +144,7 @@ typedef struct TuiDefer
     TuiBlockKind kind;
     size_t off, len;
     int image_id;
+    unsigned flags; /* TDEFER_BYTES: the message's TUI_STREAM_TEXT_* flags */
 } TuiDefer;
 
 struct TuiTranscript
@@ -159,6 +160,29 @@ struct TuiTranscript
     int row_open;    /* the output row (staged or committed) is open */
     int row_col;     /* display cols written on that row */
     TuiAnsiScan esc; /* split escape scan state (see above) */
+
+    /* Carriage return as a row REPLACE (TUI_STREAM_TEXT_CR_REPLACES).
+     *
+     * A CR does not touch the row: the glyphs already on it stay put,
+     * exactly as on a terminal, and only the first PRINTING byte after
+     * it replaces them. So a progress meter that ends at a CR keeps
+     * showing its last frame, and `CR LF` is a plain line break.
+     *
+     *   cr_pending  a CR was seen on the open row and nothing printed
+     *               since (cleared by every row close, see
+     *               transcript_row_reset)
+     *   cr_mark     staging length at the (last) CR: the bytes below it
+     *               are the frame about to be replaced, the bytes above
+     *               it (attributes only, nothing prints between) stay
+     *   carried_open the runtime holds an open row from an EARLIER
+     *               commit: a replace that reaches back to the batch's
+     *               first byte must rewind that row on the screen
+     *   replace_open this batch's first row replaces the carried row
+     *               (handed to the runtime with the write)           */
+    int cr_pending;
+    size_t cr_mark;
+    int carried_open;
+    int replace_open;
 
     int orphan_partial; /* clear() while a row was open: forget, emit nothing */
     unsigned long commit_count;
@@ -196,6 +220,16 @@ static void transcript_close_row(TuiTranscript *t);
 static int defer_active(const TuiTranscript *t);
 static int defer_push(TuiTranscript *t, int type, int stream_idx,
                       TuiBlockKind kind, size_t off, size_t len, int image_id);
+
+/* The output row closed: no open row, no columns, and no CR waiting to
+ * replace a row that no longer exists. The ONE place a row closes, so a
+ * pending CR can never outlive its row and replace the wrong one. */
+static void transcript_row_reset(TuiTranscript *t)
+{
+    t->row_open = 0;
+    t->row_col = 0;
+    t->cr_pending = 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Display-column accounting                                           */
@@ -254,8 +288,7 @@ int tui_rowcols_advance(int col, const char *bytes, size_t len,
 static void stage_row_break(TuiTranscript *t)
 {
     dynamic_buffer_append(t->staging, "\r\n", 2);
-    t->row_open = 0;
-    t->row_col = 0;
+    transcript_row_reset(t);
 }
 
 /* Append glyph bytes. The commit path inserts NO width break — the
@@ -290,11 +323,75 @@ static void stage_escape(TuiTranscript *t, const char *bytes, size_t len,
     }
 }
 
+/* A glyph (or tab) is about to land on a row that a CR marked: replace
+ * the frame already on it.
+ *
+ * The frame is the bytes of the open row below cr_mark. When the row began
+ * in THIS batch (a row terminator sits below the mark), those bytes are
+ * staged and simply drop out of staging; when it began in an earlier
+ * batch they were already written, so the runtime is told to rewind that
+ * row (replace_open) and whatever this batch staged for it drops out too.
+ *
+ * The SGR sequences inside the dropped frame are KEPT, in order: they are
+ * zero-width state, not content. A terminal's CR leaves the attribute
+ * state alone, so `ESC[32m 50% CR 100%` stays green, and dropping the
+ * escape with the glyphs would repaint the new frame in the default
+ * colour. Staging holds only complete SGR sequences and glyph bytes
+ * between a row's terminator and its end (every other escape was dropped
+ * on the way in), so the keep pass is a plain ESC..final-byte walk, and it
+ * compacts in place: no scratch, no allocation. */
+static void stage_replace_row(TuiTranscript *t)
+{
+    DynamicBuffer *b = t->staging;
+    size_t mark = t->cr_mark <= b->len ? t->cr_mark : b->len;
+    size_t start = 0;
+    int in_batch = 0;
+    for (size_t k = mark; k > 0; k--) {
+        if (b->data[k - 1] == '\n') {
+            start = k;
+            in_batch = 1;
+            break;
+        }
+    }
+
+    size_t w = start;
+    for (size_t r = start; r < mark;) {
+        if ((unsigned char)b->data[r] != 0x1b) {
+            r++;
+            continue;
+        }
+        size_t e = r + 1;
+        if (e < mark && b->data[e] == '[') {
+            e++;
+            while (e < mark && (unsigned char)b->data[e] < 0x40)
+                e++; /* parameter + intermediate bytes */
+        }
+        if (e >= mark || b->data[e] != 'm')
+            break; /* not a whole SGR: nothing staged ever looks like this */
+        memmove(b->data + w, b->data + r, e - r + 1);
+        w += e - r + 1;
+        r = e + 1;
+    }
+    memmove(b->data + w, b->data + mark, b->len - mark);
+    b->len = w + (b->len - mark);
+
+    if (!in_batch && t->carried_open)
+        t->replace_open = 1;
+    t->cr_pending = 0;
+    t->row_col = 0;
+}
+
 /* Normalize raw byte-run text into the staging buffer. Handles
- * LF/CRLF/CR -> \r\n, hard tabs (physical-column stops), ANSI
- * passthrough with no width wrap (the terminal soft-wraps), and no raw
- * \r on output. */
-static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
+ * LF/CRLF -> \r\n, hard tabs (physical-column stops), ANSI passthrough
+ * with no width wrap (the terminal soft-wraps), and no raw \r on output.
+ *
+ * A bare CR is a row break by default. With TUI_STREAM_TEXT_CR_REPLACES it
+ * is a carriage return: it marks the open row, and the first glyph or tab
+ * after it replaces that row (stage_replace_row). `CR LF` is a plain break
+ * either way, also when the LF arrives in a later message (the pending
+ * mark dies with the row). A CR on a row with nothing on it does nothing. */
+static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len,
+                        unsigned flags)
 {
     size_t i = 0;
     while (i < len) {
@@ -305,9 +402,19 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
             continue;
         }
         if (c == '\r') {
-            if (i + 1 < len && bytes[i + 1] == '\n')
-                i++;
-            stage_row_break(t);
+            if (i + 1 < len && bytes[i + 1] == '\n') {
+                stage_row_break(t);
+                i += 2;
+                continue;
+            }
+            if (flags & TUI_STREAM_TEXT_CR_REPLACES) {
+                if (t->row_open) {
+                    t->cr_pending = 1;
+                    t->cr_mark = t->staging->len;
+                }
+            } else {
+                stage_row_break(t);
+            }
             i++;
             continue;
         }
@@ -317,6 +424,8 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
             continue;
         }
         if (c == '\t') {
+            if (t->cr_pending)
+                stage_replace_row(t);
             /* Tab stops sit at physical columns; the committed row may
              * have soft-wrapped, so derive the physical column from
              * the running display total. */
@@ -341,6 +450,8 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len)
         int gw = tui_next_cluster(bytes + i, len - i, &cl);
         if (cl == 0)
             break;
+        if (t->cr_pending)
+            stage_replace_row(t);
         stage_glyph(t, bytes + i, cl, gw);
         i += cl;
     }
@@ -361,7 +472,11 @@ static void stream_stage_range(TuiTranscript *t, TuiStream *s, size_t upto)
             defer_push(t, TDEFER_BYTES, (int)(s - t->streams),
                        TUI_BLOCK_RAW, s->stage_pos, upto - s->stage_pos, 0);
         } else {
-            stage_bytes(t, s->raw->data + s->stage_pos, upto - s->stage_pos);
+            /* Flags 0: byte-mode containers are a user stream's unlabeled
+             * fence, and every reading flag rides a TUI_MSG_STREAM_TEXT,
+             * which only the system stream takes (see the update). */
+            stage_bytes(t, s->raw->data + s->stage_pos, upto - s->stage_pos,
+                        0);
         }
         s->stage_pos = upto;
     }
@@ -400,8 +515,7 @@ static void sink_row_break(TuiRowSink *s)
     if (s->dest == SINK_COMMIT) {
         dynamic_buffer_append(s->buf, "\r\n", 2);
         if (s->t) {
-            s->t->row_open = 0;
-            s->t->row_col = 0;
+            transcript_row_reset(s->t);
             s->t->esc.state = 0;
             s->t->esc.len = 0;
         }
@@ -625,8 +739,7 @@ void tui_row_end(TuiRowSink *s)
             s->open = 0;
             s->col = 0;
             if (s->t) {
-                s->t->row_open = 0;
-                s->t->row_col = 0;
+                transcript_row_reset(s->t);
             }
             return;
         }
@@ -1005,6 +1118,7 @@ static int defer_push(TuiTranscript *t, int type, int stream_idx,
     d->off = off;
     d->len = len;
     d->image_id = image_id;
+    d->flags = 0;
     return 0;
 }
 
@@ -1034,7 +1148,7 @@ static void defer_drain(TuiTranscript *t)
                  * finalize may have cleared it while the unit was held */
                 size_t avail = s->raw->len > d->off ? s->raw->len - d->off : 0;
                 if (d->len <= avail)
-                    stage_bytes(t, s->raw->data + d->off, d->len);
+                    stage_bytes(t, s->raw->data + d->off, d->len, d->flags);
             }
             break;
         default:
@@ -1063,8 +1177,7 @@ static void sink_commit_begin(TuiTranscript *t, TuiRowSink *s)
         /* a byte-mode partial row is open; a full rendered unit starts
          * on its own row */
         dynamic_buffer_append(t->staging, "\r\n", 2);
-        t->row_open = 0;
-        t->row_col = 0;
+        transcript_row_reset(t);
         t->esc.state = 0;
         t->esc.len = 0;
     }
@@ -1122,8 +1235,7 @@ static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
                                     rows, &sink, t->cfg.user_data);
                 sink_commit_end(&sink);
                 /* unit rows always end terminated */
-                t->row_open = 0;
-                t->row_col = 0;
+                transcript_row_reset(t);
                 t->esc.state = 0;
                 t->esc.len = 0;
             }
@@ -1139,8 +1251,7 @@ static void emit_unit(TuiTranscript *t, TuiStream *s, TuiBlockKind kind,
                         t->cfg.user_data);
     sink_commit_end(&sink);
     /* unit rows always end terminated */
-    t->row_open = 0;
-    t->row_col = 0;
+    transcript_row_reset(t);
     t->esc.state = 0;
     t->esc.len = 0;
 }
@@ -1521,8 +1632,7 @@ static void transcript_close_row(TuiTranscript *t)
     if (!t->row_open)
         return;
     dynamic_buffer_append(t->staging, "\r\n", 2);
-    t->row_open = 0;
-    t->row_col = 0;
+    transcript_row_reset(t);
     t->esc.state = 0;
     t->esc.len = 0;
 }
@@ -1555,8 +1665,9 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
     if (t->orphan_partial) {
         tui_runtime_transcript_orphan(rt);
         t->orphan_partial = 0;
-        t->row_open = 0;
-        t->row_col = 0;
+        transcript_row_reset(t);
+        t->carried_open = 0;
+        t->replace_open = 0;
         t->esc.state = 0;
         t->esc.len = 0;
     }
@@ -1565,9 +1676,17 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
     if (t->staging->len == 0)
         return 0;
 
-    tui_runtime_transcript_write(rt, t->staging->data, t->staging->len);
+    tui_runtime_transcript_write_ex(
+        rt, t->staging->data, t->staging->len,
+        t->replace_open ? TUI_TRANSCRIPT_REPLACE_OPEN_ROW : 0);
     t->commit_count++;
     dynamic_buffer_clear(t->staging);
+    /* What the runtime now holds open is what the next batch may have to
+     * rewind; a CR that is still pending keeps its meaning (the row shows
+     * its last frame), but its mark pointed into the staging just cleared. */
+    t->carried_open = t->row_open;
+    t->replace_open = 0;
+    t->cr_mark = 0;
     transcript_trim(t);
     return 1;
 }
@@ -1603,6 +1722,14 @@ TuiMsg tui_msg_stream_delta(int stream_id, const char *text, size_t len)
 TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len)
 {
     return stream_text_msg(TUI_MSG_STREAM_TEXT, stream_id, text, len);
+}
+
+TuiMsg tui_msg_stream_text_ex(int stream_id, const char *text, size_t len,
+                              unsigned flags)
+{
+    TuiMsg msg = stream_text_msg(TUI_MSG_STREAM_TEXT, stream_id, text, len);
+    msg.data.stream.flags = flags & TUI_STREAM_TEXT_ALL;
+    return msg;
 }
 
 TuiMsg tui_msg_stream_image(int stream_id, const char *text, size_t len)
@@ -1786,10 +1913,12 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
         dynamic_buffer_append(s->raw, msg.data.stream.text,
                               msg.data.stream.len);
         if (defer_active(t)) {
-            defer_push(t, TDEFER_BYTES, (int)t->n_user, TUI_BLOCK_RAW, off,
-                       msg.data.stream.len, 0);
+            if (defer_push(t, TDEFER_BYTES, (int)t->n_user, TUI_BLOCK_RAW, off,
+                           msg.data.stream.len, 0) == 0)
+                t->defer[t->defer_len - 1].flags = msg.data.stream.flags;
         } else {
-            stage_bytes(t, msg.data.stream.text, msg.data.stream.len);
+            stage_bytes(t, msg.data.stream.text, msg.data.stream.len,
+                        msg.data.stream.flags);
         }
         return tui_update_result_none();
     }
@@ -1855,8 +1984,10 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
          * scrollback. */
         if (t->row_open)
             t->orphan_partial = 1;
-        t->row_open = 0;
-        t->row_col = 0;
+        transcript_row_reset(t);
+        t->carried_open = 0;
+        t->replace_open = 0;
+        t->cr_mark = 0;
         t->esc.state = 0;
         t->esc.len = 0;
         t->defer_len = 0;

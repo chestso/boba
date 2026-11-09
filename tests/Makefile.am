@@ -54,16 +54,17 @@ test_text_SOURCES = test_text.c
 # can never silently slip through. The mini-apps the scripts drive are
 # in check_PROGRAMS, so automake builds them before TESTS runs.
 TMUX_TESTS = tmux/scroll_multiline.sh tmux/focus_shift_tab.sh tmux/wrap_multiline.sh tmux/wrap_inline.sh tmux/width_model.sh \
-	tmux/overflow_alt.sh tmux/overflow_inline.sh tmux/overflow_wrap_resize.sh
+	tmux/overflow_alt.sh tmux/overflow_inline.sh tmux/overflow_wrap_resize.sh tmux/stream_cr.sh
 
 if HAVE_TMUX
-check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap apps/tmux_textinput_wrap apps/tmux_textinput_inline apps/width_probe apps/tmux_textinput_overflow
+check_PROGRAMS += apps/tmux_textinput_multi apps/tmux_focus_swap apps/tmux_textinput_wrap apps/tmux_textinput_inline apps/width_probe apps/tmux_textinput_overflow apps/tmux_stream_cr
 apps_tmux_textinput_multi_SOURCES = apps/tmux_textinput_multi.c
 apps_tmux_focus_swap_SOURCES = apps/tmux_focus_swap.c
 apps_tmux_textinput_wrap_SOURCES = apps/tmux_textinput_wrap.c
 apps_tmux_textinput_inline_SOURCES = apps/tmux_textinput_inline.c
 apps_width_probe_SOURCES = apps/width_probe.c
 apps_tmux_textinput_overflow_SOURCES = apps/tmux_textinput_overflow.c
+apps_tmux_stream_cr_SOURCES = apps/tmux_stream_cr.c
 TESTS = $(UNIT_TESTS) $(TMUX_TESTS)
 else
 TESTS = $(UNIT_TESTS)
