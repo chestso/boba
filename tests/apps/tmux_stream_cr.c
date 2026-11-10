@@ -2,7 +2,7 @@
  *
  * An inline frame (one prompt row) under a streaming transcript. Each key
  * posts one piece of terminal-style output to the system stream with
- * TUI_STREAM_TEXT_CR_REPLACES, so the driving test can watch a real
+ * TUI_STREAM_TERMINAL, so the driving test can watch a real
  * terminal emulator (tmux) draw a progress meter in place:
  *
  *   a  "10%"               b  "\r50%"          c  "\r100%\n"
@@ -43,8 +43,8 @@ static TuiInitResult app_init(void *cfg)
 
 static void post_cr(App *a, const char *text)
 {
-    TuiMsg m = tui_msg_stream_text_ex(-1, text, strlen(text),
-                                      TUI_STREAM_TEXT_CR_REPLACES);
+    TuiMsg m = tui_msg_stream_text(-1, text, strlen(text),
+                                   TUI_STREAM_TERMINAL);
     tui_transcript_update(a->t, m);
     tui_msg_free(&m);
 }
@@ -92,7 +92,7 @@ static TuiUpdateResult app_update(TuiModel *m, TuiMsg msg)
         break;
     case 'l':
     {
-        TuiMsg t = tui_msg_stream_text(-1, "legacy\rbreak\n", 13);
+        TuiMsg t = tui_msg_stream_text(-1, "legacy\rbreak\n", 13, TUI_STREAM_LINES);
         tui_transcript_update(a->t, t);
         tui_msg_free(&t);
         break;

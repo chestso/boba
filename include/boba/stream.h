@@ -408,27 +408,17 @@ TuiMsg tui_msg_stream_delta(int stream_id, const char *text, size_t len);
  * panels, command replies, error bodies. LF is normalized to CRLF by
  * boba, and escape bytes are scanned: SGR styling survives, framing
  * (cursor movement, EL, OSC, APC/DCS) is dropped — no raw \r and no
- * app-controlled cursor bytes ever reach the scrollback. A bare CR is a
- * row break (the legacy reading); see tui_msg_stream_text_ex for the
- * carriage-return reading.
+ * app-controlled cursor bytes ever reach the scrollback.
  *
- * Bytes may be cut anywhere: a process's output arrives in whatever
- * chunks the read returned, so the byte path validates UTF-8 itself. A
- * character split across two messages is completed by the second one (a
- * truncated tail is held, never committed), and a sequence that is not
- * well-formed prints U+FFFD — one per maximal subpart — instead of
- * swallowing the byte after it. Where the caller cut its bytes therefore
- * cannot change what reaches the terminal. */
-TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len);
-
-/* tui_msg_stream_text with options. `flags` is a bit set — the reading
- * belongs to the producer of the bytes, so it rides the MESSAGE, and the
- * system stream is the only place it can mean anything (this constructor
- * is byte mode: user streams classify deltas instead):
+ * `reading` says how a bare CR in these bytes is read (msg.h,
+ * TuiStreamReading). It is the caller's to declare because it describes
+ * the producer, not the data: a tool panel's output and a child process's
+ * output both arrive as bytes on the same system stream.
  *
- * TUI_STREAM_TEXT_CR_REPLACES — read the bytes as a TERMINAL's output
- *   (a child process's, a serial line's): a bare CR is a carriage return,
- *   not a line break.
+ * TUI_STREAM_LINES — prose. A bare CR ends the row.
+ *
+ * TUI_STREAM_TERMINAL — a TERMINAL's own output (a child process's, a
+ *   serial line's). A bare CR is a carriage return, not a line break.
  *
  *   A CR leaves the open row exactly as it is. The first glyph or tab
  *   that follows it REPLACES the row's content with what comes next, so a
@@ -442,7 +432,7 @@ TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len);
  *   the screen. Rows already ended with a line break are never touched. It
  *   costs no latency and holds nothing back: every byte is committed in
  *   the flush that received it, and the next frame rewrites the row in the
- *   same atomic write (runtime.h, TUI_TRANSCRIPT_REPLACE_OPEN_ROW).
+ *   same atomic write (runtime.h, tui_runtime_transcript_write).
  *
  *   Where it differs from a terminal, deliberately: the new frame replaces
  *   the whole row rather than overwriting its first columns, so a shorter
@@ -457,15 +447,15 @@ TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len);
  *   be rewound beyond it; the part already in the terminal's scrollback
  *   stays.
  *
- * Unknown bits are masked off here (TUI_STREAM_TEXT_ALL is the set this
- * version understands), so a caller that passes a newer flag to an older
- * boba keeps the legacy reading rather than an undefined one. Flags 0 is
- * tui_msg_stream_text. */
-#define TUI_STREAM_TEXT_CR_REPLACES 0x1u
-#define TUI_STREAM_TEXT_ALL         (TUI_STREAM_TEXT_CR_REPLACES)
-
-TuiMsg tui_msg_stream_text_ex(int stream_id, const char *text, size_t len,
-                              unsigned flags);
+ * Bytes may be cut anywhere: a process's output arrives in whatever
+ * chunks the read returned, so the byte path validates UTF-8 itself. A
+ * character split across two messages is completed by the second one (a
+ * truncated tail is held, never committed), and a sequence that is not
+ * well-formed prints U+FFFD — one per maximal subpart — instead of
+ * swallowing the byte after it. Where the caller cut its bytes therefore
+ * cannot change what reaches the terminal. */
+TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len,
+                           TuiStreamReading reading);
 
 /* Whole image unit for a user stream (stream_id >= 0). The block text
  * is copied and must be markdown-shaped ("![alt](src)"), without trailing

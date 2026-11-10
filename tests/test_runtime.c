@@ -2459,7 +2459,7 @@ static void test_transcript_write_erases_writes_renders(void)
     fflush(fp);
     size_t pos = ftell(fp);
 
-    tui_runtime_transcript_write(rt, "scrollback line\r\n", 17);
+    tui_runtime_transcript_write(rt, "scrollback line\r\n", 17, 0);
     fflush(fp);
 
     const char *out = outbuf + pos;
@@ -2508,8 +2508,8 @@ static void test_transcript_write_twice_no_drift(void)
     fflush(fp);
     size_t pos = ftell(fp);
 
-    tui_runtime_transcript_write(rt, "first\r\n", 7);
-    tui_runtime_transcript_write(rt, "second\r\n", 8);
+    tui_runtime_transcript_write(rt, "first\r\n", 7, 0);
+    tui_runtime_transcript_write(rt, "second\r\n", 8, 0);
     fflush(fp);
 
     const char *out = outbuf + pos;
@@ -2576,7 +2576,7 @@ static void test_transcript_write_before_first_flush(void)
     TuiRuntime *rt = tui_runtime_create(&multiline_component, NULL, &cfg);
 
     size_t pos = ftell(fp);
-    tui_runtime_transcript_write(rt, "early line\r\n", 12);
+    tui_runtime_transcript_write(rt, "early line\r\n", 12, 0);
     fflush(fp);
 
     const char *out = outbuf + pos;
@@ -3228,14 +3228,14 @@ static void test_paint_transcript_write_delivers_once(void)
     tui_runtime_flush(rt);
 
     unsigned long before = rt->out_write_count;
-    tui_runtime_transcript_write(rt, "scrollback\r\n", 12);
+    tui_runtime_transcript_write(rt, "scrollback\r\n", 12, 0);
     assert(rt->out_write_count - before == 1);
     assert(rt->paint_depth == 0);
 
     /* A partial row (open) is the same paint shape: extend + write +
      * move below + nested repaint, still ONE delivery. */
     before = rt->out_write_count;
-    tui_runtime_transcript_write(rt, "chunk", 5);
+    tui_runtime_transcript_write(rt, "chunk", 5, 0);
     assert(rt->out_write_count - before == 1);
 
     tui_runtime_stop(rt);

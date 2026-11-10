@@ -168,6 +168,20 @@ typedef struct
     size_t len; /* Byte length, not counting trailing null */
 } TuiPasteMsg;
 
+/* How a byte stream's bytes are READ (TUI_MSG_STREAM_TEXT; see
+ * tui_msg_stream_text in stream.h for what each reading does).
+ *
+ * The reading belongs to the PRODUCER of the bytes, not to the stream, so
+ * it rides the message: the system stream is shared by everything the app
+ * prints, and prose written by a tool panel and a child process's terminal
+ * output are read differently. */
+typedef enum
+{
+    TUI_STREAM_LINES = 0, /* a bare CR ends the row: prose, tool panels */
+    TUI_STREAM_TERMINAL,  /* a bare CR is a carriage return: it replaces
+                           * the open row, as a terminal would */
+} TuiStreamReading;
+
 /* Stream message payload (TUI_MSG_STREAM_DELTA / TUI_MSG_STREAM_TEXT).
  *
  * Memory ownership: stream text is heap-allocated and owned by the
@@ -179,8 +193,8 @@ typedef struct
     int stream_id; /* user stream index, or -1 for the system stream */
     char *text;    /* owned; also null-terminated for convenience */
     size_t len;
-    unsigned flags; /* TUI_STREAM_TEXT_* (stream.h); 0 for every constructor
-                     * but tui_msg_stream_text_ex */
+    TuiStreamReading reading; /* TUI_MSG_STREAM_TEXT only; TUI_STREAM_LINES
+                               * from every other constructor */
 } TuiStreamMsg;
 
 /* Transcript submit payload (TUI_MSG_TRANSCRIPT_SUBMIT). Owned like

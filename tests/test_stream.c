@@ -492,7 +492,7 @@ static void test_byte_batch_extends_partial_row(void)
     H *h = h_new(streams, NULL, 1);
     assert(h);
 
-    h_send(h, tui_msg_stream_text(-1, "abc", 3)); /* no newline */
+    h_send(h, tui_msg_stream_text(-1, "abc", 3, TUI_STREAM_LINES)); /* no newline */
     h_flush(h);
     assert(h->rt->inline_partial_open == 1);
     assert(h->rt->inline_partial_cols == 3);
@@ -502,7 +502,7 @@ static void test_byte_batch_extends_partial_row(void)
 
     /* continuation: the seam extends the open row (up 1 + right to
      * col 3) instead of starting a fresh line */
-    h_send(h, tui_msg_stream_text(-1, "def\n", 4));
+    h_send(h, tui_msg_stream_text(-1, "def\n", 4, TUI_STREAM_LINES));
     h_flush(h);
     assert(h->rt->inline_partial_open == 0);
     out = h_read(h);
@@ -985,7 +985,7 @@ static void test_block_stream_id(void)
 
     /* the system stream never reaches render_block: byte-emitted */
     g_ncalls = 0;
-    h_send(h, tui_msg_stream_text(-1, "panel\n", 6));
+    h_send(h, tui_msg_stream_text(-1, "panel\n", 6, TUI_STREAM_LINES));
     h_flush(h);
     assert(g_ncalls == 0);
     assert(strstr(h_read(h), "panel\r\n") != NULL);
@@ -1120,13 +1120,13 @@ static void test_submit_finalizes_without_echo(void)
     /* submit with an unflushed system-stream write (raw bytes still
      * live, no classifier to finalize): must not dereference the
      * system stream's NULL classifier */
-    h_send(h, tui_msg_stream_text(-1, "unflushed tail", 14));
+    h_send(h, tui_msg_stream_text(-1, "unflushed tail", 14, TUI_STREAM_LINES));
     h_send(h, tui_msg_transcript_submit(NULL, 0));
     h_flush(h);
 
     /* submit with a live system-stream partial row: no crash, and the
      * row closes */
-    h_send(h, tui_msg_stream_text(-1, "tail bytes", 10));
+    h_send(h, tui_msg_stream_text(-1, "tail bytes", 10, TUI_STREAM_LINES));
     h_flush(h);
     assert(h->rt->inline_partial_open == 1);
     h_send(h, tui_msg_transcript_submit(NULL, 0));
@@ -1151,7 +1151,7 @@ static void test_clear_resets_and_emits_nothing(void)
     assert(tui_transcript_commit_count(h->t) == 1);
 
     /* an open partial row + clear: emits nothing, orphans the row */
-    h_send(h, tui_msg_stream_text(-1, "abc", 3));
+    h_send(h, tui_msg_stream_text(-1, "abc", 3, TUI_STREAM_LINES));
     h_flush(h);
     assert(h->rt->inline_partial_open == 1);
     unsigned long commits = tui_transcript_commit_count(h->t);
@@ -1167,7 +1167,7 @@ static void test_clear_resets_and_emits_nothing(void)
     assert(count_substr(out, "abc") == 1); /* the one from before clear */
 
     /* the next content does NOT extend the orphaned row */
-    h_send(h, tui_msg_stream_text(-1, "def\n", 4));
+    h_send(h, tui_msg_stream_text(-1, "def\n", 4, TUI_STREAM_LINES));
     h_flush(h);
     out = h_read(h);
     const char *tail = out + before_len;
@@ -1203,7 +1203,7 @@ static void test_trim_after_commit(void)
     /* everything but the lookahead line has been released */
     assert(tui_transcript_stream_raw_len(h->t, 0) < 32);
     /* the system stream keeps nothing after a commit */
-    h_send(h, tui_msg_stream_text(-1, "sys\n", 4));
+    h_send(h, tui_msg_stream_text(-1, "sys\n", 4, TUI_STREAM_LINES));
     h_flush(h);
     assert(tui_transcript_stream_raw_len(h->t, -1) == 0);
 
@@ -1422,11 +1422,11 @@ static void test_split_escape_sequence_passthrough(void)
      * sequence), so the first commit writes nothing at all. */
     static const char csi_head[] = "\x1b[31";
     static const char csi_tail[] = "mred\n";
-    h_send(h, tui_msg_stream_text(-1, csi_head, strlen(csi_head)));
+    h_send(h, tui_msg_stream_text(-1, csi_head, strlen(csi_head), TUI_STREAM_LINES));
     h_flush(h);
     assert(h->rt->inline_partial_open == 0); /* nothing emitted yet */
 
-    h_send(h, tui_msg_stream_text(-1, csi_tail, strlen(csi_tail)));
+    h_send(h, tui_msg_stream_text(-1, csi_tail, strlen(csi_tail), TUI_STREAM_LINES));
     h_flush(h);
     const char *out = h_read(h);
     /* SGR kept, one row — and the write ends at default (see the SGR
@@ -1438,7 +1438,7 @@ static void test_split_escape_sequence_passthrough(void)
     /* Policy: framing sequences (cursor movement, EL) are stripped,
      * SGR survives. */
     static const char csi_cursor[] = "\x1b[10;20Hx";
-    h_send(h, tui_msg_stream_text(-1, csi_cursor, strlen(csi_cursor)));
+    h_send(h, tui_msg_stream_text(-1, csi_cursor, strlen(csi_cursor), TUI_STREAM_LINES));
     h_flush(h);
     out = h_read(h);
     assert(strstr(out, "\x1b[10;20H") == NULL); /* cursor move stripped */
@@ -1446,7 +1446,7 @@ static void test_split_escape_sequence_passthrough(void)
 
     /* OSC and APC/DCS are stripped too */
     static const char osc[] = "\x1b]0;title\x07visible\n";
-    h_send(h, tui_msg_stream_text(-1, osc, strlen(osc)));
+    h_send(h, tui_msg_stream_text(-1, osc, strlen(osc), TUI_STREAM_LINES));
     h_flush(h);
     out = h_read(h);
     assert(strstr(out, "\x1b]0;title") == NULL);
@@ -1454,7 +1454,7 @@ static void test_split_escape_sequence_passthrough(void)
      * in front of the text (SGR containment) — the text is what matters */
     assert(strstr(out, "visible") != NULL);
     static const char apc[] = "\x1b_G a=T\x1b\\plain\n";
-    h_send(h, tui_msg_stream_text(-1, apc, strlen(apc)));
+    h_send(h, tui_msg_stream_text(-1, apc, strlen(apc), TUI_STREAM_LINES));
     h_flush(h);
     out = h_read(h);
     assert(strstr(out, "\x1b_G") == NULL);
@@ -1472,7 +1472,7 @@ static void test_split_escape_sequence_passthrough(void)
 
     /* An open byte row holding only zero-width SGR bytes still counts
      * as open: the next rendered unit starts below it, not on it. */
-    h_send(h, tui_msg_stream_text(-1, "\x1b[32m", 5));
+    h_send(h, tui_msg_stream_text(-1, "\x1b[32m", 5, TUI_STREAM_LINES));
     h_flush(h);
     h_send(h, tui_msg_stream_delta(0, "A\nB\n", 4));
     h_flush(h);
@@ -1502,7 +1502,7 @@ static void test_no_bare_lf_anywhere(void)
     assert(h);
 
     static const char tool[] = "tool output\r\nwith\nmixed\rlines\n";
-    h_send(h, tui_msg_stream_text(-1, tool, strlen(tool)));
+    h_send(h, tui_msg_stream_text(-1, tool, strlen(tool), TUI_STREAM_LINES));
     h_send(h, tui_msg_stream_delta(0, "one\ntwo\n", 8));
     h_send(h, tui_msg_stream_delta(0, "three", 5));
     h_send(h, tui_msg_stream_end(0));
@@ -2110,7 +2110,7 @@ static void test_committed_byte_run_is_not_width_wrapped(void)
     line[100] = '\n';
     line[101] = '\0';
 
-    h_send(h, tui_msg_stream_text(-1, line, 101));
+    h_send(h, tui_msg_stream_text(-1, line, 101, TUI_STREAM_LINES));
     h_flush(h);
 
     const char *out = h_read(h);
@@ -2131,12 +2131,12 @@ static void test_partial_row_wrapped_extends_at_column(void)
 
     char run[91];
     memset(run, 'z', 90); /* 90 cols -> wraps to row 1, col 30 */
-    h_send(h, tui_msg_stream_text(-1, run, 90));
+    h_send(h, tui_msg_stream_text(-1, run, 90, TUI_STREAM_LINES));
     h_flush(h);
     assert(h->rt->inline_partial_open == 1);
     assert(h->rt->inline_partial_cols == 90);
 
-    h_send(h, tui_msg_stream_text(-1, "def\n", 4));
+    h_send(h, tui_msg_stream_text(-1, "def\n", 4, TUI_STREAM_LINES));
     h_flush(h);
     assert(h->rt->inline_partial_open == 0);
     /* up one physical row, then right to column 30 (90 % 60) */
@@ -2155,11 +2155,11 @@ static void test_partial_row_exact_wrap_extends_on_row(void)
 
     char run[61];
     memset(run, 'q', 60); /* exactly one full row */
-    h_send(h, tui_msg_stream_text(-1, run, 60));
+    h_send(h, tui_msg_stream_text(-1, run, 60, TUI_STREAM_LINES));
     h_flush(h);
     assert(h->rt->inline_partial_cols == 60);
 
-    h_send(h, tui_msg_stream_text(-1, "def\n", 4));
+    h_send(h, tui_msg_stream_text(-1, "def\n", 4, TUI_STREAM_LINES));
     h_flush(h);
     /* no cursor-up, no forward: \r + continuation on the next row */
     assert(strstr(h_read(h), "\rdef\r\n") != NULL);
@@ -2253,12 +2253,12 @@ static void test_container_open_finalizes_live_block(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Carriage return replaces the open row (TUI_STREAM_TEXT_CR_REPLACES)  */
+/* Carriage return replaces the open row (TUI_STREAM_TERMINAL)         */
 /* ------------------------------------------------------------------ */
 
-#define CR_SEND(h, lit)                                        \
-    h_send((h), tui_msg_stream_text_ex(-1, (lit), strlen(lit), \
-                                       TUI_STREAM_TEXT_CR_REPLACES))
+#define CR_SEND(h, lit)                                     \
+    h_send((h), tui_msg_stream_text(-1, (lit), strlen(lit), \
+                                    TUI_STREAM_TERMINAL))
 #define REWIND_UP(n) "\x1b[" #n "A\r\x1b[J"
 
 /* Everything the runtime wrote after `mark` bytes of output. */
@@ -2440,7 +2440,7 @@ static void test_cr_replace_rewinds_a_wrapped_row(void)
 
     char run[131];
     memset(run, 'w', 130); /* 130 cols: three physical rows (60+60+10) */
-    h_send(h, tui_msg_stream_text_ex(-1, run, 130, TUI_STREAM_TEXT_CR_REPLACES));
+    h_send(h, tui_msg_stream_text(-1, run, 130, TUI_STREAM_TERMINAL));
     h_flush(h);
     assert(h->rt->inline_partial_cols == 130);
     size_t mark = strlen(h_read(h));
@@ -2463,7 +2463,7 @@ static void test_cr_replace_rewinds_an_exactly_full_row(void)
 
     char run[61];
     memset(run, 'f', 60);
-    h_send(h, tui_msg_stream_text_ex(-1, run, 60, TUI_STREAM_TEXT_CR_REPLACES));
+    h_send(h, tui_msg_stream_text(-1, run, 60, TUI_STREAM_TERMINAL));
     h_flush(h);
     size_t mark = strlen(h_read(h));
 
@@ -2545,16 +2545,9 @@ static void test_plain_text_cr_still_breaks_rows(void)
     H *h = h_new(streams, NULL, 1);
     assert(h);
 
-    h_send(h, tui_msg_stream_text(-1, "10%\r50%\r100%\n", 13));
+    h_send(h, tui_msg_stream_text(-1, "10%\r50%\r100%\n", 13, TUI_STREAM_LINES));
     h_flush(h);
     assert(strstr(h_read(h), "10%\r\n50%\r\n100%\r\n") != NULL);
-
-    /* flag 0 through the _ex constructor is the same message, and an
-     * unknown bit is ignored */
-    size_t mark = strlen(h_read(h));
-    h_send(h, tui_msg_stream_text_ex(-1, "a\rb\n", 4, 0x80u));
-    h_flush(h);
-    assert(strstr(h_after(h, mark), "a\r\nb\r\n") != NULL);
 
     h_free(h);
 }
@@ -2570,7 +2563,7 @@ static void test_cr_pending_is_row_state_not_message_state(void)
     CR_SEND(h, "50%\r");
     h_flush(h);
     size_t mark = strlen(h_read(h));
-    h_send(h, tui_msg_stream_text(-1, "done\n", 5));
+    h_send(h, tui_msg_stream_text(-1, "done\n", 5, TUI_STREAM_LINES));
     h_flush(h);
     assert(strstr(h_after(h, mark), REWIND_UP(1) "done\r\n") != NULL);
 
@@ -2644,8 +2637,8 @@ static void test_cr_many_frames_collapse_in_staging(void)
         dynamic_buffer_append(frames, one, (size_t)n);
     }
     dynamic_buffer_append(frames, "\n", 1);
-    h_send(h, tui_msg_stream_text_ex(-1, frames->data, frames->len,
-                                     TUI_STREAM_TEXT_CR_REPLACES));
+    h_send(h, tui_msg_stream_text(-1, frames->data, frames->len,
+                                  TUI_STREAM_TERMINAL));
     h_flush(h);
     assert(strlen(h_read(h)) < 200); /* the last frame and chrome, not 2000 */
     assert(strstr(h_read(h), " 99%\r\n") != NULL);
@@ -2654,24 +2647,24 @@ static void test_cr_many_frames_collapse_in_staging(void)
     h_free(h);
 }
 
-/* The runtime half on its own: the flag with no open row is an ordinary
+/* The runtime half on its own: a replace with no open row is an ordinary
  * write, and with one it rewinds exactly the open row. */
-static void test_runtime_write_ex_replace_needs_an_open_row(void)
+static void test_runtime_replace_needs_an_open_row(void)
 {
     TuiStreamSpec streams[1] = { { "content" } };
     H *h = h_new(streams, NULL, 1);
     assert(h);
 
-    tui_runtime_transcript_write_ex(h->rt, "plain\r\n", 7,
-                                    TUI_TRANSCRIPT_REPLACE_OPEN_ROW);
+    tui_runtime_transcript_write(h->rt, "plain\r\n", 7,
+                                 1);
     assert(strstr(h_read(h), "\x1b[J") == NULL);
     assert(strstr(h_read(h), "plain\r\n") != NULL);
 
-    tui_runtime_transcript_write(h->rt, "open", 4);
+    tui_runtime_transcript_write(h->rt, "open", 4, 0);
     assert(h->rt->inline_partial_open == 1);
     size_t mark = strlen(h_read(h));
-    tui_runtime_transcript_write_ex(h->rt, "new", 3,
-                                    TUI_TRANSCRIPT_REPLACE_OPEN_ROW);
+    tui_runtime_transcript_write(h->rt, "new", 3,
+                                 1);
     assert(strstr(h_after(h, mark), REWIND_UP(1) "new") != NULL);
     assert(h->rt->inline_partial_cols == 3);
 
@@ -2688,7 +2681,7 @@ static void test_runtime_write_ex_replace_needs_an_open_row(void)
  * rather than something that swallows its neighbour. */
 
 #define TEXT_SEND(h, lit) \
-    h_send((h), tui_msg_stream_text(-1, (lit), strlen(lit)))
+    h_send((h), tui_msg_stream_text(-1, (lit), strlen(lit), TUI_STREAM_LINES))
 #define FFFD "\xef\xbf\xbd"
 
 /* The lead byte is held, not printed and not lost: the next message's
@@ -2722,7 +2715,7 @@ static void test_utf8_byte_at_a_time(void)
     const char text[] = "h\xc3\xa9llo \xe2\x82\xac\n";
     for (size_t i = 0; i < strlen(text); i++) {
         char one[2] = { text[i], '\0' };
-        h_send(h, tui_msg_stream_text(-1, one, 1));
+        h_send(h, tui_msg_stream_text(-1, one, 1, TUI_STREAM_LINES));
         h_flush(h);
     }
     const char *out = h_read(h);
@@ -2836,7 +2829,7 @@ static void test_utf8_chunking_is_byte_independent(void)
 
     H *ref = h_new(streams, NULL, 1);
     assert(ref);
-    h_send(ref, tui_msg_stream_text(-1, whole, n));
+    h_send(ref, tui_msg_stream_text(-1, whole, n, TUI_STREAM_LINES));
     h_flush(ref);
     char *want = strdup(h_read(ref));
     assert(want);
@@ -2847,8 +2840,8 @@ static void test_utf8_chunking_is_byte_independent(void)
         assert(h);
         /* no flush between: one commit sees the whole line, however it
          * was chopped */
-        h_send(h, tui_msg_stream_text(-1, whole, cut));
-        h_send(h, tui_msg_stream_text(-1, whole + cut, n - cut));
+        h_send(h, tui_msg_stream_text(-1, whole, cut, TUI_STREAM_LINES));
+        h_send(h, tui_msg_stream_text(-1, whole + cut, n - cut, TUI_STREAM_LINES));
         h_flush(h);
         assert(strcmp(h_read(h), want) == 0);
         h_free(h);
@@ -3109,7 +3102,7 @@ int main(void)
     RUN_TEST(test_cr_state_does_not_survive_clear);
     RUN_TEST(test_cr_replace_through_the_image_gate);
     RUN_TEST(test_cr_many_frames_collapse_in_staging);
-    RUN_TEST(test_runtime_write_ex_replace_needs_an_open_row);
+    RUN_TEST(test_runtime_replace_needs_an_open_row);
     RUN_TEST(test_utf8_split_tail_completes);
     RUN_TEST(test_utf8_byte_at_a_time);
     RUN_TEST(test_utf8_bad_lead_does_not_swallow);

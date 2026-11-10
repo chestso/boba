@@ -144,7 +144,7 @@ typedef struct TuiDefer
     TuiBlockKind kind;
     size_t off, len;
     int image_id;
-    unsigned flags; /* TDEFER_BYTES: the message's TUI_STREAM_TEXT_* flags */
+    TuiStreamReading reading; /* TDEFER_BYTES: how the bytes are read */
 } TuiDefer;
 
 struct TuiTranscript
@@ -161,7 +161,7 @@ struct TuiTranscript
     int row_col;     /* display cols written on that row */
     TuiAnsiScan esc; /* split escape scan state (see above) */
 
-    /* Carriage return as a row REPLACE (TUI_STREAM_TEXT_CR_REPLACES).
+    /* Carriage return as a row REPLACE (TUI_STREAM_TERMINAL).
      *
      * A CR does not touch the row: the glyphs already on it stay put,
      * exactly as on a terminal, and only the first PRINTING byte after
@@ -660,13 +660,15 @@ static size_t stage_utf8_at(TuiTranscript *t, const char *bytes, size_t len,
  * LF/CRLF -> \r\n, hard tabs (physical-column stops), ANSI passthrough
  * with no width wrap (the terminal soft-wraps), and no raw \r on output.
  *
- * A bare CR is a row break by default. With TUI_STREAM_TEXT_CR_REPLACES it
- * is a carriage return: it marks the open row, and the first glyph or tab
- * after it replaces that row (stage_replace_row). `CR LF` is a plain break
- * either way, also when the LF arrives in a later message (the pending
- * mark dies with the row). A CR on a row with nothing on it does nothing. */
+ * `reading` is how the producer's bytes are to be read (TuiStreamReading).
+ * TUI_STREAM_LINES: a bare CR is a row break. TUI_STREAM_TERMINAL: a bare
+ * CR is a carriage return — it marks the open row, and the first glyph or
+ * tab after it replaces that row (stage_replace_row). `CR LF` is a plain
+ * break either way, also when the LF arrives in a later message (the
+ * pending mark dies with the row). A CR on a row with nothing on it does
+ * nothing. */
 static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len,
-                        unsigned flags)
+                        TuiStreamReading reading)
 {
     size_t i = 0;
     while (i < len) {
@@ -682,7 +684,7 @@ static void stage_bytes(TuiTranscript *t, const char *bytes, size_t len,
                 i += 2;
                 continue;
             }
-            if (flags & TUI_STREAM_TEXT_CR_REPLACES) {
+            if (reading == TUI_STREAM_TERMINAL) {
                 if (t->row_open) {
                     t->cr_pending = 1;
                     t->cr_mark = t->staging->len;
@@ -745,11 +747,11 @@ static void stream_stage_range(TuiTranscript *t, TuiStream *s, size_t upto)
             defer_push(t, TDEFER_BYTES, (int)(s - t->streams),
                        TUI_BLOCK_RAW, s->stage_pos, upto - s->stage_pos, 0);
         } else {
-            /* Flags 0: byte-mode containers are a user stream's unlabeled
-             * fence, and every reading flag rides a TUI_MSG_STREAM_TEXT,
-             * which only the system stream takes (see the update). */
+            /* A user stream's unlabeled fence is always read as lines: the
+             * terminal reading rides a TUI_MSG_STREAM_TEXT, which only the
+             * system stream takes (see the update). */
             stage_bytes(t, s->raw->data + s->stage_pos, upto - s->stage_pos,
-                        0);
+                        TUI_STREAM_LINES);
         }
         s->stage_pos = upto;
     }
@@ -1395,7 +1397,7 @@ static int defer_push(TuiTranscript *t, int type, int stream_idx,
     d->off = off;
     d->len = len;
     d->image_id = image_id;
-    d->flags = 0;
+    d->reading = TUI_STREAM_LINES;
     return 0;
 }
 
@@ -1425,7 +1427,7 @@ static void defer_drain(TuiTranscript *t)
                  * finalize may have cleared it while the unit was held */
                 size_t avail = s->raw->len > d->off ? s->raw->len - d->off : 0;
                 if (d->len <= avail)
-                    stage_bytes(t, s->raw->data + d->off, d->len, d->flags);
+                    stage_bytes(t, s->raw->data + d->off, d->len, d->reading);
             }
             break;
         default:
@@ -1980,9 +1982,8 @@ int tui_transcript_commit_pending(TuiTranscript *t, TuiRuntime *rt)
     if (t->sgr_state->len > 0)
         staging_insert(t, staging_body_end(t->staging), "\x1b[0m", 4);
 
-    tui_runtime_transcript_write_ex(
-        rt, t->staging->data, t->staging->len,
-        t->replace_open ? TUI_TRANSCRIPT_REPLACE_OPEN_ROW : 0);
+    tui_runtime_transcript_write(rt, t->staging->data, t->staging->len,
+                                 t->replace_open);
     t->commit_count++;
     dynamic_buffer_clear(t->staging);
     /* What the runtime now holds open is what the next batch may have to
@@ -2025,16 +2026,11 @@ TuiMsg tui_msg_stream_delta(int stream_id, const char *text, size_t len)
     return stream_text_msg(TUI_MSG_STREAM_DELTA, stream_id, text, len);
 }
 
-TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len)
-{
-    return stream_text_msg(TUI_MSG_STREAM_TEXT, stream_id, text, len);
-}
-
-TuiMsg tui_msg_stream_text_ex(int stream_id, const char *text, size_t len,
-                              unsigned flags)
+TuiMsg tui_msg_stream_text(int stream_id, const char *text, size_t len,
+                           TuiStreamReading reading)
 {
     TuiMsg msg = stream_text_msg(TUI_MSG_STREAM_TEXT, stream_id, text, len);
-    msg.data.stream.flags = flags & TUI_STREAM_TEXT_ALL;
+    msg.data.stream.reading = reading;
     return msg;
 }
 
@@ -2228,10 +2224,10 @@ TuiUpdateResult tui_transcript_update(TuiTranscript *t, TuiMsg msg)
         if (defer_active(t)) {
             if (defer_push(t, TDEFER_BYTES, (int)t->n_user, TUI_BLOCK_RAW, off,
                            msg.data.stream.len, 0) == 0)
-                t->defer[t->defer_len - 1].flags = msg.data.stream.flags;
+                t->defer[t->defer_len - 1].reading = msg.data.stream.reading;
         } else {
             stage_bytes(t, msg.data.stream.text, msg.data.stream.len,
-                        msg.data.stream.flags);
+                        msg.data.stream.reading);
         }
         return tui_update_result_none();
     }

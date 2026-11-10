@@ -1,6 +1,28 @@
 boba NEWS
 =========
 
+0.11.0 (pre-alpha)
+------------------
+
+stream: one reading argument replaces the `_ex` twins
+
+  boba is pre-alpha and does not carry compatibility shims, so the pair
+  added in 0.10.0 is folded into the functions that carry it:
+
+    - tui_msg_stream_text() takes a TuiStreamReading (msg.h) instead of
+      the old `_ex` twin's flags word: TUI_STREAM_LINES (a bare CR ends
+      the row) or TUI_STREAM_TERMINAL (a bare CR is a carriage return
+      that replaces the open row). The reading belongs to the producer of
+      the bytes, so it still rides the message, as TuiStreamMsg.reading.
+    - tui_runtime_transcript_write() takes `int replace_open_row` instead
+      of a flags word, its only caller being the transcript's commit
+      pass.
+
+  Removed: tui_msg_stream_text_ex(), tui_runtime_transcript_write_ex(),
+  TUI_STREAM_TEXT_CR_REPLACES, TUI_STREAM_TEXT_ALL,
+  TUI_TRANSCRIPT_REPLACE_OPEN_ROW and TuiStreamMsg.flags. No behaviour
+  changes — every caller passes the reading it already meant.
+
 0.10.1 (pre-alpha)
 ------------------
 

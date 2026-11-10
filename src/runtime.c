@@ -1160,10 +1160,10 @@ void tui_runtime_clear_inline(TuiRuntime *runtime)
  * write's would each be presented as a frame of their own (the caret
  * hop). */
 static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
-                                   size_t len, unsigned flags)
+                                   size_t len, int replace_open_row)
 {
     int open = runtime->inline_partial_open && runtime->in_inline_mode;
-    int replace = open && (flags & TUI_TRANSCRIPT_REPLACE_OPEN_ROW);
+    int replace = open && replace_open_row;
     int extend = open && !replace;
     int cols = extend ? runtime->inline_partial_cols : 0;
     int old_cols = runtime->inline_partial_cols;
@@ -1245,20 +1245,14 @@ static void transcript_write_paint(TuiRuntime *runtime, const char *bytes,
     tui_runtime_flush(runtime);
 }
 
-void tui_runtime_transcript_write_ex(TuiRuntime *runtime, const char *bytes,
-                                     size_t len, unsigned flags)
+void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
+                                  size_t len, int replace_open_row)
 {
     if (!runtime || !bytes || len == 0)
         return;
     runtime_paint_begin(runtime);
-    transcript_write_paint(runtime, bytes, len, flags);
+    transcript_write_paint(runtime, bytes, len, replace_open_row);
     runtime_paint_end(runtime);
-}
-
-void tui_runtime_transcript_write(TuiRuntime *runtime, const char *bytes,
-                                  size_t len)
-{
-    tui_runtime_transcript_write_ex(runtime, bytes, len, 0);
 }
 
 /* Attach a streaming transcript; the commit pass then runs at the top
