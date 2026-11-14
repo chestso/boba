@@ -1031,6 +1031,125 @@ static void test_post_wakes_event_loop(void)
 }
 
 /* ========================================================================
+ * A lone ESC settles as the Escape key when the terminal goes quiet
+ * ======================================================================== */
+
+typedef struct
+{
+    TuiModel base;
+    int escapes;
+    int keys;
+} EscModel;
+
+static TuiInitResult esc_init(void *config)
+{
+    (void)config;
+    EscModel *m = calloc(1, sizeof(EscModel));
+    m->base.type = 997;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+static TuiUpdateResult esc_update(TuiModel *model, TuiMsg msg)
+{
+    EscModel *m = (EscModel *)model;
+    if (msg.type == TUI_MSG_KEY_PRESS) {
+        m->keys++;
+        if (msg.data.key.key == TUI_KEY_ESCAPE) {
+            m->escapes++;
+            return tui_update_result(tui_cmd_quit());
+        }
+    }
+    return tui_update_result_none();
+}
+
+static TuiComponent esc_component = {
+    .init = esc_init,
+    .update = esc_update,
+    .view = test_view,
+    .free = test_free,
+};
+
+static void test_lone_esc_is_escape_after_timeout(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = devnull };
+    TuiRuntime *rt = tui_runtime_create(&esc_component, NULL, &cfg);
+    assert(rt != NULL);
+    EscModel *m = (EscModel *)tui_runtime_model(rt);
+
+    assert(tui_runtime_input_timeout_ms(rt) == -1);
+    tui_runtime_process_input(rt, (const unsigned char *)"\033", 1);
+    assert(m->keys == 0); /* parked */
+    int left = tui_runtime_input_timeout_ms(rt);
+    assert(left > 0 && left <= TUI_ESC_TIMEOUT_MS);
+    assert(tui_runtime_input_expire(rt) == 0); /* not yet due */
+
+#ifndef _WIN32
+    usleep((TUI_ESC_TIMEOUT_MS + 20) * 1000);
+#else
+    Sleep(TUI_ESC_TIMEOUT_MS + 20);
+#endif
+    assert(tui_runtime_input_timeout_ms(rt) == 0);
+    assert(tui_runtime_input_expire(rt) == 1);
+    assert(m->escapes == 1);
+    assert(tui_runtime_input_timeout_ms(rt) == -1);
+
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+
+static void test_esc_sequence_in_time_is_not_escape(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = devnull };
+    TuiRuntime *rt = tui_runtime_create(&esc_component, NULL, &cfg);
+    assert(rt != NULL);
+    EscModel *m = (EscModel *)tui_runtime_model(rt);
+
+    /* An arrow key cut between reads: the tail lands before the deadline. */
+    tui_runtime_process_input(rt, (const unsigned char *)"\033", 1);
+    tui_runtime_process_input(rt, (const unsigned char *)"[A", 2);
+    assert(m->keys == 1 && m->escapes == 0);
+    assert(tui_runtime_input_timeout_ms(rt) == -1);
+    assert(tui_runtime_input_expire(rt) == 0);
+
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+
+#ifndef _WIN32
+/* End to end through tui_runtime_run(): a stdin that holds only an ESC and
+ * then stays open (a real terminal at rest) must still reach the app. */
+static void test_run_delivers_lone_esc(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    int stdin_pipe[2];
+    assert(pipe(stdin_pipe) == 0);
+    int orig_stdin = dup(STDIN_FILENO);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+    assert(write(stdin_pipe[1], "\033", 1) == 1);
+
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = devnull };
+    TuiRuntime *rt = tui_runtime_create(&esc_component, NULL, &cfg);
+    assert(rt != NULL);
+
+    assert(tui_runtime_run(rt) == 0);
+    assert(((EscModel *)tui_runtime_model(rt))->escapes == 1);
+
+    dup2(orig_stdin, STDIN_FILENO);
+    close(orig_stdin);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+#endif
+
+/* ========================================================================
  * External-FD subscriptions: fill-count contract
  * ======================================================================== */
 
@@ -3698,6 +3817,11 @@ int main(void)
     RUN_TEST(test_runtime_run_immediate_quit);
     RUN_TEST(test_post_wakes_event_loop);
     RUN_TEST(test_tick_is_rate_limited);
+    RUN_TEST(test_lone_esc_is_escape_after_timeout);
+    RUN_TEST(test_esc_sequence_in_time_is_not_escape);
+#ifndef _WIN32
+    RUN_TEST(test_run_delivers_lone_esc);
+#endif
     RUN_TEST(test_fill_zero_in_run);
     RUN_TEST(test_fill_overflow_clamps);
     RUN_TEST(test_fill_three_in_run);

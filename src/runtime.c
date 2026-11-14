@@ -892,7 +892,36 @@ int tui_runtime_process_input(TuiRuntime *runtime, const unsigned char *input,
         }
     }
 
+    /* A batch that ends on a lone ESC leaves it parked: it is the Escape
+     * key unless the rest of a sequence arrives within the timeout. */
+    runtime->esc_deadline_ms =
+        tui_input_parser_pending_escape(runtime->parser)
+            ? runtime_now_ms() + TUI_ESC_TIMEOUT_MS
+            : 0;
+
     return runtime->running;
+}
+
+int tui_runtime_input_timeout_ms(TuiRuntime *runtime)
+{
+    if (!runtime || !runtime->esc_deadline_ms ||
+        !tui_input_parser_pending_escape(runtime->parser))
+        return -1;
+    long long left = runtime->esc_deadline_ms - runtime_now_ms();
+    return left > 0 ? (int)left : 0;
+}
+
+int tui_runtime_input_expire(TuiRuntime *runtime)
+{
+    if (!runtime || !runtime->running || tui_runtime_input_timeout_ms(runtime) != 0)
+        return 0;
+    runtime->esc_deadline_ms = 0;
+    TuiMsg msg;
+    if (!tui_input_parser_flush_escape(runtime->parser, &msg))
+        return 0;
+    tui_runtime_send(runtime, msg);
+    tui_msg_free(&msg);
+    return 1;
 }
 
 /* Render current state to buffer */
@@ -1963,7 +1992,14 @@ int tui_runtime_run(TuiRuntime *runtime)
             timeout_ms = 100; /* Default 100ms for simple consumers */
         }
 
-        int ready = poll(fds, n_fds, timeout_ms);
+        /* A parked lone ESC shortens the wait to its deadline; the tick
+         * keeps its own interval (timeout_ms), not the shortened one. */
+        int wait_ms = timeout_ms;
+        int esc_ms = tui_runtime_input_timeout_ms(runtime);
+        if (esc_ms >= 0 && (wait_ms < 0 || esc_ms < wait_ms))
+            wait_ms = esc_ms;
+
+        int ready = poll(fds, n_fds, wait_ms);
 
         if (ready < 0) {
             if (errno == EINTR)
@@ -1992,6 +2028,12 @@ int tui_runtime_run(TuiRuntime *runtime)
                 break; /* Read error */
             }
         }
+
+        /* The terminal went quiet with an ESC parked: it was the key. A
+         * batch just processed above re-armed the deadline, so this only
+         * fires after a full quiet timeout. */
+        if (tui_runtime_input_expire(runtime))
+            tui_runtime_flush(runtime);
 
         /* External fds ready — one dispatch PER fd with activity.
          * POLLERR/POLLHUP/POLLNVAL arrive in revents even when not
@@ -2233,8 +2275,15 @@ int tui_runtime_run(TuiRuntime *runtime)
                 timeout_ms = (DWORD)ms;
         }
 
+        /* A parked lone ESC shortens the wait to its deadline; the tick
+         * keeps its own interval (timeout_ms), not the shortened one. */
+        DWORD wait_ms = timeout_ms;
+        int esc_ms = tui_runtime_input_timeout_ms(runtime);
+        if (esc_ms >= 0 && (wait_ms == INFINITE || (DWORD)esc_ms < wait_ms))
+            wait_ms = (DWORD)esc_ms;
+
         DWORD wait = WaitForMultipleObjects(n_handles, handles, FALSE,
-                                            timeout_ms);
+                                            wait_ms);
 
         if (wait == WAIT_OBJECT_0 + idx_stdin) {
             /* Stdin data available from reader thread */
@@ -2303,6 +2352,10 @@ int tui_runtime_run(TuiRuntime *runtime)
                 break;
             }
         }
+
+        /* Quiet with an ESC parked: it was the key (see the Unix branch). */
+        if (tui_runtime_input_expire(runtime))
+            tui_runtime_flush(runtime);
 
         /* Tick — rate-limited to the configured interval. On the
          * Windows branch timeout_ms is DWORD (INFINITE = 0xFFFFFFFF),

@@ -243,6 +243,24 @@ void tui_input_parser_free(TuiInputParser *parser)
     }
 }
 
+int tui_input_parser_pending_escape(const TuiInputParser *parser)
+{
+    return parser && parser->state == PARSER_STATE_ESCAPE;
+}
+
+int tui_input_parser_flush_escape(TuiInputParser *parser, TuiMsg *msg)
+{
+    if (!msg)
+        return 0;
+    *msg = tui_msg_none();
+    if (!tui_input_parser_pending_escape(parser))
+        return 0;
+    parser->state = PARSER_STATE_GROUND;
+    parser->seq_len = 0;
+    *msg = tui_msg_key(TUI_KEY_ESCAPE, 0, TUI_MOD_NONE);
+    return 1;
+}
+
 /* Reset parser state */
 void tui_input_parser_reset(TuiInputParser *parser)
 {

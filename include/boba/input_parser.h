@@ -48,6 +48,20 @@ int tui_input_parser_parse(TuiInputParser *parser, const unsigned char *input,
 int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
                           TuiMsg *msg);
 
+/* A lone ESC is ambiguous: the Escape key, or the first byte of a longer
+ * sequence. The parser holds it until the next byte decides. A caller
+ * that owns a clock calls pending_escape() after each feed, and when the
+ * input has been quiet for a few tens of milliseconds, flush_escape()
+ * to settle it as the Escape key. (Terminals speaking the kitty keyboard
+ * protocol never leave one pending: Escape arrives as `CSI 27 u`.) */
+
+/* 1 while a lone ESC is parked awaiting its next byte. */
+int tui_input_parser_pending_escape(const TuiInputParser *parser);
+
+/* Settle a parked ESC as TUI_KEY_ESCAPE. Returns 1 and sets *msg when
+ * one was parked, 0 otherwise. */
+int tui_input_parser_flush_escape(TuiInputParser *parser, TuiMsg *msg);
+
 /* Terminal capability-probe replies.
  *
  * OSC / DCS / APC sequences on stdin are never key input. The parser

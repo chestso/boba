@@ -1,6 +1,26 @@
 boba NEWS
 =========
 
+Unreleased
+----------
+
+input: a lone Esc reaches the app on legacy terminals
+
+  The parser parks an ESC byte until the next byte says whether it was
+  the Escape key or the start of a sequence, so on a terminal without the
+  kitty keyboard protocol (xterm, tmux, the Linux console) a bare Esc was
+  never delivered, and the next key was read as Alt+key. Terminals that
+  speak the protocol send `CSI 27 u` and were never affected.
+
+    - tui_runtime_process_input() arms a TUI_ESC_TIMEOUT_MS (50 ms)
+      deadline when a batch ends on a parked ESC; tui_runtime_run() (Unix
+      and Windows) shortens its wait to it and delivers TUI_KEY_ESCAPE
+      when the terminal stays quiet. The tick keeps its own interval.
+    - New: tui_runtime_input_timeout_ms() / tui_runtime_input_expire()
+      for callers driving their own loop, and
+      tui_input_parser_pending_escape() / tui_input_parser_flush_escape()
+      underneath them.
+
 0.11.0 (pre-alpha)
 ------------------
 

@@ -239,6 +239,9 @@ struct TuiRuntime
      * spins the loop (a wakeup re-arms the wait, the wait fires the
      * tick, the tick wakes again). */
     long long last_tick_ms;
+    /* Monotonic time (ms) at which a parked lone ESC becomes the Escape
+     * key; 0 when none is parked. Re-armed on every input batch. */
+    long long esc_deadline_ms;
     TuiMouseMode cur_mouse_mode;
     TuiKeyboardEnhancements cur_kbd_enhancements;
     int cur_report_focus;
@@ -372,6 +375,21 @@ int tui_runtime_send(TuiRuntime *runtime, TuiMsg msg);
  */
 int tui_runtime_process_input(TuiRuntime *runtime, const unsigned char *input,
                               size_t len);
+
+/* How long a lone ESC waits for the rest of a sequence before it is the
+ * Escape key. Long enough for a sequence split across reads (ssh), short
+ * enough to feel instant (neovim's ttimeoutlen is 50). */
+#define TUI_ESC_TIMEOUT_MS 50
+
+/* Milliseconds until a parked lone ESC must be settled as the Escape key
+ * (TUI_ESC_TIMEOUT_MS after the last input), or -1 when none is parked.
+ * tui_runtime_run() folds this into its wait; a caller driving its own
+ * loop does the same and calls tui_runtime_input_expire() when it hits 0. */
+int tui_runtime_input_timeout_ms(TuiRuntime *runtime);
+
+/* Deliver a parked lone ESC as TUI_KEY_ESCAPE if its deadline has passed.
+ * Returns 1 if it delivered a key (the caller should flush). */
+int tui_runtime_input_expire(TuiRuntime *runtime);
 
 /* Render current state to buffer
  *

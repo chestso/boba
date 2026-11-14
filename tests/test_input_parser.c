@@ -515,6 +515,50 @@ static void test_csi_ctrl_up_still_works(void)
  * Option+Backspace as ESC followed by DEL. Without a branch for it the
  * pair reads as a bare ESC (clearing the mark) plus a plain DEL (one
  * character deleted) — two events where the user made one. */
+/* A lone ESC is parked (no message) until the caller settles it. */
+static void test_lone_esc_parks_then_flushes_as_escape(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    TuiMsg msgs[4];
+    assert(!tui_input_parser_pending_escape(p));
+    assert(tui_input_parser_parse(p, (const unsigned char *)"\033", 1, msgs,
+                                  4) == 0);
+    assert(tui_input_parser_pending_escape(p));
+
+    TuiMsg m;
+    assert(tui_input_parser_flush_escape(p, &m) == 1);
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.key == TUI_KEY_ESCAPE);
+    assert(m.data.key.mods == TUI_MOD_NONE);
+    assert(!tui_input_parser_pending_escape(p));
+    assert(tui_input_parser_flush_escape(p, &m) == 0);
+
+    /* The parser is back at ground: the next key is a plain key. */
+    assert(tui_input_parser_parse(p, (const unsigned char *)"a", 1, msgs,
+                                  4) == 1);
+    assert(msgs[0].data.key.mods == TUI_MOD_NONE);
+    tui_input_parser_free(p);
+}
+
+/* A byte that arrives in time decides the ESC; nothing is left to flush. */
+static void test_esc_then_byte_leaves_nothing_pending(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    TuiMsg msgs[4];
+    assert(tui_input_parser_parse(p, (const unsigned char *)"\033", 1, msgs,
+                                  4) == 0);
+    assert(tui_input_parser_parse(p, (const unsigned char *)"a", 1, msgs,
+                                  4) == 1);
+    assert(msgs[0].data.key.mods == TUI_MOD_ALT);
+    assert(!tui_input_parser_pending_escape(p));
+
+    /* ESC [ is a sequence in progress, not a lone ESC. */
+    assert(tui_input_parser_parse(p, (const unsigned char *)"\033[", 2, msgs,
+                                  4) == 0);
+    assert(!tui_input_parser_pending_escape(p));
+    tui_input_parser_free(p);
+}
+
 static void test_esc_del_is_alt_backspace(void)
 {
     TuiMsg m = parse_one("\033\177");
@@ -906,6 +950,8 @@ int main(void)
     RUN_TEST(test_kitty_other_ctrl_keys_are_keys);
     RUN_TEST(test_kitty_flags_reply_is_claimed_not_typed);
     RUN_TEST(test_csi_ctrl_up_still_works);
+    RUN_TEST(test_lone_esc_parks_then_flushes_as_escape);
+    RUN_TEST(test_esc_then_byte_leaves_nothing_pending);
     RUN_TEST(test_esc_del_is_alt_backspace);
     RUN_TEST(test_esc_bs_is_alt_backspace);
     RUN_TEST(test_kitty_alt_backspace_matches_escape_del);
