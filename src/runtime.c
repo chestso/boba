@@ -245,21 +245,38 @@ static long long runtime_now_ms(void)
 #endif
 }
 
-/* Dispatch on_tick at most once per interval. on_tick is a periodic
- * timer (Elm's Time.every); firing it on EVERY loop iteration turns a
- * callback that touches the terminal (spinner frame → wakeup → wait →
- * tick → …) into a busy loop — boba's wait becomes a no-op because the
- * wakeup pipe is always armed. `interval_ms` is the timeout the wait
- * just used; a negative interval means "no periodic tick wanted". */
-static void runtime_tick_maybe(TuiRuntime *runtime, int interval_ms)
+/* boba's own tick cadence for a consumer that installs on_tick with no
+ * get_tick_timeout_ms: the 100 ms period is anchored at the last
+ * dispatch, reported as the remaining ETA. (A constant ETA would be
+ * pushed out by every wake: the loop re-asks it after each one.) */
+#define TUI_DEFAULT_TICK_MS 100
+
+static int runtime_default_tick_eta(TuiRuntime *runtime)
 {
-    if (!runtime->config.on_tick || interval_ms < 0)
+    if (runtime->last_tick_ms == 0)
+        return 0; /* the first tick is immediate; the period starts there */
+    long long left = runtime->last_tick_ms + TUI_DEFAULT_TICK_MS -
+                     runtime_now_ms();
+    return left > 0 ? (int)left : 0;
+}
+
+/* Dispatch on_tick when its OWN deadline has been reached.
+ *
+ * get_tick_timeout_ms names the app's next timed event as an ETA from
+ * the moment it is asked; the loop turns that into the absolute time
+ * `tick_at_ms` once per iteration. A wake for something else — a key,
+ * an fd, the ESC deadline — arrives before the deadline and dispatches
+ * nothing, and a wake after it still dispatches in that same
+ * iteration. 0 is "due now" and is dispatched: never substituted with
+ * a default interval, which would stretch the app's event into a
+ * cadence it did not ask for and poll the loop at full speed until it
+ * elapsed. -1 is "nothing armed" (block; no tick). */
+static void runtime_tick_due(TuiRuntime *runtime, long long tick_at_ms)
+{
+    if (!runtime->config.on_tick || tick_at_ms < 0)
         return;
-    if (interval_ms == 0)
-        interval_ms = 100; /* config default when get_tick_timeout_ms absent */
     long long now = runtime_now_ms();
-    if (runtime->last_tick_ms != 0 &&
-        now - runtime->last_tick_ms < interval_ms)
+    if (now < tick_at_ms)
         return;
     runtime->last_tick_ms = now;
     runtime->config.on_tick(runtime->config.event_data);
@@ -1981,7 +1998,8 @@ int tui_runtime_run(TuiRuntime *runtime)
             ext_idx[i] = n_fds++;
         }
 
-        /* Compute tick timeout */
+        /* The tick's deadline: the app's ETA to its next timed event
+         * (-1: nothing armed, block without a tick). */
         int timeout_ms;
         if (runtime->config.get_tick_timeout_ms) {
             timeout_ms = runtime->config.get_tick_timeout_ms(
@@ -1989,11 +2007,13 @@ int tui_runtime_run(TuiRuntime *runtime)
             if (timeout_ms < 0)
                 timeout_ms = -1; /* Block indefinitely */
         } else {
-            timeout_ms = 100; /* Default 100ms for simple consumers */
+            timeout_ms = runtime_default_tick_eta(runtime);
         }
+        long long tick_at_ms =
+            timeout_ms >= 0 ? runtime_now_ms() + timeout_ms : -1;
 
-        /* A parked lone ESC shortens the wait to its deadline; the tick
-         * keeps its own interval (timeout_ms), not the shortened one. */
+        /* A parked lone ESC shortens the WAIT only: the tick keeps its
+         * own deadline (tick_at_ms). */
         int wait_ms = timeout_ms;
         int esc_ms = tui_runtime_input_timeout_ms(runtime);
         if (esc_ms >= 0 && (wait_ms < 0 || esc_ms < wait_ms))
@@ -2070,11 +2090,11 @@ int tui_runtime_run(TuiRuntime *runtime)
             tui_runtime_flush(runtime);
         }
 
-        /* Tick — the periodic timer, rate-limited to the configured
-         * interval (see runtime_tick_maybe). The capability probe
-         * shares the tick as its deadline clock: a terminal that never
-         * answers must not hold the commit gate forever. */
-        runtime_tick_maybe(runtime, timeout_ms);
+        /* The tick is due when ITS deadline has passed (see
+         * runtime_tick_due). The capability probe shares the tick as
+         * its deadline clock: a terminal that never answers must not
+         * hold the commit gate forever. */
+        runtime_tick_due(runtime, tick_at_ms);
         tui_runtime_probe_check(runtime);
     }
 
@@ -2264,8 +2284,8 @@ int tui_runtime_run(TuiRuntime *runtime)
             runtime->io_kinds[i] = -1;
         }
 
-        /* Compute timeout (100ms default) */
-        DWORD timeout_ms = 100;
+        /* The tick's deadline (see the Unix branch). */
+        DWORD timeout_ms;
         if (runtime->config.get_tick_timeout_ms) {
             int ms = runtime->config.get_tick_timeout_ms(
                 runtime->config.event_data);
@@ -2273,10 +2293,15 @@ int tui_runtime_run(TuiRuntime *runtime)
                 timeout_ms = INFINITE;
             else
                 timeout_ms = (DWORD)ms;
+        } else {
+            timeout_ms = (DWORD)runtime_default_tick_eta(runtime);
         }
+        long long tick_at_ms = timeout_ms == INFINITE
+                                   ? -1
+                                   : runtime_now_ms() + (long long)timeout_ms;
 
-        /* A parked lone ESC shortens the wait to its deadline; the tick
-         * keeps its own interval (timeout_ms), not the shortened one. */
+        /* A parked lone ESC shortens the WAIT only: the tick keeps its
+         * own deadline (tick_at_ms). */
         DWORD wait_ms = timeout_ms;
         int esc_ms = tui_runtime_input_timeout_ms(runtime);
         if (esc_ms >= 0 && (wait_ms == INFINITE || (DWORD)esc_ms < wait_ms))
@@ -2357,11 +2382,9 @@ int tui_runtime_run(TuiRuntime *runtime)
         if (tui_runtime_input_expire(runtime))
             tui_runtime_flush(runtime);
 
-        /* Tick — rate-limited to the configured interval. On the
-         * Windows branch timeout_ms is DWORD (INFINITE = 0xFFFFFFFF),
-         * so map "wait forever" to the no-tick sentinel. */
-        runtime_tick_maybe(runtime,
-                           timeout_ms == INFINITE ? -1 : (int)timeout_ms);
+        /* The tick is due when ITS deadline has passed (see the Unix
+         * branch). */
+        runtime_tick_due(runtime, tick_at_ms);
         tui_runtime_probe_check(runtime);
     }
 

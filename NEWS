@@ -4,6 +4,27 @@ boba NEWS
 Unreleased
 ----------
 
+tick: the app's ETA is a deadline, and 0 means due now
+
+  get_tick_timeout_ms names the next timed event as an ETA from the
+  moment it is asked, but the loop re-asked it after every wake and
+  fired only when "now - last dispatch" reached that value. With a
+  remaining-time ETA that fired early: any wake past the halfway point
+  satisfied the comparison. And a 0 ETA — an event already due — was
+  read as the 100 ms default, which delayed the event and spun the loop
+  in poll(0) until the default had elapsed.
+
+    - tui_runtime_run() (Unix and Windows) turns the ETA into an absolute
+      tick deadline once per iteration and dispatches on_tick when that
+      time has passed. An early wake (a keystroke, an fd, the ESC
+      deadline) neither fires nor postpones it; a late wake still
+      dispatches in the same iteration; 0 dispatches at once.
+    - -1 remains "nothing armed": the loop blocks with no tick. The 100 ms
+      default stays for a consumer that installs on_tick with no
+      get_tick_timeout_ms at all.
+    - New tests: a 0 ETA fires without waiting out a default interval, and
+      a wake before the deadline does not dispatch the tick.
+
 input: a lone Esc reaches the app on legacy terminals
 
   The parser parks an ESC byte until the next byte says whether it was

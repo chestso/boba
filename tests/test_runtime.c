@@ -1271,18 +1271,19 @@ static void test_fill_overflow_clamps(void)
     fclose(devnull);
 }
 
-/* The tick is a PERIODIC timer (Elm's Time.every), not an
- * every-iteration hook. A tick callback that wakes the loop (nevermore's
- * spinner does exactly this: advance frame → tui_runtime_wakeup) must
- * not spin: the wakeup re-arms the wait, the wait times out, and a
- * naive "fire on every iteration" tick would re-wake forever at CPU
- * speed. Regression for the nevermore 2026-09-15 repaint storm
- * (341k fps, giant PTY captures, duplicated transcript rows).
+/* The tick fires at the app's named deadline, not on every iteration.
+ * A tick callback that wakes the loop (nevermore's spinner does exactly
+ * this: advance frame → tui_runtime_wakeup) must not spin: the wakeup
+ * re-arms the wait, the wait times out, and a naive "fire on every
+ * iteration" tick would re-wake forever at CPU speed. Regression for
+ * the nevermore 2026-09-15 repaint storm (341k fps, giant PTY captures,
+ * duplicated transcript rows).
  *
  * The counter callback wakes every time it runs and gives up after a
- * bounded number of dispatches; with rate limiting it must be far
- * below the iteration count that a 200ms wall-clock run with an
- * always-armed wakeup pipe would produce if the tick fired per loop. */
+ * bounded number of dispatches; with a flat 100 ms ETA the dispatches
+ * must be ~100 ms apart, far below the iteration count that a 200ms
+ * wall-clock run with an always-armed wakeup pipe would produce if the
+ * tick fired per loop. */
 #ifndef _WIN32
 
 static TuiRuntime *s_tick_count_rt = NULL;
@@ -1310,7 +1311,7 @@ static int tick_count_timeout(void *data)
     return 100; /* the documented default interval */
 }
 
-static void test_tick_is_rate_limited(void)
+static void test_tick_follows_the_configured_interval(void)
 {
     FILE *devnull = fopen(DEVNULL, "w");
     assert(devnull != NULL);
@@ -1335,7 +1336,7 @@ static void test_tick_is_rate_limited(void)
     s_tick_post_done = 0;
 
     /* The callback wakes the loop after every dispatch (the nevermore
-     * spinner pattern) and is released on the Nth. With rate limiting,
+     * spinner pattern) and is released on the Nth. At a 100 ms ETA,
      * reaching N dispatches takes N*interval ms of wall clock; when
      * the tick fired every loop iteration it returned in microseconds
      * with an astronomically larger count. Measure the wall time and
@@ -1360,6 +1361,200 @@ static void test_tick_is_rate_limited(void)
     close(stdin_pipe[1]);
 
     s_tick_count_rt = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+
+/* 0 is "due now", not "use 100 ms". The first dispatch (a 100 ms ETA)
+ * arms the clock; the next ETA is 0 and must be dispatched in the
+ * following iteration, with no wall-clock wait. The old floor read 0 as
+ * a 100 ms interval and spun the loop in poll(0) until that much time
+ * had passed since the dispatch — the window nevermore's spinner frame
+ * deadline lands in whenever another wake pushed its ask late. */
+static TuiRuntime *s_zero_eta_rt = NULL;
+static int s_zero_eta_count = 0;
+static long long s_zero_eta_last_ms = 0;
+static long long s_zero_eta_gap_ms = -1;
+
+static long long tick_test_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int zero_eta_timeout(void *data)
+{
+    (void)data;
+    return s_zero_eta_count == 0 ? 100 : 0;
+}
+
+static void zero_eta_tick(void *data)
+{
+    (void)data;
+    long long now = tick_test_now_ms();
+    if (s_zero_eta_count == 1)
+        s_zero_eta_gap_ms = now - s_zero_eta_last_ms;
+    s_zero_eta_last_ms = now;
+    s_zero_eta_count++;
+    if (s_zero_eta_count >= 2) {
+        TuiMsg msg = tui_msg_custom(WAKEUP_MSG_TYPE, NULL);
+        tui_runtime_post(s_zero_eta_rt, msg);
+    }
+}
+
+static void test_zero_eta_fires_now(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    int stdin_pipe[2];
+    assert(pipe(stdin_pipe) == 0);
+    int orig_stdin = dup(STDIN_FILENO);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+
+    s_zero_eta_count = 0;
+    s_zero_eta_last_ms = 0;
+    s_zero_eta_gap_ms = -1;
+
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .on_tick = zero_eta_tick,
+        .get_tick_timeout_ms = zero_eta_timeout,
+    };
+    TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_zero_eta_rt = rt;
+
+    assert(tui_runtime_run(rt) == 0);
+    assert(s_zero_eta_count >= 2);
+    /* The 0 ETA dispatch waits for the loop, not for a 100 ms floor
+     * (the slack covers a loaded runner, not the old behavior). */
+    assert(s_zero_eta_gap_ms >= 0);
+    assert(s_zero_eta_gap_ms < 60);
+
+    dup2(orig_stdin, STDIN_FILENO);
+    close(orig_stdin);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+
+    s_zero_eta_rt = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+}
+
+/* An early wake dispatches nothing: the tick lands on its deadline.
+ * The app names a 600 ms deadline; a child writes the wake pipe at 300
+ * and 360 ms. The old rate limiter compared "now - last dispatch" with
+ * the remaining ETA re-asked at the wake, so the first byte fired the
+ * tick at 300 ms — before the deadline it was asked about. */
+static TuiRuntime *s_early_rt = NULL;
+static long long s_early_deadline_ms = 0;
+static long long s_early_fire_ms = 0;
+static int s_early_wakes = 0;
+static int s_early_pipe[2] = { -1, -1 };
+
+static int early_wake_timeout(void *data)
+{
+    (void)data;
+    long long left = s_early_deadline_ms - tick_test_now_ms();
+    if (left <= 0)
+        return 0;
+    return left > 2147483000LL ? 2147483000 : (int)left;
+}
+
+static void early_wake_tick(void *data)
+{
+    (void)data;
+    s_early_fire_ms = tick_test_now_ms();
+    TuiMsg msg = tui_msg_custom(WAKEUP_MSG_TYPE, NULL);
+    tui_runtime_post(s_early_rt, msg);
+}
+
+static size_t early_wake_fill(TuiIoSource *out, size_t cap, void *data)
+{
+    (void)data;
+    if (cap < 1)
+        return 0;
+    out[0].handle = s_early_pipe[0];
+    out[0].flags = TUI_IO_READ;
+    return 1;
+}
+
+static void early_wake_ready(intptr_t handle, unsigned ready, void *data)
+{
+    (void)handle;
+    (void)ready;
+    (void)data;
+    unsigned char buf[16];
+    while (read(s_early_pipe[0], buf, sizeof(buf)) > 0)
+        s_early_wakes++;
+}
+
+static void test_tick_ignores_early_wakes(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    int stdin_pipe[2];
+    assert(pipe(stdin_pipe) == 0);
+    int orig_stdin = dup(STDIN_FILENO);
+    dup2(stdin_pipe[0], STDIN_FILENO);
+
+    assert(pipe(s_early_pipe) == 0);
+    s_early_wakes = 0;
+    s_early_fire_ms = 0;
+
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        /* The early wakes: two bytes, well before the deadline. */
+        close(s_early_pipe[0]);
+        usleep(300 * 1000);
+        if (write(s_early_pipe[1], "x", 1) != 1)
+            _exit(1);
+        usleep(60 * 1000);
+        if (write(s_early_pipe[1], "x", 1) != 1)
+            _exit(1);
+        _exit(0);
+    }
+    close(s_early_pipe[1]);
+
+    s_early_deadline_ms = tick_test_now_ms() + 600;
+
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .fill_io_sources = early_wake_fill,
+        .on_io_ready = early_wake_ready,
+        .on_tick = early_wake_tick,
+        .get_tick_timeout_ms = early_wake_timeout,
+    };
+    TuiRuntime *rt = tui_runtime_create(&wakeup_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_early_rt = rt;
+
+    assert(tui_runtime_run(rt) == 0);
+
+    int status = 0;
+    waitpid(child, &status, 0);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    /* The wakes arrived (the test measured what it claims), and the
+     * tick did not run before its deadline (20 ms of clock rounding). */
+    assert(s_early_wakes >= 1);
+    assert(s_early_fire_ms > 0);
+    assert(s_early_fire_ms >= s_early_deadline_ms - 20);
+
+    dup2(orig_stdin, STDIN_FILENO);
+    close(orig_stdin);
+    close(stdin_pipe[0]);
+    close(stdin_pipe[1]);
+    close(s_early_pipe[0]);
+    s_early_pipe[0] = -1;
+
+    s_early_rt = NULL;
     tui_runtime_free(rt);
     fclose(devnull);
 }
@@ -3816,7 +4011,9 @@ int main(void)
 #ifndef _WIN32
     RUN_TEST(test_runtime_run_immediate_quit);
     RUN_TEST(test_post_wakes_event_loop);
-    RUN_TEST(test_tick_is_rate_limited);
+    RUN_TEST(test_tick_follows_the_configured_interval);
+    RUN_TEST(test_zero_eta_fires_now);
+    RUN_TEST(test_tick_ignores_early_wakes);
     RUN_TEST(test_lone_esc_is_escape_after_timeout);
     RUN_TEST(test_esc_sequence_in_time_is_not_escape);
 #ifndef _WIN32

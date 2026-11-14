@@ -114,11 +114,16 @@ typedef size_t (*TuiFillIoSources)(TuiIoSource *out, size_t cap,
 typedef void (*TuiOnIoReady)(intptr_t handle, unsigned ready,
                              void *user_data);
 
-/* Callback: called every tick (wait timeout, ~100ms) */
+/* Callback: the deadline named by TuiGetTickTimeoutMs has arrived */
 typedef void (*TuiOnTick)(void *user_data);
 
-/* Return ms until next tick is needed, or -1 to block indefinitely.
- * Called before each select(). */
+/* Return the ETA in ms to the next on_tick, or -1 to block with no
+ * tick. 0 is DUE NOW: it is dispatched in the same iteration, never
+ * substituted with a default interval. The ETA is re-asked every
+ * iteration and turned into an absolute deadline, so an early wake
+ * for an fd, a key or the ESC deadline neither moves nor fires the
+ * tick — it must be the time LEFT, not a fresh period, or every early
+ * wake would push the deadline out. */
 typedef int (*TuiGetTickTimeoutMs)(void *user_data);
 
 /* Callback: terminal resized (width, height already updated in runtime) */
@@ -174,7 +179,7 @@ typedef struct TuiRuntimeConfig
     /* Event loop callbacks (used by tui_runtime_run) */
     TuiFillIoSources fill_io_sources;        /* Declare I/O sources (per wait) */
     TuiOnIoReady on_io_ready;                /* Per-source: (handle, bits) fired */
-    TuiOnTick on_tick;                       /* Tick (~100ms timeout) */
+    TuiOnTick on_tick;                       /* Tick at the app's deadline */
     TuiGetTickTimeoutMs get_tick_timeout_ms; /* Dynamic tick timeout */
     TuiOnResize on_resize;                   /* Terminal resized */
     TuiOnStdinProcessed on_stdin_processed;  /* After stdin processed */
@@ -232,12 +237,11 @@ struct TuiRuntime
      * zero/off when no row is open. */
     int inline_partial_open;
     int inline_partial_cols;
-    /* Monotonic time (ms) of the last on_tick dispatch. on_tick is a
-     * periodic timer (Elm's Time.every), so it fires only once per
-     * get_tick_timeout_ms interval even when the loop wakes early for
-     * fds or wakeups — otherwise a dispatch that touches the terminal
-     * spins the loop (a wakeup re-arms the wait, the wait fires the
-     * tick, the tick wakes again). */
+    /* Monotonic time (ms) of the last on_tick dispatch — a record, not
+     * the schedule. The schedule is the app's own ETA
+     * (get_tick_timeout_ms), turned into an absolute deadline each
+     * iteration: an early wake cannot fire or postpone it, and 0 means
+     * "due now" rather than "use the default interval". */
     long long last_tick_ms;
     /* Monotonic time (ms) at which a parked lone ESC becomes the Escape
      * key; 0 when none is parked. Re-armed on every input batch. */
