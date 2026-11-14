@@ -57,7 +57,7 @@ from the reported text, and IME results.
 ## Architecture
 
 - **Shared selection abstraction.** Viewport tracks `(visual_line,
-display_col)`; textinput tracks `cursor_byte`. They only share the
+  display_col)`; textinput tracks `cursor_byte`. They only share the
   `TUI_CMD_CLIPBOARD_COPY` pipeline. Revisit only if a third consumer
   with the same shape appears.
 

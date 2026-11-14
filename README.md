@@ -840,7 +840,7 @@ Optional (for development):
 - `bear` — Generate `compile_commands.json` for clang tooling
 - `clang-tools-extra` — Provides `clang-format` for code formatting
 - `shfmt` — Shell script formatting
-- `prettier` — Markdown formatting
+- `dprint` — Markdown formatting
 
 On Fedora 41+:
 
@@ -867,7 +867,7 @@ Useful targets, all run from `build/`:
 - `make` — build `libboba.a`
 - `make check` — run the test suite (folds in tmux end-to-end tests when tmux is detected)
 - `make install` — install to `--prefix`
-- `make format` — clang-format on C sources, shfmt on shell, prettier on Markdown
+- `make format` — clang-format on C sources, shfmt on shell, dprint on Markdown
 - `make bear` — produce `compile_commands.json` for clangd
 
 Release build: omit `--enable-debug` and pass `CFLAGS="-O2 -DNDEBUG"` to `configure`.
