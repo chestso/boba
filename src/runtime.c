@@ -129,6 +129,11 @@ static DWORD WINAPI stdin_reader_thread(LPVOID param)
 
     while (1) {
         DWORD bytes_read = 0;
+        /* Teardown signals stdin_done before it cancels; a thread that
+         * has not issued its first read yet must not issue one, or it
+         * parks after the cancel has already come and gone. */
+        if (WaitForSingleObject(rt->stdin_done, 0) == WAIT_OBJECT_0)
+            break;
         BOOL ok = ReadFile(h_stdin, buf, sizeof(buf), &bytes_read, NULL);
 
         if (!ok || bytes_read == 0) {
@@ -2397,18 +2402,26 @@ int tui_runtime_run(TuiRuntime *runtime)
 
     /* Teardown: stop the reader thread. It is normally parked in a
      * blocking ReadFile, which stdin_done cannot interrupt — the thread
-     * only looks at that event after a read returns — so cancel the
-     * pending I/O first. Without this the thread outlives the runtime and
-     * keeps the app's stdin handle busy: whoever closes that handle next
-     * blocks in CloseHandle until the pipe's write end goes away (the
-     * 2026-09-22 Windows CI hang: test_handle_source_dispatch sat in
-     * CloseHandle(rd) forever, reader still in ReadFile at line 130 and
-     * the test's write end still open). */
-    if (runtime->stdin_thread)
-        CancelSynchronousIo(runtime->stdin_thread);
+     * only looks at that event before its next read — so cancel the
+     * pending I/O. ONE cancel is not enough: a runtime that quits on its
+     * first iteration tears down in under a millisecond (an app whose
+     * tick is due now), and a cancel that lands before the thread has
+     * issued its read cancels nothing — the thread then parks in a read
+     * nobody will interrupt. So signal stdin_done, then cancel and wait
+     * until the thread has actually exited. Without this the thread
+     * outlives the runtime and keeps the app's stdin handle busy:
+     * whoever closes that handle next blocks in CloseHandle until the
+     * pipe's write end goes away (the 2026-09-22 CI hang in
+     * test_handle_source_dispatch, which came back through this window
+     * on the v0.11.2 run once the tick deadline made teardown fast). */
     SetEvent(runtime->stdin_done);
     if (runtime->stdin_thread) {
-        WaitForSingleObject(runtime->stdin_thread, 2000);
+        for (int waited = 0; waited < 2000; waited += 10) {
+            CancelSynchronousIo(runtime->stdin_thread);
+            if (WaitForSingleObject(runtime->stdin_thread, 10) ==
+                WAIT_OBJECT_0)
+                break;
+        }
         CloseHandle(runtime->stdin_thread);
         runtime->stdin_thread = NULL;
     }

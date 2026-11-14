@@ -4,6 +4,24 @@ boba NEWS
 Unreleased
 ----------
 
+runtime (Windows): the stdin reader thread is always stopped at teardown
+
+  The reader parks in a blocking ReadFile, and teardown cancelled that
+  read once. A runtime that quits on its first iteration tears down in
+  under a millisecond — now the common case, since an app whose tick is
+  due now dispatches at once — and a cancel that lands before the thread
+  has issued its read cancels nothing: the thread then parked in a read
+  nobody interrupted, held the app's stdin handle, and the next
+  CloseHandle of that handle blocked until the pipe's write end went
+  away. That is the 2026-09-22 Windows CI hang, back through a window the
+  faster teardown opened.
+
+    - stdin_reader_thread() checks stdin_done before each read, so a
+      thread that has not started reading yet never issues one.
+    - Teardown signals stdin_done first, then cancels and waits until the
+      thread has actually exited, instead of cancelling once and
+      trusting it.
+
 tick: the app's ETA is a deadline, and 0 means due now
 
   get_tick_timeout_ms names the next timed event as an ETA from the
