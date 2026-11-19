@@ -4,6 +4,16 @@ boba NEWS
 Unreleased
 ----------
 
+textinput: a paste is one edit, not one per cluster
+
+  insert_paste() normalised the payload and then called insert_text() once
+  per cluster, and insert_text() ends in a buffer scan, a visual-row
+  rebuild and a scroll re-anchor — so a many-line bracketed paste cost
+  O(n^2) and hung the UI (1600 wrapped lines took about 36 s).
+
+    - The payload is normalised into a scratch buffer first and inserted
+      in one insert_text() call; all-control payloads stay a no-op.
+
 runtime (Windows): the stdin reader thread is always stopped at teardown
 
   The reader parks in a blocking ReadFile, and teardown cancelled that
