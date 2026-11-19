@@ -479,6 +479,53 @@ static void test_paste_empty_payload_is_a_noop(void)
     tui_textinput_free(input);
 }
 
+/* A big paste used to hang the UI. insert_paste() called insert_text()
+ * once per cluster, and insert_text() ends in recalculate_cursor_position()
+ * — a scan of the buffer to the cursor, a rebuild of the visual-row
+ * layout and a re-anchor of the scroll window — so a many-line paste was
+ * O(n^2): 1600 wrapped lines took ~36 s on the developer box. The paste
+ * path now normalises once and inserts in one call.
+ *
+ * The watchdog (BOBA_TEST_TIMEOUT, 10 s) is the performance guard: the
+ * old path could not finish this payload inside it. The asserts are the
+ * correctness guard a bulk insert needs anyway — a paste that lost,
+ * reordered or re-encoded text would still be fast. */
+static void test_paste_many_lines_is_linear(void)
+{
+    enum
+    {
+        LINES = 2000,
+        LINE_LEN = 40
+    };
+    TuiTextInputConfig cfg = {
+        .multiline = 1,
+        .wrap = TUI_TEXTINPUT_WRAP,
+        .geometry = { .width = 80 },
+    };
+    TuiTextInput *input = tui_textinput_create(&cfg);
+    run_update(input, tui_msg_focus());
+
+    size_t len = (size_t)LINES * (LINE_LEN + 1);
+    char *payload = (char *)malloc(len + 1);
+    assert(payload != NULL);
+    size_t n = 0;
+    for (int i = 0; i < LINES; i++) {
+        for (int j = 0; j < LINE_LEN; j++)
+            payload[n++] = (char)('a' + (j % 26));
+        payload[n++] = '\n';
+    }
+    payload[n] = '\0';
+
+    send_paste_len(input, payload, n);
+    assert(tui_textinput_len(input) == n);
+    assert(tui_textinput_cursor(input) == n);
+    assert(tui_textinput_line_count(input) == LINES + 1);
+    assert(strcmp(tui_textinput_text(input), payload) == 0);
+
+    free(payload);
+    tui_textinput_free(input);
+}
+
 /* ---------- associated text (kitty flag 16) ---------- */
 
 /* Send a key press carrying the text the key produced. */
@@ -3230,6 +3277,7 @@ int main(void)
     RUN_TEST(test_paste_is_one_undo_entry);
     RUN_TEST(test_paste_ignored_when_unfocused);
     RUN_TEST(test_paste_empty_payload_is_a_noop);
+    RUN_TEST(test_paste_many_lines_is_linear);
     RUN_TEST(test_key_text_is_inserted);
     RUN_TEST(test_shifted_letter_without_text_recovers_capital);
     RUN_TEST(test_ctrl_binding_survives_associated_text);

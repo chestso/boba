@@ -150,8 +150,11 @@ inline cursor-up clamp. Deliberately left for later:
   clamp is written once; the migration is mechanical but touches their
   render paths.
 - **Incremental layout.** `layout_get()` rebuilds from the whole text on
-  any edit. A dirty-from byte (the first edited logical line) would make a
-  megabyte paste cost one row rebuild instead of two full walks.
+  any edit, and `recalculate_cursor_position()` rescans the buffer to the
+  cursor on top of that — two full walks per keystroke, whichever end of
+  a long prompt you type at. A dirty-from byte (the first edited logical
+  line) would pay for the edited tail only. A bracketed paste is already
+  a single walk: its payload is normalised once and inserted as one edit.
 - **Detached scrolling** (mouse wheel, Ctrl+Up/Down) needs a "cursor
   off-window" state, and so does mouse drag-to-select: both want the
   screen-to-byte map the layout can now answer. Design them together.

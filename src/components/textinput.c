@@ -802,14 +802,28 @@ static int insert_codepoint(TuiTextInput *input, uint32_t cp)
  * is what the view paints and the app reads. A truncated UTF-8 tail is
  * dropped whole, never inserted half-decoded.
  *
- * The payload lands as ONE edit — insert_text per run — so the caller
- * wraps it in a single undo snapshot: one undo restores the buffer the
- * paste landed on, not one per character pasted. */
+ * The payload lands as ONE edit, so the caller wraps it in a single undo
+ * snapshot: one undo restores the buffer the paste landed on, not one per
+ * character pasted. It is also one edit internally, and that is what
+ * keeps a big paste linear: insert_text() ends in
+ * recalculate_cursor_position(), which scans the buffer to the cursor,
+ * rebuilds the visual-row layout and re-anchors the scroll window — so
+ * inserting run by run would make a paste of n bytes O(n^2) and hang the
+ * UI on a many-line paste. The payload is normalised into a scratch
+ * buffer first and inserted in one call. */
 static void insert_paste(TuiTextInput *input, const TuiPasteMsg *paste)
 {
-    if (!paste || !paste->text)
+    if (!paste || !paste->text || paste->len == 0)
         return;
 
+    /* Normalisation never grows the payload: a dropped control byte and a
+     * two-byte CRLF becoming one break both shrink it, and every other
+     * cluster copies through whole. So paste->len + 1 is the bound. */
+    char *out = (char *)malloc(paste->len + 1);
+    if (!out)
+        return;
+
+    size_t n = 0;
     const char *p = paste->text;
     const char *end = p + paste->len;
 
@@ -820,7 +834,7 @@ static void insert_paste(TuiTextInput *input, const TuiPasteMsg *paste)
             if (c == '\r' && p + 1 < end && p[1] == '\n')
                 p++; /* CRLF is one break, not two */
             p++;
-            insert_codepoint(input, input->multiline ? '\n' : ' ');
+            out[n++] = input->multiline ? '\n' : ' ';
             continue;
         }
         if (c < 0x20) { /* C0 control bytes are not text */
@@ -832,9 +846,17 @@ static void insert_paste(TuiTextInput *input, const TuiPasteMsg *paste)
         (void)tui_next_cluster(p, (size_t)(end - p), &bytes);
         if (bytes == 0)
             break; /* a truncated tail is dropped whole */
-        insert_text(input, p, bytes);
+        memcpy(out + n, p, bytes);
+        n += bytes;
         p += bytes;
     }
+
+    /* An all-control payload is still a no-op, exactly as it was when the
+     * old loop called insert_text() only for bytes that survived. */
+    if (n > 0)
+        (void)insert_text(input, out, n);
+
+    free(out);
 }
 
 /* Delete character before cursor (backspace) */
