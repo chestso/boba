@@ -795,6 +795,14 @@ int tui_input_parser_feed(TuiInputParser *parser, unsigned char byte,
             parser->state = PARSER_STATE_GROUND;
             *msg = tui_msg_key(TUI_KEY_BACKSPACE, 0, TUI_MOD_ALT);
             return 1;
+        } else if (byte == '\\') {
+            /* ESC \ is ST (String Terminator) with no string open — the
+             * tail of a reply whose payload was dropped (unclaimed,
+             * truncated) or a console that let the terminator through.
+             * It is not Alt+'\\': an ST is never printable, and typing
+             * one must never insert a backslash into the input line. */
+            parser->state = PARSER_STATE_GROUND;
+            return 0;
         } else {
             /* Alt+key or unknown sequence */
             parser->state = PARSER_STATE_GROUND;

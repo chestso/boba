@@ -20,6 +20,13 @@ runtime: raw mode is entered by start(), not by the event loop
     - The event loop's own enable stays as the fallback for a caller
       that never used start(), and is a no-op after it.
 
+input: a stray string terminator is not Alt+\
+
+  "ESC \" with no string open is reply noise — the tail of a payload
+  that was dropped (unclaimed, truncated, or mangled by a console). The
+  parser read it as Alt+'\' and typed a backslash into the input. ST is
+  dropped now; a printable ESC-prefixed key (Alt+a) still parses.
+
 textinput: a paste is one edit, not one per cluster
 
   insert_paste() normalised the payload and then called insert_text() once

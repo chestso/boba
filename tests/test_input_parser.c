@@ -889,6 +889,48 @@ static void test_key_after_reply_still_parses(void)
     tui_input_parser_free(p);
 }
 
+/* A String Terminator with no string open is reply noise, never a
+ * keystroke. This is the tail a console can hand over when the reply it
+ * belonged to was dropped or truncated; the parser used to read it as
+ * Alt+'\\' and insert a backslash into the input line. */
+static void test_stray_st_is_not_a_key(void)
+{
+    assert(parse_none("\033\\"));
+}
+
+/* The whole reply, then its terminator split off on its own: the payload is
+ * captured and the ST is consumed, never typed. */
+static void test_stray_st_after_a_reply_is_not_a_key(void)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    assert(p != NULL);
+    tui_input_parser_claim_reply(p);
+    TuiMsg msgs[4];
+    const char *reply = "\033P>|coffer\033";
+    int n = tui_input_parser_parse(p, (const unsigned char *)reply,
+                                   strlen(reply), msgs, 4);
+    assert(n == 0);
+    const char *st = "\\";
+    n = tui_input_parser_parse(p, (const unsigned char *)st, strlen(st), msgs,
+                               4);
+    assert(n == 0);
+    char *payload = NULL;
+    size_t len = 0;
+    assert(tui_input_parser_next_reply(p, &payload, &len) == 1);
+    assert(strcmp(payload, ">|coffer") == 0);
+    free(payload);
+    tui_input_parser_free(p);
+}
+
+/* A printable ESC-prefixed key still works: only the terminator is special. */
+static void test_alt_letter_still_parses(void)
+{
+    TuiMsg m = parse_one("\033a");
+    assert(m.type == TUI_MSG_KEY_PRESS);
+    assert(m.data.key.rune == 'a');
+    assert(m.data.key.mods == TUI_MOD_ALT);
+}
+
 static void test_osc_title_is_not_a_reply(void)
 {
     /* Unrecognized string traffic is captured-and-dropped, never
@@ -973,6 +1015,9 @@ int main(void)
     RUN_TEST(test_release_drops_queued_replies);
     RUN_TEST(test_reply_split_across_feeds);
     RUN_TEST(test_key_after_reply_still_parses);
+    RUN_TEST(test_stray_st_is_not_a_key);
+    RUN_TEST(test_stray_st_after_a_reply_is_not_a_key);
+    RUN_TEST(test_alt_letter_still_parses);
     RUN_TEST(test_osc_title_is_not_a_reply);
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
