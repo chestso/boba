@@ -4,6 +4,22 @@ boba NEWS
 Unreleased
 ----------
 
+runtime: raw mode is entered by start(), not by the event loop
+
+  An app paints — and the first paint carries the capability-probe
+  queries — the moment tui_runtime_start() returns, but the terminal was
+  still in its legacy mode until tui_runtime_run() enabled raw mode. A
+  reply that arrives in that window is not the VT string the probe asked
+  for: a legacy-mode Windows console translated it into key records (one
+  of them a literal "\" typed into the app's input line), and a POSIX
+  tty echoed it onto the frame and held it until a newline.
+
+    - start() enters raw mode and stop() restores it, on both platforms
+      (the Windows console modes gained the same idempotent guard POSIX
+      already had).
+    - The event loop's own enable stays as the fallback for a caller
+      that never used start(), and is a no-op after it.
+
 textinput: a paste is one edit, not one per cluster
 
   insert_paste() normalised the payload and then called insert_text() once

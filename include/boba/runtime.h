@@ -261,6 +261,7 @@ struct TuiRuntime
     DWORD orig_input_mode;  /* Saved console input mode (real console) */
     DWORD orig_output_mode; /* Saved console output mode */
     int is_pty;             /* 1 = ConPTY/pipe, 0 = real console */
+    int raw_mode_active;    /* Console modes currently set by us */
     HANDLE wakeup_event;    /* Event object for waking WaitForMultipleObjects */
     /* I/O-source subscription pool: one WSAEVENT per socket slot,
      * reused across waits. Each cycle the fill callback declares up to

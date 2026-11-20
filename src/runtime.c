@@ -170,6 +170,9 @@ static int runtime_enable_raw_mode_win(TuiRuntime *rt)
     HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode;
 
+    if (rt->raw_mode_active)
+        return 0;
+
     if (GetConsoleMode(h_in, &mode)) {
         /* Real console — save and set VT input mode */
         rt->is_pty = 0;
@@ -191,11 +194,15 @@ static int runtime_enable_raw_mode_win(TuiRuntime *rt)
         /* ConPTY/pipe — no console mode to set, bytes arrive raw */
         rt->is_pty = 1;
     }
+    rt->raw_mode_active = 1;
     return 0;
 }
 
 static void runtime_disable_raw_mode_win(TuiRuntime *rt)
 {
+    if (!rt->raw_mode_active)
+        return;
+    rt->raw_mode_active = 0;
     if (!rt->is_pty) {
         HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
         SetConsoleMode(h_in, rt->orig_input_mode);
@@ -985,11 +992,37 @@ void tui_runtime_quit(TuiRuntime *runtime)
 /* Invalidate the stored inline frame (defined with the inline helpers). */
 static void inline_forget_frame(TuiRuntime *runtime);
 
+/* Undo the terminal mode start() entered. Idempotent on both platforms. */
+static void runtime_restore_mode(TuiRuntime *runtime)
+{
+#ifdef _WIN32
+    runtime_disable_raw_mode_win(runtime);
+#else
+    runtime_disable_raw_mode(runtime);
+#endif
+}
+
 void tui_runtime_start(TuiRuntime *runtime)
 {
     if (!runtime || runtime->started)
         return;
     runtime_paint_begin(runtime);
+    /* Raw mode belongs to start, not to the loop: the app may paint — and
+     * emit its capability-probe queries — the moment start() returns, and a
+     * reply that arrives before the terminal is in the right mode is not
+     * the VT string the probe expects. On Windows a legacy-mode console
+     * translates the reply into key records (one of them a literal "\"
+     * typed into the app); on POSIX the tty echoes it onto the screen and
+     * holds it until a newline. Both enable paths are idempotent, so the
+     * event loop's own call stays as a fallback for a caller that never
+     * used start(). */
+    if (runtime->config.raw_mode) {
+#ifdef _WIN32
+        runtime_enable_raw_mode_win(runtime);
+#else
+        (void)runtime_enable_raw_mode(runtime);
+#endif
+    }
     /* In inline mode, don't save cursor — stop() moves past content
      * and writes a newline; start() just begins from current position.
      * Reset inline_lines_rendered so the first flush doesn't cursor-up
@@ -1040,6 +1073,7 @@ void tui_runtime_stop(TuiRuntime *runtime)
         runtime->in_inline_mode = 0;
         runtime_paint_end(runtime);
         runtime->started = 0;
+        runtime_restore_mode(runtime);
         return;
     }
 
@@ -1063,6 +1097,7 @@ void tui_runtime_stop(TuiRuntime *runtime)
 
     runtime_paint_end(runtime);
     runtime->started = 0;
+    runtime_restore_mode(runtime);
 }
 
 /* Invalidate the stored inline frame: its drawn bytes are no longer on
