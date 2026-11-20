@@ -1972,6 +1972,349 @@ static void test_handle_source_dispatch(void)
     tui_runtime_free(rt);
     fclose(devnull);
 }
+
+/* ========================================================================
+ * TUI_SRC_SOCKET sources: a declared WRITE interest answers "writable
+ * NOW" for an ALREADY-CONNECTED socket
+ * ======================================================================== */
+
+/* WinSock's FD_WRITE is documented as edge-triggered (recorded when the
+ * socket is FIRST connected, or after a send that hit WSAEWOULDBLOCK and
+ * a later send succeeded), so a socket that is already connected and has
+ * spent that one record — a reused connection, whose previous round
+ * consumed the FD_WRITE it was bound with — looks like it can never
+ * signal again. MEASURED: it still does. Associating an already-connected
+ * socket with FD_WRITE records the event at association time (the
+ * rebind branch's "drain any already-pending data" is what delivers it),
+ * including on a RE-association after the first record was consumed, so
+ * an app that declares WRITE on an idle pooled socket is answered before
+ * the first wait. This test pins that fact: nothing is ever signalled
+ * here, and the only thing that can produce a dispatch is the
+ * association itself. */
+#define WWSOCK_MSG_TYPE (TUI_MSG_CUSTOM_BASE + 202)
+
+static TuiRuntime *s_wwsock_runtime;
+static SOCKET s_wwsock_client = INVALID_SOCKET;
+static int s_wwsock_hits;
+static int s_wwsock_tick_count;
+
+typedef struct
+{
+    TuiModel base;
+} WwsockModel;
+
+static TuiInitResult wwsock_init(void *config)
+{
+    (void)config;
+    WwsockModel *m = calloc(1, sizeof(WwsockModel));
+    m->base.type = 997;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+static TuiUpdateResult wwsock_update(TuiModel *model, TuiMsg msg)
+{
+    (void)model;
+    if (msg.type == WWSOCK_MSG_TYPE)
+        return tui_update_result(tui_cmd_quit());
+    return tui_update_result_none();
+}
+
+static TuiComponent wwsock_component = {
+    .init = wwsock_init,
+    .update = wwsock_update,
+    .view = test_view,
+    .free = test_free,
+};
+
+static size_t wwsock_fill(TuiIoSource *out, size_t cap, void *data)
+{
+    (void)data;
+    if (cap < 1)
+        return 0;
+    out[0].handle = (intptr_t)s_wwsock_client;
+    out[0].flags = TUI_IO_WRITE;
+    out[0].kind = TUI_SRC_SOCKET;
+    return 1;
+}
+
+static void wwsock_ready(intptr_t handle, unsigned ready, void *data)
+{
+    (void)data;
+    assert((SOCKET)handle == s_wwsock_client);
+    if (ready & TUI_IO_WRITE) {
+        s_wwsock_hits++;
+        tui_runtime_post(s_wwsock_runtime,
+                         tui_msg_custom(WWSOCK_MSG_TYPE, NULL));
+    }
+}
+
+static void wwsock_tick(void *data)
+{
+    (void)data;
+    /* Deadlock guard: a broken dispatch must not hang the suite. No
+     * event is ever signalled here — the socket is already writable and
+     * that is the whole point. */
+    if (++s_wwsock_tick_count > 50)
+        tui_runtime_post(s_wwsock_runtime,
+                         tui_msg_custom(WWSOCK_MSG_TYPE, NULL));
+}
+
+static void test_socket_write_interest_on_a_connected_socket(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    WSADATA wsa;
+    assert(WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+
+    /* A real loopback peer: listen, connect the client (completes), and
+     * hold the accepted socket unused — nothing is ever sent, so no
+     * FD_WRITE transition can be recorded for the client. */
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener != INVALID_SOCKET);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(bind(listener, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    assert(listen(listener, 1) == 0);
+    int alen = sizeof(addr);
+    assert(getsockname(listener, (struct sockaddr *)&addr, &alen) == 0);
+
+    s_wwsock_client = socket(AF_INET, SOCK_STREAM, 0);
+    assert(s_wwsock_client != INVALID_SOCKET);
+    assert(connect(s_wwsock_client, (struct sockaddr *)&addr,
+                   sizeof(addr)) == 0);
+    SOCKET peer = accept(listener, NULL, NULL);
+    assert(peer != INVALID_SOCKET);
+
+    /* Simulate the reused connection's history: the socket was bound
+     * with READ interest in an earlier round, and the one FD_WRITE
+     * WinSock records for a freshly connected socket was consumed then.
+     * Re-associating later records nothing more (that is the edge
+     * semantics), so only a probe can answer the new WRITE
+     * declaration. */
+    WSAEVENT spent = WSACreateEvent();
+    assert(spent != WSA_INVALID_EVENT);
+    assert(WSAEventSelect(s_wwsock_client, spent, FD_READ | FD_CLOSE) == 0);
+    WSANETWORKEVENTS ne;
+    assert(WSAEnumNetworkEvents(s_wwsock_client, spent, &ne) == 0);
+
+    /* Hand the runtime a stdin that never EOFs (see the HANDLE test). */
+    HANDLE rd = NULL, wr = NULL;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, FALSE };
+    assert(CreatePipe(&rd, &wr, &sa, 0));
+    HANDLE old_stdin = GetStdHandle(STD_INPUT_HANDLE);
+    SetStdHandle(STD_INPUT_HANDLE, rd);
+
+    s_wwsock_hits = 0;
+    s_wwsock_tick_count = 0;
+
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .fill_io_sources = wwsock_fill,
+        .on_io_ready = wwsock_ready,
+        .on_tick = wwsock_tick,
+    };
+    TuiRuntime *rt = tui_runtime_create(&wwsock_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_wwsock_runtime = rt;
+
+    assert(tui_runtime_run(rt) == 0);
+    /* The declaration was answered before any wait: the first binding
+     * dispatched WRITE with nothing sent, nothing signalled. */
+    assert(s_wwsock_hits == 1);
+
+    SetStdHandle(STD_INPUT_HANDLE, old_stdin);
+    CloseHandle(rd);
+    CloseHandle(wr);
+    s_wwsock_runtime = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+
+    closesocket(peer);
+    closesocket(s_wwsock_client);
+    s_wwsock_client = INVALID_SOCKET;
+    closesocket(listener);
+    WSACloseEvent(spent);
+    WSACleanup();
+}
+
+/* ========================================================================
+ * TUI_SRC_SOCKET sources: a declared READ interest answers data that
+ * arrived BEFORE the association
+ * ======================================================================== */
+
+/* nevermore's remaining hazard shape: the peer's bytes land between the
+ * app's last would-block read and the loop's next binding of the socket
+ * (a pooled connection makes that gap real — the request goes out, the
+ * answer can follow before the loop re-arms). WinSock records FD_READ
+ * when data ARRIVES; the question this pins is whether associating after
+ * arrival answers it. The rebind branch's "data may have arrived between
+ * connect and this first binding" drain claims it does; if a platform
+ * ever stops doing that, this case goes red and the drain needs a level
+ * probe (a zero-timeout select for READ) beside it. */
+#define RWSOCK_MSG_TYPE (TUI_MSG_CUSTOM_BASE + 203)
+
+static TuiRuntime *s_rwsock_runtime;
+static SOCKET s_rwsock_client = INVALID_SOCKET;
+static int s_rwsock_hits;
+static int s_rwsock_tick_count;
+
+typedef struct
+{
+    TuiModel base;
+} RwsockModel;
+
+static TuiInitResult rwsock_init(void *config)
+{
+    (void)config;
+    RwsockModel *m = calloc(1, sizeof(RwsockModel));
+    m->base.type = 998;
+    return tui_init_result_none((TuiModel *)m);
+}
+
+static TuiUpdateResult rwsock_update(TuiModel *model, TuiMsg msg)
+{
+    (void)model;
+    if (msg.type == RWSOCK_MSG_TYPE)
+        return tui_update_result(tui_cmd_quit());
+    return tui_update_result_none();
+}
+
+static TuiComponent rwsock_component = {
+    .init = rwsock_init,
+    .update = rwsock_update,
+    .view = test_view,
+    .free = test_free,
+};
+
+static size_t rwsock_fill(TuiIoSource *out, size_t cap, void *data)
+{
+    (void)data;
+    if (cap < 1)
+        return 0;
+    out[0].handle = (intptr_t)s_rwsock_client;
+    out[0].flags = TUI_IO_READ;
+    out[0].kind = TUI_SRC_SOCKET;
+    return 1;
+}
+
+static void rwsock_ready(intptr_t handle, unsigned ready, void *data)
+{
+    (void)data;
+    assert((SOCKET)handle == s_rwsock_client);
+    if (ready & TUI_IO_READ) {
+        s_rwsock_hits++;
+        tui_runtime_post(s_rwsock_runtime,
+                         tui_msg_custom(RWSOCK_MSG_TYPE, NULL));
+    }
+}
+
+static void rwsock_tick(void *data)
+{
+    (void)data;
+    if (++s_rwsock_tick_count > 50)
+        tui_runtime_post(s_rwsock_runtime,
+                         tui_msg_custom(RWSOCK_MSG_TYPE, NULL));
+}
+
+static void test_socket_read_interest_with_pending_data(void)
+{
+    FILE *devnull = fopen(DEVNULL, "w");
+    assert(devnull != NULL);
+
+    WSADATA wsa;
+    assert(WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener != INVALID_SOCKET);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(bind(listener, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+    assert(listen(listener, 1) == 0);
+    int alen = sizeof(addr);
+    assert(getsockname(listener, (struct sockaddr *)&addr, &alen) == 0);
+
+    s_rwsock_client = socket(AF_INET, SOCK_STREAM, 0);
+    assert(s_rwsock_client != INVALID_SOCKET);
+    assert(connect(s_rwsock_client, (struct sockaddr *)&addr,
+                   sizeof(addr)) == 0);
+    SOCKET peer = accept(listener, NULL, NULL);
+    assert(peer != INVALID_SOCKET);
+
+    /* The stale association: an event object that recorded the READ and
+     * was never enumerated (a retired slot — the pooled socket's
+     * history). The bytes then arrive under THAT association, and the
+     * runtime binds its own afterwards: the question is whether the
+     * per-socket record survives the re-association. */
+    WSAEVENT spent = WSACreateEvent();
+    assert(spent != WSA_INVALID_EVENT);
+    assert(WSAEventSelect(s_rwsock_client, spent, FD_READ | FD_CLOSE) == 0);
+
+    /* The bytes arrive while NOBODY is waiting: the app's last read had
+     * said would-block, the answer came, and only then is the loop told
+     * to watch for READ. */
+    assert(send(peer, "x", 1, 0) == 1);
+    {
+        int tries = 0;
+        for (;;) {
+            fd_set rf;
+            FD_ZERO(&rf);
+            FD_SET(s_rwsock_client, &rf);
+            struct timeval zero;
+            zero.tv_sec = 0;
+            zero.tv_usec = 0;
+            if (select(0, &rf, NULL, NULL, &zero) > 0)
+                break; /* pending and still unread */
+            assert(++tries < 500);
+            Sleep(10);
+        }
+    }
+
+    /* Hand the runtime a stdin that never EOFs (see the HANDLE test). */
+    HANDLE rd = NULL, wr = NULL;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, FALSE };
+    assert(CreatePipe(&rd, &wr, &sa, 0));
+    HANDLE old_stdin = GetStdHandle(STD_INPUT_HANDLE);
+    SetStdHandle(STD_INPUT_HANDLE, rd);
+
+    s_rwsock_hits = 0;
+    s_rwsock_tick_count = 0;
+
+    TuiRuntimeConfig cfg = {
+        .raw_mode = 0,
+        .output = devnull,
+        .fill_io_sources = rwsock_fill,
+        .on_io_ready = rwsock_ready,
+        .on_tick = rwsock_tick,
+    };
+    TuiRuntime *rt = tui_runtime_create(&rwsock_component, NULL, &cfg);
+    assert(rt != NULL);
+    s_rwsock_runtime = rt;
+
+    assert(tui_runtime_run(rt) == 0);
+    assert(s_rwsock_hits == 1);
+
+    SetStdHandle(STD_INPUT_HANDLE, old_stdin);
+    CloseHandle(rd);
+    CloseHandle(wr);
+    s_rwsock_runtime = NULL;
+    tui_runtime_free(rt);
+    fclose(devnull);
+
+    closesocket(peer);
+    closesocket(s_rwsock_client);
+    s_rwsock_client = INVALID_SOCKET;
+    closesocket(listener);
+    WSACloseEvent(spent);
+    WSACleanup();
+}
 #endif /* _WIN32 */
 
 /* ========================================================================
@@ -4027,6 +4370,8 @@ int main(void)
 
 #ifdef _WIN32
     RUN_TEST(test_handle_source_dispatch);
+    RUN_TEST(test_socket_write_interest_on_a_connected_socket);
+    RUN_TEST(test_socket_read_interest_with_pending_data);
 #endif
 
     /* TuiRenderMode tests (cross-platform — no fmemopen needed) */
