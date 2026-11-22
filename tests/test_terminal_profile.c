@@ -264,9 +264,13 @@ static void test_width_model_detect(void)
 
     /* Kitty: its terminfo name. */
     assert(tui_width_model_detect("xterm-kitty", NULL, NULL, NULL, NULL) ==
-           TUI_WIDTH_MODEL_UTS51);
+           TUI_WIDTH_MODEL_KITTY);
     assert(tui_width_model_detect("XTERM-KITTY", NULL, NULL, NULL, NULL) ==
-           TUI_WIDTH_MODEL_UTS51);
+           TUI_WIDTH_MODEL_KITTY);
+    /* TERM decides: an inherited portty declaration must not override
+     * the terminal that owns the grid. */
+    assert(tui_width_model_detect("xterm-kitty", NULL, NULL, NULL, "uts51") ==
+           TUI_WIDTH_MODEL_KITTY);
 
     /* The NESTED terminal: TERM names the terminal that owns the grid,
      * so the markers of the OUTER terminal (inherited by every child
@@ -295,11 +299,11 @@ static void test_width_model_detect(void)
     assert(tui_width_model_detect(NULL, NULL, NULL, "1", NULL) ==
            TUI_WIDTH_MODEL_UTS51);
     assert(tui_width_model_detect(NULL, NULL, "1", NULL, NULL) ==
-           TUI_WIDTH_MODEL_UTS51);
+           TUI_WIDTH_MODEL_KITTY);
     assert(tui_width_model_detect(NULL, NULL, NULL, NULL, "uts51") ==
            TUI_WIDTH_MODEL_UTS51);
     assert(tui_width_model_detect("alacritty", NULL, "1", NULL, NULL) ==
-           TUI_WIDTH_MODEL_UTS51);
+           TUI_WIDTH_MODEL_KITTY);
     assert(tui_width_model_detect("alacritty", NULL, NULL, NULL,
                                   "wcwidth") == TUI_WIDTH_MODEL_WCWIDTH);
 
@@ -307,6 +311,8 @@ static void test_width_model_detect(void)
      * must not leak through it. */
     assert(tui_width_model_detect("portty-vty-256color", "/tmp/tmux-1000",
                                   NULL, NULL, NULL) == TUI_WIDTH_MODEL_GRID);
+    assert(tui_width_model_detect("xterm-kitty", "/tmp/tmux-1000", "1",
+                                  NULL, NULL) == TUI_WIDTH_MODEL_GRID);
     assert(tui_width_model_detect("xterm-256color", "/tmp/tmux-1000", "1",
                                   NULL, NULL) == TUI_WIDTH_MODEL_GRID);
     assert(tui_width_model_detect("xterm-256color", "/tmp/tmux-1000", NULL,

@@ -4,6 +4,27 @@ boba NEWS
 Unreleased
 ----------
 
+unicode: kitty's width model is its own, not UTS #51
+
+  Kitty resolves a presentation selector against the codepoint it
+  immediately follows and the current cell width: VS15 narrows a
+  two-cell Emoji base to one, VS16 widens a one-cell Emoji base to two.
+  The base test is the UTS #51 Emoji property, which is broader than the
+  standard's text-presentation-sequence list, so `🧠︎` and `😀︎` measure
+  one cell on kitty while portty measures them two. Continuations
+  (combining marks, emoji modifiers, ZWJ components) add no width, so a
+  selector can attach to a skin tone or a ZWJ tail; consecutive selectors
+  do not undo the first.
+
+    - TUI_WIDTH_MODEL_KITTY implements kitty's rule; UTS51 remains
+      portty's text-presentation-sequence rule.
+    - The generated TU_EMOJI table carries the Emoji property.
+    - TERM=xterm-kitty and the KITTY_WINDOW_ID fallback install KITTY.
+    - Kitty's two-cell Emoji_Modifier_Base, regional indicators and emoji
+      modifiers, and its Thai/Lao SARA AM widening are included. Other
+      base widths come from boba's Unicode 18 tables; kitty 0.50 embeds
+      Unicode 17, so a few bare bases differ.
+
 runtime: raw mode is entered by start(), not by the event loop
 
   An app paints — and the first paint carries the capability-probe

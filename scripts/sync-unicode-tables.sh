@@ -2,10 +2,10 @@
 # sync-unicode-tables.sh - regenerate src/unicode_tables.h from coffer.
 #
 # coffer's gen_unicode_tables.py is the source of truth for the UAX #11
-# (East Asian Width), UAX #29 (grapheme cluster) and UTS #51
-# (text-presentation) interval tables. boba vendors its output as a
-# data-only header so both projects measure text with one Unicode
-# version, without boba linking coffer.
+# (East Asian Width), UAX #29 (grapheme cluster) and UTS #51 (emoji
+# properties and text-presentation) interval tables. boba vendors its
+# output as a data-only header so both projects measure text with one
+# Unicode version, without boba linking coffer.
 #
 # Point COFFER at a coffer checkout (default: ../coffer):
 #   COFFER=~/src/coffer scripts/sync-unicode-tables.sh

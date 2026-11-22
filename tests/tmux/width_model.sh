@@ -24,9 +24,10 @@ tmux_wait_for "$SESSION" 'model='
 # tmux is the innermost authority: grid, not uts51.
 assert_pane_contains "$SESSION" "model=grid"
 
-# And the measurement the runtime would lay out with along with it: ⚡︎ is
-# two cells under the grid rule (the base's East Asian width), ⚡ is too.
+# And the measurement the runtime would lay out with along with it: ⚡︎ and
+# 🧠︎ are two cells under the grid rule (the base's East Asian width).
 assert_pane_contains "$SESSION" "bolt_vs15=2"
 assert_pane_contains "$SESSION" "bolt_wide=2"
+assert_pane_contains "$SESSION" "brain_vs15=2"
 
 echo "PASS: width_model"

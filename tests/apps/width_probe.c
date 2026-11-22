@@ -47,11 +47,13 @@ static TuiUpdateResult probe_update(TuiModel *model, TuiMsg msg)
 static TuiView probe_view(const TuiModel *model, DynamicBuffer *out)
 {
     const Probe *p = (const Probe *)model;
-    char line[128];
-    snprintf(line, sizeof(line), "model=%s bolt_vs15=%d bolt_wide=%d\r\n",
+    char line[160];
+    snprintf(line, sizeof(line),
+             "model=%s bolt_vs15=%d bolt_wide=%d brain_vs15=%d\r\n",
              tui_width_model_name(p->model),
-             tui_utf8_display_width("\xe2\x9a\xa1\xef\xb8\x8e"), /* ⚡︎ */
-             tui_utf8_display_width("\xe2\x9a\xa1"));            /* ⚡ */
+             tui_utf8_display_width("\xe2\x9a\xa1\xef\xb8\x8e"),      /* ⚡︎ */
+             tui_utf8_display_width("\xe2\x9a\xa1"),                  /* ⚡ */
+             tui_utf8_display_width("\xf0\x9f\xa7\xa0\xef\xb8\x8e")); /* 🧠︎ */
     dynamic_buffer_append_str(out, line);
 
     TuiView v = tui_view_default(out);

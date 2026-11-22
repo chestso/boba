@@ -158,14 +158,17 @@ void tui_term_profile_env(TuiTerminalProfile *p, const char *term_program,
  *      contract: PORTTY_WIDTH when it declares one ("uts51" | "grid" |
  *      "wcwidth"), else UTS51. The declaration beats the identity, so
  *      an engine change needs one constant.
- *   3. TERM begins "xterm-kitty"                     -> UTS51
- *      Kitty re-measures with the presentation selectors.
+ *   3. TERM begins "xterm-kitty"                     -> KITTY
+ *      Kitty resolves a presentation selector against the codepoint it
+ *      follows: VS15 narrows a two-cell Emoji base, VS16 widens a
+ *      one-cell Emoji base. This is kitty's extension of UTS #51, not
+ *      the standard's text-presentation-sequence list.
  *   4. TERM begins "xterm"                           -> GRID
  *      xterm itself, and the terminals that share its aliases (iTerm2,
  *      wezterm, VTE, ghostty): a selector picks a glyph, not a cell.
  *   5. TERM names no terminal we know                -> the markers:
  *      PORTTY_WIDTH when it declares one, else PORTTY -> UTS51, else
- *      KITTY_WINDOW_ID -> UTS51, else GRID.
+ *      KITTY_WINDOW_ID -> KITTY, else GRID.
  *
  * Why TERM decides before the markers: TERM is written by the terminal
  * that owns the grid, so it names the INNERMOST terminal, while the

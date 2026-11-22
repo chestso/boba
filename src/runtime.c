@@ -674,7 +674,8 @@ TuiRuntime *tui_runtime_create(TuiComponent *component, void *component_config,
         requested = tui_width_model_detect_env();
     else if (requested != TUI_WIDTH_MODEL_GRID &&
              requested != TUI_WIDTH_MODEL_WCWIDTH &&
-             requested != TUI_WIDTH_MODEL_UTS51)
+             requested != TUI_WIDTH_MODEL_UTS51 &&
+             requested != TUI_WIDTH_MODEL_KITTY)
         requested = TUI_WIDTH_MODEL_GRID;
 
     runtime->prev_width_model = tui_width_model();

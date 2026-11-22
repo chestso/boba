@@ -174,6 +174,28 @@ static bool tu_is_regional_indicator(uint32_t cp)
     return cp >= 0x1F1E6u && cp <= 0x1F1FFu;
 }
 
+static bool tu_is_emoji(uint32_t cp)
+{
+    return range_lookup(TU_EMOJI, TU_EMOJI_LEN, cp) != 0;
+}
+
+static bool tu_is_emoji_modifier(uint32_t cp)
+{
+    return cp >= 0x1F3FBu && cp <= 0x1F3FFu;
+}
+
+static bool tu_is_emoji_modifier_base(uint32_t cp)
+{
+    return range_lookup(TU_EMOJI_MOD_BASE, TU_EMOJI_MOD_BASE_LEN, cp) != 0;
+}
+
+/* The only SpacingMarks with a positive width in the UCD 17/18 data;
+ * kitty widens a one-cell base when one of these follows it. */
+static bool tu_is_thai_lao_sara_am(uint32_t cp)
+{
+    return cp == 0x0E33u || cp == 0x0EB3u;
+}
+
 /* Does a grapheme break sit between `prev` and `cur`? A stateless
  * approximation of UAX #29 GB3-GB13 (same shape coffer uses): enough
  * for the dominant cases — combining marks attach, a ZWJ emoji sequence
@@ -218,6 +240,8 @@ const char *tui_width_model_name(TuiWidthModel model)
         return "wcwidth";
     case TUI_WIDTH_MODEL_UTS51:
         return "uts51";
+    case TUI_WIDTH_MODEL_KITTY:
+        return "kitty";
     }
     return "unknown";
 }
@@ -225,7 +249,7 @@ const char *tui_width_model_name(TuiWidthModel model)
 static int width_model_is_measurement(TuiWidthModel model)
 {
     return model == TUI_WIDTH_MODEL_GRID || model == TUI_WIDTH_MODEL_WCWIDTH ||
-           model == TUI_WIDTH_MODEL_UTS51;
+           model == TUI_WIDTH_MODEL_UTS51 || model == TUI_WIDTH_MODEL_KITTY;
 }
 
 int tui_width_model_set(TuiWidthModel model)
@@ -250,6 +274,51 @@ void tui_width_model_unpin(void)
     s_width_model_pinned = 0;
 }
 
+/* kitty resolves VS15/VS16 per codepoint, against the codepoint the
+ * selector immediately follows and the current cell width. A
+ * continuation adds no width and leaves that width state alone, which is
+ * why a ZWJ sequence or an emoji modifier can carry the selector. This is
+ * kitty's extension of UTS #51, not the EVS list. */
+static int kitty_cluster_width(const uint32_t *cps, uint32_t len)
+{
+    int width = tui_codepoint_width(cps[0]);
+    /* kitty's wcwidth is two cells for a regional indicator, an emoji
+     * modifier, and every Emoji_Modifier_Base; boba's UAX #11/ZERO
+     * tables classify some of them as one and zero. As a continuation
+     * they add no width either way. */
+    if (tu_is_regional_indicator(cps[0]) || tu_is_emoji_modifier(cps[0]) ||
+        tu_is_emoji_modifier_base(cps[0]))
+        width = 2;
+    int prev_width = width;
+    uint32_t prev = cps[0];
+
+    for (uint32_t i = 1; i < len; i++) {
+        uint32_t ch = cps[i];
+        if (ch == 0xFE0Fu) {
+            if (tu_is_emoji(prev) && prev_width == 1) {
+                width++;
+                prev_width = 2;
+            } else {
+                prev_width = 0;
+            }
+        } else if (ch == 0xFE0Eu) {
+            if (tu_is_emoji(prev) && prev_width == 2) {
+                width--;
+                prev_width = 1;
+            } else {
+                prev_width = 0;
+            }
+        } else if (tu_is_thai_lao_sara_am(ch) && prev_width == 1) {
+            width++;
+            prev_width = 2;
+        }
+        /* Every other continuation (combining mark, emoji modifier,
+         * ZWJ, joined emoji) leaves the cell width alone. */
+        prev = ch;
+    }
+    return width;
+}
+
 /* The width rule, parameterized by the terminal model. AUTO means "the
  * ambient model" (it is a configuration value, not a measurement one). */
 static int cluster_width(const uint32_t *cps, uint32_t len, TuiWidthModel model)
@@ -258,6 +327,8 @@ static int cluster_width(const uint32_t *cps, uint32_t len, TuiWidthModel model)
         return 0;
     if (model == TUI_WIDTH_MODEL_AUTO)
         model = s_width_model;
+    if (model == TUI_WIDTH_MODEL_KITTY)
+        return kitty_cluster_width(cps, len);
     /* A regional indicator pair is one flag, two cells. */
     if (len >= 2 && tu_is_regional_indicator(cps[0]) && tu_is_regional_indicator(cps[1]))
         return 2;
@@ -273,13 +344,13 @@ static int cluster_width(const uint32_t *cps, uint32_t len, TuiWidthModel model)
      *
      * VS16 forces emoji presentation (two cells) even on a Narrow base.
      *
-     * VS15 requests the TEXT presentation. Under UTS51 (portty, kitty)
-     * it takes one cell whenever UTS #51 defines a text glyph for the
-     * base (TU_TEXT_PRES); a base with no text sequence (a CJK
-     * ideograph, an SMP emoji like U+1F600) has no one-cell glyph to
-     * fall back to, so it keeps its East Asian width. Under GRID
-     * (xterm, Windows Terminal) the selector is presentation only: the
-     * base's East Asian width is the cell count either way. */
+     * VS15 requests the TEXT presentation. Under UTS51 (portty) it takes
+     * one cell whenever UTS #51 defines a text glyph for the base
+     * (TU_TEXT_PRES); a base with no text sequence (a CJK ideograph, an
+     * SMP emoji like U+1F600) has no one-cell glyph to fall back to, so it
+     * keeps its East Asian width. Under GRID (xterm, Windows Terminal) the
+     * selector is presentation only: the base's East Asian width is the
+     * cell count either way. */
     for (uint32_t i = len; i-- > 0;) {
         if (cps[i] == 0xFE0Fu)
             return 2;

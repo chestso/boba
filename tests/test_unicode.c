@@ -123,8 +123,8 @@ static void test_cluster_width_uts51(void)
 
     /* VS15 requests the text presentation, so it takes one cell where
      * UTS #51 defines a text glyph — including a Wide base like ⚡
-     * U+26A1, whose bare and VS16 forms are two cells. This is the
-     * portty/coffer and kitty rule. */
+     * U+26A1, whose bare and VS16 forms are two cells. This is
+     * portty/coffer's rule; kitty has its own, broader rule. */
     assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E }, 2, m) == 1);
     assert(tui_cluster_width_model((const uint32_t[]){ 0x2B50, 0xFE0E }, 2, m) == 1);
     assert(tui_cluster_width_model((const uint32_t[]){ 0x2764, 0xFE0E }, 2, m) == 1);
@@ -135,6 +135,69 @@ static void test_cluster_width_uts51(void)
      * an SMP emoji have no one-cell glyph to ask for. */
     assert(tui_cluster_width_model((const uint32_t[]){ 0x4E2D, 0xFE0E }, 2, m) == 2);
     assert(tui_cluster_width_model((const uint32_t[]){ 0x1F600, 0xFE0E }, 2, m) == 2);
+}
+
+static void test_cluster_width_kitty(void)
+{
+    const TuiWidthModel m = TUI_WIDTH_MODEL_KITTY;
+
+    /* VS15 narrows a two-cell Emoji base; VS16 widens a one-cell Emoji
+     * base. The Emoji property is broader than the EVS list, so brain
+     * and grinning-face narrow even though UTS #51 has no text glyph. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1 }, 1, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0F }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F9E0, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F600, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F600, 0xFE0F }, 2, m) == 2);
+
+    /* Default-text Emoji_Modifier_Bases are two cells (they can take a
+     * skin tone); other one-cell Emoji such as ❤ stay one. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x261D }, 1, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x261D, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x261D, 0xFE0F }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x270C }, 1, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2764 }, 1, m) == 1);
+
+    /* Non-Emoji bases keep their width: CJK, a pencil, a check mark. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x4E2D, 0xFE0E }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x4E2D, 0xFE0F }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 'a', 0xFE0F }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2726, 0xFE0F }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x2764, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x270F, 0xFE0F }, 2, m) == 2);
+
+    /* Consecutive selectors: the first one wins. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E, 0xFE0F }, 3, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0F, 0xFE0E }, 3, m) == 2);
+
+    /* The selector sees the immediately preceding codepoint, not the
+     * cluster's base: a combining mark blocks it, while a skin-tone
+     * modifier still carries it. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0x0301, 0xFE0E }, 3, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x26A1, 0xFE0E, 0x0301 }, 3, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F44D, 0x1F3FD, 0xFE0E }, 3, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F44D, 0x1F3FD, 0xFE0F }, 3, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x00A9, 0x1F3FD, 0xFE0F }, 3, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x00A9, 0x1F3FD, 0xFE0E }, 3, m) == 1);
+
+    /* A ZWJ tail is also an Emoji predecessor. */
+    assert(tui_cluster_width_model(
+               (const uint32_t[]){ 0x1F468, 0x200D, 0x1F469, 0x200D,
+                                   0x1F467, 0x200D, 0x1F466, 0xFE0E },
+               8, m) == 1);
+
+    /* Flags are two cells, and a selector can halve them. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F1FA, 0x1F1F8 }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F1FA, 0x1F1F8, 0xFE0E }, 3, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F1FA, 0x1F1F8, 0xFE0F }, 3, m) == 2);
+
+    /* Kitty's other codepoint-level width rules. */
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x0E01, 0x0E33 }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x0E01, 0x0EB3 }, 2, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F3FB }, 1, m) == 2);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F3FB, 0xFE0E }, 2, m) == 1);
+    assert(tui_cluster_width_model((const uint32_t[]){ 0x1F3FB, 0xFE0F }, 2, m) == 2);
 }
 
 static void test_cluster_width_wcwidth(void)
@@ -160,6 +223,11 @@ static void test_width_model_ambient(void)
     assert(tui_utf8_display_width("a\xE2\x9A\xA1\xEF\xB8\x8E"
                                   "b") == 3); /* a + ⚡︎ + b */
 
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_KITTY) == 1);
+    assert(tui_width_model() == TUI_WIDTH_MODEL_KITTY);
+    assert(tui_cluster_width((const uint32_t[]){ 0x1F9E0, 0xFE0E }, 2) == 1);
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_UTS51) == 1);
+
     /* AUTO is a configuration value, never a measurement model. */
     assert(tui_width_model_set(TUI_WIDTH_MODEL_AUTO) == 0);
     assert(tui_width_model() == TUI_WIDTH_MODEL_UTS51);
@@ -171,17 +239,21 @@ static void test_width_model_ambient(void)
     assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_GRID), "grid") == 0);
     assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_WCWIDTH), "wcwidth") == 0);
     assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_UTS51), "uts51") == 0);
+    assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_KITTY), "kitty") == 0);
     assert(strcmp(tui_width_model_name(TUI_WIDTH_MODEL_AUTO), "auto") == 0);
     assert(strcmp(tui_width_model_name((TuiWidthModel)99), "unknown") == 0);
 }
 
-/* The model only ever changes width where UTS #51 has a text glyph for
- * an East Asian Wide base. Pin the difference set so UCD regeneration
- * cannot silently widen the gap: GRID always measures the base, UTS51
- * narrows exactly the text-presentation bases. */
+/* Pin the two selector difference sets so UCD regeneration cannot
+ * silently change them: GRID always measures the base, UTS51 narrows
+ * exactly the Wide text-presentation bases, and KITTY narrows every Wide
+ * Emoji base (plus the five zero-width emoji modifiers, whose kitty base
+ * width is two). */
 static void test_width_model_difference_set(void)
 {
-    uint32_t narrowed = 0;
+    uint32_t uts_narrowed = 0;
+    uint32_t kitty_narrowed = 0;
+    uint32_t kitty_modifier_bases = 0;
     for (uint32_t cp = 0; cp <= 0x10FFFFu; cp++) {
         if (cp >= 0xD800u && cp <= 0xDFFFu)
             continue; /* surrogates are not scalar values */
@@ -189,17 +261,27 @@ static void test_width_model_difference_set(void)
         int base = tui_codepoint_width(cp);
         int grid = tui_cluster_width_model(cluster, 2, TUI_WIDTH_MODEL_GRID);
         int uts = tui_cluster_width_model(cluster, 2, TUI_WIDTH_MODEL_UTS51);
+        int kitty = tui_cluster_width_model(cluster, 2, TUI_WIDTH_MODEL_KITTY);
 
         assert(grid == base);
         assert(uts == base || uts == 1);
+        assert(kitty == base || kitty == 1);
         if (uts != grid) {
             assert(base == 2);
             assert(uts == 1);
-            narrowed++;
+            uts_narrowed++;
         }
+        if (base == 2 && kitty == 1)
+            kitty_narrowed++;
+        if (base == 0 && kitty == 1)
+            kitty_modifier_bases++;
     }
     /* UCD 18.0.0: 158 scalar values are Wide ∩ text-presentation. */
-    assert(narrowed == 158);
+    assert(uts_narrowed == 158);
+    /* ... and 1203 are Wide ∩ Emoji. */
+    assert(kitty_narrowed == 1203);
+    /* The five emoji modifiers are zero-width in boba and two in kitty. */
+    assert(kitty_modifier_bases == 5);
 }
 
 static void test_next_cluster_advance(void)
@@ -357,6 +439,7 @@ int main(void)
     RUN_TEST(test_zero_width);
     RUN_TEST(test_cluster_width_grid);
     RUN_TEST(test_cluster_width_uts51);
+    RUN_TEST(test_cluster_width_kitty);
     RUN_TEST(test_cluster_width_wcwidth);
     RUN_TEST(test_width_model_ambient);
     RUN_TEST(test_width_model_difference_set);

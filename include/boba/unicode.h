@@ -60,8 +60,19 @@ int tui_codepoint_width(uint32_t cp);
  * the width of the base.
  *
  * TUI_WIDTH_MODEL_UTS51 is the text-presentation rule used by portty
- * (coffer's engine) and kitty: VS15 takes one cell where UTS #51 defines
- * a text glyph for the base, VS16 forces two cells.
+ * (coffer's engine): VS15 takes one cell where UTS #51 defines a text
+ * glyph for the base, VS16 forces two cells.
+ *
+ * TUI_WIDTH_MODEL_KITTY is kitty's extension of the presentation rule:
+ * a selector is resolved against the codepoint it immediately follows
+ * and the current cell width. VS15 narrows a two-cell base to one when
+ * that codepoint has the Emoji property; VS16 widens a one-cell Emoji
+ * base to two. Continuations (emoji modifiers, ZWJ components) leave the
+ * cell width alone, so a selector can attach to a component rather than
+ * the cluster's first codepoint. This is kitty's rule, not UTS #51: the
+ * Emoji property is broader than the standard's variation-sequence list.
+ * Base widths follow boba's UAX #11 tables, with kitty's two-cell
+ * regional-indicator, emoji-modifier and Emoji_Modifier_Base bases.
  *
  * TUI_WIDTH_MODEL_AUTO is only a configuration value. Measurement
  * functions treat it as "use the ambient model". */
@@ -71,6 +82,7 @@ typedef enum TuiWidthModel
     TUI_WIDTH_MODEL_GRID,
     TUI_WIDTH_MODEL_WCWIDTH,
     TUI_WIDTH_MODEL_UTS51,
+    TUI_WIDTH_MODEL_KITTY,
 } TuiWidthModel;
 
 /* The process-wide model used by the zero-suffix entry points below.
@@ -80,8 +92,8 @@ typedef enum TuiWidthModel
 TuiWidthModel tui_width_model(void);
 
 /* A stable lowercase name for the model ("auto", "grid", "wcwidth",
- * "uts51"), for diagnostics and probes; "unknown" for an out-of-range
- * value. Never NULL. */
+ * "uts51", "kitty"), for diagnostics and probes; "unknown" for an
+ * out-of-range value. Never NULL. */
 const char *tui_width_model_name(TuiWidthModel model);
 
 /* Set the ambient model. Returns 1 on success, 0 when refused: AUTO is

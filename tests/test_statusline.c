@@ -500,8 +500,8 @@ static void test_width_model_change_relayouts(void)
     assert(sl->row_len == 12); /* 6 bytes of ⚡︎ + 6 fill columns */
     assert(memcmp(sl->row, "\xE2\x9A\xA1\xEF\xB8\x8E......", 12) == 0);
 
-    /* UTS51 (portty, kitty): one cell, so the fill takes seven. A
-     * message that is not a resize triggers the model check. */
+    /* UTS51 (portty): one cell, so the fill takes seven. A message that
+     * is not a resize triggers the model check. */
     assert(tui_width_model_set(TUI_WIDTH_MODEL_UTS51) == 1);
     tui_statusline_update(sl, tui_msg_none());
     assert(sl->width_model == TUI_WIDTH_MODEL_UTS51);

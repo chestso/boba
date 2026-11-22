@@ -4253,6 +4253,40 @@ static void test_width_model_auto_detects_before_init(void)
     assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
 }
 
+/* Kitty's terminfo name selects its own model, installed before init. */
+static void test_width_model_auto_detects_kitty(void)
+{
+    const char *names[] = { "TERM", "TMUX", "KITTY_WINDOW_ID", "PORTTY",
+                            "PORTTY_WIDTH" };
+    char saved[5][256];
+    int had[5];
+    for (size_t i = 0; i < 5; i++)
+        env_save(names[i], saved[i], sizeof(saved[i]), &had[i]);
+
+    env_set("TERM", "xterm-kitty");
+    env_set("TMUX", NULL);
+    env_set("KITTY_WINDOW_ID", NULL);
+    env_set("PORTTY", NULL);
+    env_set("PORTTY_WIDTH", NULL);
+
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+    FILE *out = tmpfile();
+    assert(out != NULL);
+    TuiRuntimeConfig cfg = { .raw_mode = 0, .output = out }; /* AUTO */
+    s_init_ran = 0;
+    TuiRuntime *rt = tui_runtime_create(&width_model_component, NULL, &cfg);
+    assert(rt != NULL);
+    assert(s_init_ran);
+    assert(s_init_width_model == TUI_WIDTH_MODEL_KITTY);
+    assert(rt->width_model == TUI_WIDTH_MODEL_KITTY);
+
+    tui_runtime_free(rt);
+    fclose(out);
+    for (size_t i = 0; i < 5; i++)
+        env_restore(names[i], saved[i], had[i]);
+    assert(tui_width_model_set(TUI_WIDTH_MODEL_GRID) == 1);
+}
+
 /* A second live runtime cannot re-model the process: it joins the model
  * already in force (and does not own the pin, so it does not restore it
  * on free). */
@@ -4324,6 +4358,7 @@ int main(void)
     RUN_TEST(test_paint_delivery_through_a_pipe);
     RUN_TEST(test_width_model_explicit_before_init);
     RUN_TEST(test_width_model_auto_detects_before_init);
+    RUN_TEST(test_width_model_auto_detects_kitty);
     RUN_TEST(test_width_model_second_runtime_joins);
     RUN_TEST(test_width_model_failed_create_restores);
     RUN_TEST(test_get_dimensions_null);

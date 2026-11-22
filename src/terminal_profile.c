@@ -162,7 +162,7 @@ TuiWidthModel tui_width_model_detect(const char *term, const char *tmux,
 
     /* Kitty: its terminfo name. */
     if (ci_starts_with(term, "xterm-kitty"))
-        return TUI_WIDTH_MODEL_UTS51;
+        return TUI_WIDTH_MODEL_KITTY;
 
     /* The xterm aliases: xterm itself, and the terminals that share
      * them (iTerm2, wezterm, VTE, ghostty). The grid rule is the safe
@@ -180,7 +180,7 @@ TuiWidthModel tui_width_model_detect(const char *term, const char *tmux,
     if (portty && *portty)
         return TUI_WIDTH_MODEL_UTS51;
     if (kitty_window_id && *kitty_window_id)
-        return TUI_WIDTH_MODEL_UTS51;
+        return TUI_WIDTH_MODEL_KITTY;
 
     /* Windows Terminal, and everything unknown: the terminal grid
      * ignores VS15 for layout. */
