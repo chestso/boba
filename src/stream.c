@@ -1068,8 +1068,13 @@ void tui_image_spec_init(TuiImageSpec *spec, TuiImageTransport transport,
  * only STORES the image, so an omitted a= reserves our rows and shows
  * nothing (kitty places on 'T' alone; the spec's own chunked sender
  * carries "a=T,f=100"). c/r = display size in cells — both given, so
- * the layout is ours, not the terminal's; kitty letterboxes any aspect
- * drift. s/v = the source pixels: kitty reads the size from the PNG
+ * the layout is ours, not the terminal's. The terminal STRETCHES the
+ * payload to exactly c×r cells (kitty and coffer/portty alike; it does
+ * not letterbox), so a payload smaller than that cell box is upscaled.
+ * The app must therefore hand a payload already AT the box's pixel size
+ * (c*cell_w × r*cell_h, the source fit-width with a transparent sliver —
+ * the chafa rule); boba transmits what it is given and never resamples.
+ * s/v = the payload's pixels: kitty reads the size from the PNG
  * and ignores them, but they must be PRESENT — a receiver may require
  * the full transmission key set on the first chunk even for f=100
  * (coffer, and so portty, rejects a transfer without s/v as

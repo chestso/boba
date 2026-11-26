@@ -247,8 +247,13 @@ typedef struct TuiImageSpec
     const unsigned char *data; /* borrowed; valid for the callback */
     size_t data_len;           /* decoded byte count (INDEXED8:
                                 * src_w*src_h index bytes)          */
-    int src_w, src_h;          /* source pixels (SIXEL: the payload's
-                                * pixel dims — its display extent)  */
+    int src_w, src_h;          /* the payload's pixel dims. The terminal
+                                * stretches the payload to disp_cols ×
+                                * disp_rows CELLS, so for a 1:1 picture
+                                * these must equal that cell box's pixels
+                                * (disp_cols*cell_w × disp_rows*cell_h):
+                                * the app fit-pads the source to the box
+                                * (the chafa rule); boba never resamples. */
     int disp_cols, disp_rows;  /* display size in cells             */
     int image_id;              /* kitty i=; from TuiBlock.image_id  */
 
