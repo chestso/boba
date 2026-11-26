@@ -90,16 +90,14 @@ typedef struct TuiTerminalProfile
 
     /* Cell geometry in pixels, 0 when unknown (`CSI 16 t` reply).
      *
-     * The UNIT is the terminal's own choice — there is no ecosystem
-     * convention for this report. kitty, foot and wezterm answer in
-     * DEVICE pixels (and draw image pixels 1:1, so the pair is
-     * self-consistent); portty answers in LOGICAL pixels and scales
-     * what a client sends by its content scale; iTerm2 answers via
-     * OSC 1337;ReportCellSize in points plus a device-px-per-point
-     * scale factor. Consume these figures for pixel RESOLUTION
-     * decisions only — never for layout, which belongs in cells — and
-     * ask OSC 1337;ReportCellSize first when it matters: it is the
-     * only report that defines its units. */
+     * The unit is DEVICE pixels — the convention a graphics terminal
+     * follows: kitty, foot, wezterm and portty answer in device pixels
+     * and draw image pixels 1:1, so a canvas sized from this report
+     * lands sharp on a scaled display. The one report in other units
+     * is iTerm2's OSC 1337;ReportCellSize: the cell in points plus a
+     * device-px-per-point scale factor, the oracle when the terminal
+     * is real iTerm2. Consume these figures for pixel RESOLUTION
+     * decisions only — never for layout, which belongs in cells. */
     int cell_w_px, cell_h_px;
 
     /* Kitty keyboard protocol support: set when the terminal answered
